@@ -6,10 +6,12 @@
     "moduleResolution": "bundler",
     "jsx": "react-jsx",
     "strict": true,
+    // Suppresses type conflicts between @cloudflare/workers-types and DOM lib
+    // (fetch/Request/Response overlap). Remove only if all dep types align.
+    "skipLibCheck": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
-    "skipLibCheck": true,
     "types": ["@cloudflare/workers-types"],
     "paths": { "@/*": ["./src/*"] }
   },
