@@ -1,5 +1,7 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
+import { propertiesRouter } from './routes/properties'
+import { unitsRouter } from './routes/units'
 
 export interface Env {
   SUPABASE_URL: string
@@ -16,7 +18,8 @@ export function createApp() {
     c.json({ status: 'ok', ts: new Date().toISOString() })
   )
 
-  // Routes mounted in subsequent tasks
+  app.route('/api/properties', propertiesRouter)
+  app.route('/api/units', unitsRouter)
 
   return app
 }
