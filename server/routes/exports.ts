@@ -49,28 +49,23 @@ exportsRouter.get('/qb-iif', async (c) => {
 
   const leaseIds = (leaseRows ?? []).map((l: { id: string }) => l.id)
 
-  // Sum settled payments by charge type for this property in this period
+  // Sum charges posted for this property in this period (accrual basis)
   const totals = { rent: 0, cam: 0, utility: 0, fees: 0 }
 
   if (leaseIds.length > 0) {
-    const { data: payments } = await db
-      .from('payments')
-      .select('amount, charges(type)')
+    const { data: charges } = await db
+      .from('charges')
+      .select('amount, type')
       .in('lease_id', leaseIds)
-      .gte('payment_date', startStr)
-      .lte('payment_date', endStr)
-      .or('method.in.(check,wire,other),and(method.eq.ach_stripe,stripe_status.eq.succeeded)')
+      .gte('charge_date', startStr)
+      .lte('charge_date', endStr)
 
-    for (const p of (payments ?? [])) {
-      const row = p as { amount: number; charges: { type: string }[] | null }
-      const type = Array.isArray(row.charges) && row.charges.length > 0
-        ? row.charges[0].type
-        : ''
-      const amount = row.amount
-      if (type === 'rent')                            totals.rent    += amount
-      else if (['cam_estimate','cam_true_up'].includes(type)) totals.cam     += amount
-      else if (type.startsWith('utility'))            totals.utility += amount
-      else if (type === 'late_fee')                   totals.fees    += amount
+    for (const ch of (charges ?? [])) {
+      const charge = ch as { amount: number; type: string }
+      if (charge.type === 'rent')                                    totals.rent    += charge.amount
+      else if (['cam_estimate','cam_true_up'].includes(charge.type)) totals.cam     += charge.amount
+      else if (charge.type.startsWith('utility'))                    totals.utility += charge.amount
+      else if (charge.type === 'late_fee')                           totals.fees    += charge.amount
     }
   }
 

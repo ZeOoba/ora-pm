@@ -9,6 +9,12 @@ import { BillingDashboard } from './pages/billing/BillingDashboard'
 import { ARDashboard } from './pages/ar/ARDashboard'
 import { CriticalDatesFeed } from './pages/critical-dates/CriticalDatesFeed'
 import { QBExport } from './pages/exports/QBExport'
+import { PaymentsList }     from './pages/payments/PaymentsList'
+import { CAMList }          from './pages/cam/CAMList'
+import { ExpensesList }     from './pages/expenses/ExpensesList'
+import { BudgetsList }      from './pages/budgets/BudgetsList'
+import { RenewalsPipeline } from './pages/renewals/RenewalsPipeline'
+import { InsuranceList }    from './pages/insurance/InsuranceList'
 
 function Layout({ children }: { children: React.ReactNode }) {
   return <AppShell>{children}</AppShell>
@@ -24,5 +30,10 @@ export const router = createBrowserRouter([
   { path: '/ar', element: <Layout><ARDashboard /></Layout> },
   { path: '/critical-dates', element: <Layout><CriticalDatesFeed /></Layout> },
   { path: '/exports', element: <Layout><QBExport /></Layout> },
-  // Additional routes added as pages are built in subsequent tasks
+  { path: '/payments',  element: <Layout><PaymentsList /></Layout> },
+  { path: '/cam',       element: <Layout><CAMList /></Layout> },
+  { path: '/expenses',  element: <Layout><ExpensesList /></Layout> },
+  { path: '/budgets',   element: <Layout><BudgetsList /></Layout> },
+  { path: '/renewals',  element: <Layout><RenewalsPipeline /></Layout> },
+  { path: '/insurance', element: <Layout><InsuranceList /></Layout> },
 ])
