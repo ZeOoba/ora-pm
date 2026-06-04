@@ -7,6 +7,8 @@ import { LeasesList } from './pages/leases/LeasesList'
 import { LeaseDetail } from './pages/leases/LeaseDetail'
 import { BillingDashboard } from './pages/billing/BillingDashboard'
 import { ARDashboard } from './pages/ar/ARDashboard'
+import { CriticalDatesFeed } from './pages/critical-dates/CriticalDatesFeed'
+import { QBExport } from './pages/exports/QBExport'
 
 function Layout({ children }: { children: React.ReactNode }) {
   return <AppShell>{children}</AppShell>
@@ -20,5 +22,7 @@ export const router = createBrowserRouter([
   { path: '/leases/:id', element: <Layout><LeaseDetail /></Layout> },
   { path: '/billing', element: <Layout><BillingDashboard /></Layout> },
   { path: '/ar', element: <Layout><ARDashboard /></Layout> },
+  { path: '/critical-dates', element: <Layout><CriticalDatesFeed /></Layout> },
+  { path: '/exports', element: <Layout><QBExport /></Layout> },
   // Additional routes added as pages are built in subsequent tasks
 ])
