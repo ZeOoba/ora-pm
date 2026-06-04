@@ -5,6 +5,7 @@ import { PropertiesList } from './pages/properties/PropertiesList'
 import { TenantsList } from './pages/tenants/TenantsList'
 import { LeasesList } from './pages/leases/LeasesList'
 import { LeaseDetail } from './pages/leases/LeaseDetail'
+import { BillingDashboard } from './pages/billing/BillingDashboard'
 
 function Layout({ children }: { children: React.ReactNode }) {
   return <AppShell>{children}</AppShell>
@@ -16,5 +17,6 @@ export const router = createBrowserRouter([
   { path: '/tenants', element: <Layout><TenantsList /></Layout> },
   { path: '/leases', element: <Layout><LeasesList /></Layout> },
   { path: '/leases/:id', element: <Layout><LeaseDetail /></Layout> },
+  { path: '/billing', element: <Layout><BillingDashboard /></Layout> },
   // Additional routes added as pages are built in subsequent tasks
 ])
