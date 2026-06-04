@@ -5,6 +5,9 @@ import { PropertiesList } from './pages/properties/PropertiesList'
 import { PropertyForm } from './pages/properties/PropertyForm'
 import { PropertyDetail } from './pages/properties/PropertyDetail'
 import { TenantsList } from './pages/tenants/TenantsList'
+import { TenantForm } from './pages/tenants/TenantForm'
+import { TenantDetail } from './pages/tenants/TenantDetail'
+import { InsuranceForm } from './pages/insurance/InsuranceForm'
 import { LeasesList } from './pages/leases/LeasesList'
 import { LeaseDetail } from './pages/leases/LeaseDetail'
 import { BillingDashboard } from './pages/billing/BillingDashboard'
@@ -29,6 +32,9 @@ export const router = createBrowserRouter([
   { path: '/properties/:id/edit', element: <Layout><PropertyForm /></Layout> },
   { path: '/properties/:id', element: <Layout><PropertyDetail /></Layout> },
   { path: '/tenants', element: <Layout><TenantsList /></Layout> },
+  { path: '/tenants/new', element: <Layout><TenantForm /></Layout> },
+  { path: '/tenants/:id/edit', element: <Layout><TenantForm /></Layout> },
+  { path: '/tenants/:id', element: <Layout><TenantDetail /></Layout> },
   { path: '/leases', element: <Layout><LeasesList /></Layout> },
   { path: '/leases/:id', element: <Layout><LeaseDetail /></Layout> },
   { path: '/billing', element: <Layout><BillingDashboard /></Layout> },
@@ -41,4 +47,5 @@ export const router = createBrowserRouter([
   { path: '/budgets',   element: <Layout><BudgetsList /></Layout> },
   { path: '/renewals',  element: <Layout><RenewalsPipeline /></Layout> },
   { path: '/insurance', element: <Layout><InsuranceList /></Layout> },
+  { path: '/insurance/new', element: <Layout><InsuranceForm /></Layout> },
 ])

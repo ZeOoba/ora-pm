@@ -14,7 +14,17 @@ export function TenantsList() {
 
   return (
     <div>
-      <PageHeader title="Tenants" />
+      <PageHeader
+        title="Tenants"
+        action={
+          <Link
+            to="/tenants/new"
+            className="bg-blue-600 hover:bg-blue-700 text-white text-sm px-3 py-1.5 rounded"
+          >
+            + Add Tenant
+          </Link>
+        }
+      />
       <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
         <table className="min-w-full divide-y divide-gray-200">
           <thead className="bg-gray-50">
