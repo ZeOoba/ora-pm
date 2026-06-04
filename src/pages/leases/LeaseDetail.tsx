@@ -4,11 +4,12 @@ import { api } from '../../lib/api'
 import { PageHeader } from '../../components/PageHeader'
 import { StatusBadge } from '../../components/StatusBadge'
 import { formatCurrency, formatDate, formatSF, formatPSF } from '../../lib/format'
-import type { Lease, Tenant, Unit, Property } from '../../types'
+import type { Lease, Tenant, Unit, Property, LeaseAmendment } from '../../types'
 
 type LeaseDetail = Lease & {
   tenants: Tenant
   units: Unit & { properties: Property }
+  lease_amendments: LeaseAmendment[]
 }
 
 export function LeaseDetail() {
@@ -58,6 +59,24 @@ export function LeaseDetail() {
           <Row label="Suite">{data.units.suite}</Row>
           <Row label="SF">{formatSF(data.units.sf)}</Row>
         </Section>
+        {/* Amendments */}
+        {data.lease_amendments.length > 0 && (
+          <div className="col-span-2 bg-white rounded-lg border border-gray-200 p-4">
+            <h2 className="text-xs font-semibold text-gray-400 uppercase mb-3">
+              Amendments ({data.lease_amendments.length})
+            </h2>
+            <div className="space-y-2">
+              {data.lease_amendments.map(a => (
+                <div key={a.id} className="flex justify-between text-sm border-b border-gray-100 pb-2 last:border-0">
+                  <div>
+                    <p className="font-medium text-gray-900">{a.description}</p>
+                    <p className="text-gray-400 text-xs">Effective {formatDate(a.effective_date)}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )
