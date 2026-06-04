@@ -2,6 +2,8 @@ import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { propertiesRouter } from './routes/properties'
 import { unitsRouter } from './routes/units'
+import { tenantsRouter } from './routes/tenants'
+import { leasesRouter } from './routes/leases'
 
 export interface Env {
   SUPABASE_URL: string
@@ -20,6 +22,8 @@ export function createApp() {
 
   app.route('/api/properties', propertiesRouter)
   app.route('/api/units', unitsRouter)
+  app.route('/api/tenants', tenantsRouter)
+  app.route('/api/leases', leasesRouter)
 
   return app
 }
