@@ -25,13 +25,18 @@ export function generateIIF(transactions: IIFTransaction[]): string {
     const debits  = tx.lines.filter(l => l.amount > 0)
     const credits = tx.lines.filter(l => l.amount < 0)
 
-    for (const dr of debits) {
-      out.push(`TRNS\tGENERAL JOURNAL\t${d}\t${dr.account}\t${dr.amount.toFixed(2)}\t${tx.docNum}\t${tx.memo}`)
-      for (const cr of credits) {
-        out.push(`SPL\tGENERAL JOURNAL\t${d}\t${cr.account}\t${cr.amount.toFixed(2)}\t${tx.docNum}\t${cr.memo}`)
-      }
-      out.push('ENDTRNS')
+    if (debits.length === 0 || credits.length === 0) continue
+
+    // IIF: first debit is the TRNS line; all credits + additional debits are SPL lines
+    const [mainDebit, ...additionalDebits] = debits
+    out.push(`TRNS\tGENERAL JOURNAL\t${d}\t${mainDebit.account}\t${mainDebit.amount.toFixed(2)}\t${tx.docNum}\t${tx.memo}`)
+    for (const cr of credits) {
+      out.push(`SPL\tGENERAL JOURNAL\t${d}\t${cr.account}\t${cr.amount.toFixed(2)}\t${tx.docNum}\t${cr.memo}`)
     }
+    for (const dr of additionalDebits) {
+      out.push(`SPL\tGENERAL JOURNAL\t${d}\t${dr.account}\t${dr.amount.toFixed(2)}\t${tx.docNum}\t${dr.memo}`)
+    }
+    out.push('ENDTRNS')
   }
 
   return out.join('\n')
@@ -54,7 +59,7 @@ export interface PropertyPeriodSummary {
 }
 
 export function buildPropertyJournalEntry(s: PropertyPeriodSummary): IIFTransaction {
-  const total = s.baseRentCollected + s.camCollected + s.utilityCollected + s.lateFeeCollected
+  const total = Math.round((s.baseRentCollected + s.camCollected + s.utilityCollected + s.lateFeeCollected) * 100) / 100
   const label = format(s.periodStart, 'MMM yyyy')
   const docNum = `JE-${format(s.periodStart, 'yyyy-MM')}-${s.propertyName.replace(/\s+/g, '-').slice(0, 20)}`
 
@@ -70,6 +75,13 @@ export function buildPropertyJournalEntry(s: PropertyPeriodSummary): IIFTransact
     lines.push({ account: s.incomeAccountUtil, amount: -s.utilityCollected, memo: `Utilities – ${label}` })
   if (s.lateFeeCollected !== 0)
     lines.push({ account: s.incomeAccountFees, amount: -s.lateFeeCollected, memo: `Late fees – ${label}` })
+
+  const totalDebits  = lines.filter(l => l.amount > 0).reduce((s, l) => s + l.amount, 0)
+  const totalCredits = Math.abs(lines.filter(l => l.amount < 0).reduce((s, l) => s + l.amount, 0))
+  const diff = Math.abs(totalDebits - totalCredits)
+  if (diff > 0.01) {
+    throw new Error(`Journal entry is unbalanced: debits=${totalDebits.toFixed(2)}, credits=${totalCredits.toFixed(2)}`)
+  }
 
   return { date: s.periodStart, docNum, memo: `${s.propertyName} – ${label}`, lines }
 }
