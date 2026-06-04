@@ -15,7 +15,14 @@ export function PropertiesList() {
 
   return (
     <div>
-      <PageHeader title="Properties" />
+      <PageHeader
+        title="Properties"
+        action={
+          <Link to="/properties/new" className="bg-blue-600 hover:bg-blue-700 text-white text-sm px-3 py-1.5 rounded">
+            + Add Property
+          </Link>
+        }
+      />
       <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
         <table className="min-w-full divide-y divide-gray-200">
           <thead className="bg-gray-50">

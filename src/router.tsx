@@ -2,6 +2,8 @@ import { createBrowserRouter } from 'react-router-dom'
 import { AppShell } from './components/AppShell'
 import { Dashboard } from './pages/Dashboard'
 import { PropertiesList } from './pages/properties/PropertiesList'
+import { PropertyForm } from './pages/properties/PropertyForm'
+import { PropertyDetail } from './pages/properties/PropertyDetail'
 import { TenantsList } from './pages/tenants/TenantsList'
 import { LeasesList } from './pages/leases/LeasesList'
 import { LeaseDetail } from './pages/leases/LeaseDetail'
@@ -23,6 +25,9 @@ function Layout({ children }: { children: React.ReactNode }) {
 export const router = createBrowserRouter([
   { path: '/', element: <Layout><Dashboard /></Layout> },
   { path: '/properties', element: <Layout><PropertiesList /></Layout> },
+  { path: '/properties/new', element: <Layout><PropertyForm /></Layout> },
+  { path: '/properties/:id/edit', element: <Layout><PropertyForm /></Layout> },
+  { path: '/properties/:id', element: <Layout><PropertyDetail /></Layout> },
   { path: '/tenants', element: <Layout><TenantsList /></Layout> },
   { path: '/leases', element: <Layout><LeasesList /></Layout> },
   { path: '/leases/:id', element: <Layout><LeaseDetail /></Layout> },
