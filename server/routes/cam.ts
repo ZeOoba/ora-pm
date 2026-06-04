@@ -100,6 +100,24 @@ camRouter.post('/:id/approve', async (c) => {
   const r = rec as { true_up_amount: number; lease_id: string; reconciliation_year: number }
   const today = new Date().toISOString().slice(0, 10)
 
+  // KNOWN LIMITATION (Phase 1): A negative true-up (credit owed to tenant) is posted
+  // as a positive cam_true_up charge with "(Credit)" in the description, because
+  // charges.amount has CHECK (amount >= 0). The ar_ledger view will treat this as a
+  // DEBIT, overstating tenant AR. Credits must be reconciled manually until Phase 1.1
+  // adds a proper credit mechanism (credit_amount column or separate credits table).
+  // For now: when true_up_amount < 0, do NOT auto-post — flag for manual handling.
+  if (trueUp < 0) {
+    await db
+      .from('cam_reconciliations')
+      .update({ status: 'billed', billed_date: today, notes: `Credit of ${Math.abs(trueUp).toFixed(2)} owed to tenant — handle manually (Phase 1 limitation)` })
+      .eq('id', c.req.param('id'))
+    return c.json({
+      success: true,
+      true_up_amount: trueUp,
+      message: 'Credit owed to tenant — flagged for manual handling (not auto-posted)',
+    })
+  }
+
   await db.from('charges').insert({
     lease_id: r.lease_id,
     charge_date: today,
