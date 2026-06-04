@@ -1,0 +1,8 @@
+name = "ora-pm"
+compatibility_date = "2024-09-23"
+pages_build_output_dir = "./dist"
+
+# Secrets (set via: wrangler pages secret put <NAME>)
+# SUPABASE_URL
+# SUPABASE_SERVICE_ROLE_KEY
+# CRON_SECRET            ← random 32-char string; ORA scheduler sends as Bearer token
