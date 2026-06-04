@@ -11,6 +11,9 @@ import { reportsRouter } from './routes/reports'
 import { camRouter } from './routes/cam'
 import { expensesRouter } from './routes/expenses'
 import { budgetsRouter } from './routes/budgets'
+import { renewalsRouter } from './routes/renewals'
+import { insuranceRouter } from './routes/insurance'
+import { exportsRouter } from './routes/exports'
 
 export interface Env {
   SUPABASE_URL: string
@@ -38,6 +41,9 @@ export function createApp() {
   app.route('/api/cam', camRouter)
   app.route('/api/expenses', expensesRouter)
   app.route('/api/budgets', budgetsRouter)
+  app.route('/api/renewals', renewalsRouter)
+  app.route('/api/insurance', insuranceRouter)
+  app.route('/api/exports', exportsRouter)
 
   return app
 }
