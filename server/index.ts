@@ -4,6 +4,9 @@ import { propertiesRouter } from './routes/properties'
 import { unitsRouter } from './routes/units'
 import { tenantsRouter } from './routes/tenants'
 import { leasesRouter } from './routes/leases'
+import { chargesRouter } from './routes/charges'
+import { paymentsRouter } from './routes/payments'
+import { cronRouter } from './routes/cron'
 
 export interface Env {
   SUPABASE_URL: string
@@ -24,6 +27,9 @@ export function createApp() {
   app.route('/api/units', unitsRouter)
   app.route('/api/tenants', tenantsRouter)
   app.route('/api/leases', leasesRouter)
+  app.route('/api/charges', chargesRouter)
+  app.route('/api/payments', paymentsRouter)
+  app.route('/api/cron', cronRouter)
 
   return app
 }
