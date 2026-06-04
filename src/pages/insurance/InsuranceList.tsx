@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
+import { Link } from 'react-router-dom'
 import { api } from '../../lib/api'
 import { PageHeader } from '../../components/PageHeader'
 import { StatusBadge } from '../../components/StatusBadge'
@@ -17,7 +18,17 @@ export function InsuranceList() {
 
   return (
     <div>
-      <PageHeader title="Insurance Certificates" />
+      <PageHeader
+        title="Insurance Certificates"
+        action={
+          <Link
+            to="/insurance/new"
+            className="bg-blue-600 hover:bg-blue-700 text-white text-sm px-3 py-1.5 rounded"
+          >
+            + Add Certificate
+          </Link>
+        }
+      />
       <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
         <table className="min-w-full divide-y divide-gray-200 text-sm">
           <thead className="bg-gray-50">
