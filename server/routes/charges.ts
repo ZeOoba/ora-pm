@@ -29,13 +29,13 @@ chargesRouter.post('/', async (c) => {
 
 chargesRouter.delete('/:id', async (c) => {
   const db = getDb(c.env)
-  // Only manual charges can be deleted
   const { data: charge } = await db
     .from('charges')
     .select('source')
     .eq('id', c.req.param('id'))
     .single()
-  if ((charge as { source: string } | null)?.source === 'auto') {
+  if (!charge) return c.json({ error: 'Charge not found' }, 404)
+  if ((charge as { source: string }).source === 'auto') {
     return c.json({ error: 'Auto-generated charges cannot be deleted' }, 400)
   }
   const { error } = await db.from('charges').delete().eq('id', c.req.param('id'))

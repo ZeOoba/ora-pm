@@ -2,14 +2,14 @@ import { describe, it, expect } from 'vitest'
 import { bucketByAge, buildAgingRow } from '../../server/lib/ar-aging'
 
 describe('bucketByAge', () => {
-  it('returns current for 0 days past due', () => expect(bucketByAge(100, 0).bucket).toBe('current'))
-  it('returns current for negative (not yet due)', () => expect(bucketByAge(100, -5).bucket).toBe('current'))
-  it('returns 1_30 for 15 days past due', () => expect(bucketByAge(100, 15).bucket).toBe('1_30'))
-  it('returns 31_60 for 45 days past due', () => expect(bucketByAge(100, 45).bucket).toBe('31_60'))
-  it('returns 61_90 for 75 days past due', () => expect(bucketByAge(100, 75).bucket).toBe('61_90'))
-  it('returns 90_plus for 91 days past due', () => expect(bucketByAge(100, 91).bucket).toBe('90_plus'))
-  it('returns 1_30 for exactly 30 days past due', () => expect(bucketByAge(100, 30).bucket).toBe('1_30'))
-  it('returns 31_60 for exactly 31 days', () => expect(bucketByAge(100, 31).bucket).toBe('31_60'))
+  it('returns current for 0 days past due', () => expect(bucketByAge(0).bucket).toBe('current'))
+  it('returns current for negative (not yet due)', () => expect(bucketByAge(-5).bucket).toBe('current'))
+  it('returns 1_30 for 15 days past due', () => expect(bucketByAge(15).bucket).toBe('1_30'))
+  it('returns 31_60 for 45 days past due', () => expect(bucketByAge(45).bucket).toBe('31_60'))
+  it('returns 61_90 for 75 days past due', () => expect(bucketByAge(75).bucket).toBe('61_90'))
+  it('returns 90_plus for 91 days past due', () => expect(bucketByAge(91).bucket).toBe('90_plus'))
+  it('returns 1_30 for exactly 30 days past due', () => expect(bucketByAge(30).bucket).toBe('1_30'))
+  it('returns 31_60 for exactly 31 days', () => expect(bucketByAge(31).bucket).toBe('31_60'))
 })
 
 describe('buildAgingRow', () => {

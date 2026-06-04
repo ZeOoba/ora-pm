@@ -1,6 +1,6 @@
 export type AgingBucket = 'current' | '1_30' | '31_60' | '61_90' | '90_plus'
 
-export function bucketByAge(_amount: number, daysPastDue: number): { bucket: AgingBucket } {
+export function bucketByAge(daysPastDue: number): { bucket: AgingBucket } {
   if (daysPastDue <= 0) return { bucket: 'current' }
   if (daysPastDue <= 30) return { bucket: '1_30' }
   if (daysPastDue <= 60) return { bucket: '31_60' }
@@ -50,7 +50,7 @@ export function buildAgingRow(
     if (outstanding <= 0) continue
     const dueDate = new Date(charge.due_date + 'T00:00:00')
     const daysPast = Math.floor((asOfDate.getTime() - dueDate.getTime()) / 86_400_000)
-    const { bucket } = bucketByAge(outstanding, daysPast)
+    const { bucket } = bucketByAge(daysPast)
     row.balance += outstanding
     if (bucket === 'current')    row.current      += outstanding
     else if (bucket === '1_30')  row.days_1_30    += outstanding
