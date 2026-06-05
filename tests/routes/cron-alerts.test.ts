@@ -136,4 +136,113 @@ describe('POST /api/cron/delinquency-check', () => {
     const body = await res.json() as { late_fees_posted: number }
     expect(body.late_fees_posted).toBe(0)
   })
+
+  it('posts a late fee for an overdue lease with no existing fee', async () => {
+    let chargesCall = 0
+    mockFrom.mockImplementation((table: string) => {
+      if (table === 'ar_ledger') return {
+        select: vi.fn().mockReturnValue({
+          gt: vi.fn().mockResolvedValue({
+            data: [{ lease_id: 'lease_1', tenant_id: 't1', tenant_name: 'Acme', property_name: null, suite: '101', balance: 1200 }],
+            error: null,
+          }),
+        }),
+      }
+      if (table === 'charges') {
+        chargesCall++
+        if (chargesCall === 1) {
+          // overdue lookup: select().eq().lte().order().limit()
+          return {
+            select: vi.fn().mockReturnValue({
+              eq: vi.fn().mockReturnValue({
+                lte: vi.fn().mockReturnValue({
+                  order: vi.fn().mockReturnValue({
+                    limit: vi.fn().mockResolvedValue({ data: [{ id: 'ch1', due_date: '2026-04-01', amount: 1200 }], error: null }),
+                  }),
+                }),
+              }),
+            }),
+          }
+        }
+        if (chargesCall === 2) {
+          // existing-fee lookup: select().eq().eq().gte().limit() — none found
+          return {
+            select: vi.fn().mockReturnValue({
+              eq: vi.fn().mockReturnValue({
+                eq: vi.fn().mockReturnValue({
+                  gte: vi.fn().mockReturnValue({
+                    limit: vi.fn().mockResolvedValue({ data: [], error: null }),
+                  }),
+                }),
+              }),
+            }),
+          }
+        }
+        // insert late_fee
+        return { insert: vi.fn().mockResolvedValue({ error: null }) }
+      }
+      return { select: vi.fn() }
+    })
+
+    const res = await app.request('/api/cron/delinquency-check', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer test' },
+    }, env)
+    expect(res.status).toBe(200)
+    const body = await res.json() as { late_fees_posted: number; delinquent_count: number }
+    expect(body.late_fees_posted).toBe(1)
+    expect(body.delinquent_count).toBe(1)
+  })
+
+  it('does not double-post when a late fee already exists this period', async () => {
+    let chargesCall = 0
+    mockFrom.mockImplementation((table: string) => {
+      if (table === 'ar_ledger') return {
+        select: vi.fn().mockReturnValue({
+          gt: vi.fn().mockResolvedValue({
+            data: [{ lease_id: 'lease_1', tenant_id: 't1', tenant_name: 'Acme', property_name: null, suite: '101', balance: 1200 }],
+            error: null,
+          }),
+        }),
+      }
+      if (table === 'charges') {
+        chargesCall++
+        if (chargesCall === 1) {
+          return {
+            select: vi.fn().mockReturnValue({
+              eq: vi.fn().mockReturnValue({
+                lte: vi.fn().mockReturnValue({
+                  order: vi.fn().mockReturnValue({
+                    limit: vi.fn().mockResolvedValue({ data: [{ id: 'ch1', due_date: '2026-04-01', amount: 1200 }], error: null }),
+                  }),
+                }),
+              }),
+            }),
+          }
+        }
+        // existing-fee lookup returns a row → already posted this period
+        return {
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({
+              eq: vi.fn().mockReturnValue({
+                gte: vi.fn().mockReturnValue({
+                  limit: vi.fn().mockResolvedValue({ data: [{ id: 'fee1' }], error: null }),
+                }),
+              }),
+            }),
+          }),
+        }
+      }
+      return { select: vi.fn() }
+    })
+
+    const res = await app.request('/api/cron/delinquency-check', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer test' },
+    }, env)
+    expect(res.status).toBe(200)
+    const body = await res.json() as { late_fees_posted: number; delinquent_count: number }
+    expect(body.late_fees_posted).toBe(0)
+    expect(body.delinquent_count).toBe(1)
+  })
 })
