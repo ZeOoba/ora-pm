@@ -92,4 +92,96 @@ describe('GET /api/portal/charges', () => {
     const body = await res.json() as { data: { id: string }[] }
     expect(body.data).toHaveLength(1)
   })
+
+  it('returns empty array when tenant has no active leases', async () => {
+    mockFrom.mockImplementation((table: string) => {
+      if (table === 'tenants') return {
+        select: vi.fn().mockReturnValue({
+          eq: vi.fn().mockReturnValue({
+            single: vi.fn().mockResolvedValue({ data: { id: 'tenant_1' }, error: null }),
+          }),
+        }),
+      }
+      if (table === 'leases') return {
+        select: vi.fn().mockReturnValue({
+          eq: vi.fn().mockReturnValue({
+            eq: vi.fn().mockResolvedValue({ data: [], error: null }),
+          }),
+        }),
+      }
+      return { select: vi.fn() }
+    })
+
+    const res = await app.request('/api/portal/charges', {
+      headers: { Authorization: 'Bearer valid' },
+    }, env)
+    expect(res.status).toBe(200)
+    const body = await res.json() as { data: unknown[] }
+    expect(body.data).toHaveLength(0)
+  })
+})
+
+describe('PATCH /api/portal/autopay', () => {
+  it('enables autopay with payment method', async () => {
+    mockFrom.mockImplementation((table: string) => {
+      if (table === 'tenants') return {
+        select: vi.fn().mockReturnValue({
+          eq: vi.fn().mockReturnValue({
+            single: vi.fn().mockResolvedValue({ data: { id: 'tenant_1' }, error: null }),
+          }),
+        }),
+      }
+      if (table === 'leases') return {
+        select: vi.fn().mockReturnValue({
+          eq: vi.fn().mockReturnValue({
+            single: vi.fn().mockResolvedValue({ data: { id: 'lease_1', tenant_id: 'tenant_1' }, error: null }),
+          }),
+        }),
+        update: vi.fn().mockReturnValue({
+          eq: vi.fn().mockResolvedValue({ error: null }),
+        }),
+      }
+      return { select: vi.fn() }
+    })
+
+    const res = await app.request('/api/portal/autopay', {
+      method: 'PATCH',
+      headers: { Authorization: 'Bearer valid', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lease_id: 'lease_1', enabled: true, payment_method_id: 'pm_bank' }),
+    }, env)
+    expect(res.status).toBe(200)
+    const body = await res.json() as { autopay_enabled: boolean }
+    expect(body.autopay_enabled).toBe(true)
+  })
+
+  it('returns 404 when lease belongs to a different tenant (IDOR guard)', async () => {
+    mockFrom.mockImplementation((table: string) => {
+      if (table === 'tenants') return {
+        select: vi.fn().mockReturnValue({
+          eq: vi.fn().mockReturnValue({
+            single: vi.fn().mockResolvedValue({ data: { id: 'tenant_1' }, error: null }),
+          }),
+        }),
+      }
+      if (table === 'leases') return {
+        select: vi.fn().mockReturnValue({
+          eq: vi.fn().mockReturnValue({
+            single: vi.fn().mockResolvedValue({
+              // lease belongs to a DIFFERENT tenant
+              data: { id: 'lease_other', tenant_id: 'tenant_other' },
+              error: null,
+            }),
+          }),
+        }),
+      }
+      return { select: vi.fn() }
+    })
+
+    const res = await app.request('/api/portal/autopay', {
+      method: 'PATCH',
+      headers: { Authorization: 'Bearer valid', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lease_id: 'lease_other', enabled: true }),
+    }, env)
+    expect(res.status).toBe(404)
+  })
 })
