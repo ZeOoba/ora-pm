@@ -225,19 +225,20 @@ cronRouter.post('/delinquency-check', async (c) => {
     .gt('balance', 0)
 
   if (arErr) return c.json({ error: arErr.message }, 500)
-  if (!arRows || arRows.length === 0) return c.json({ late_fees_posted: 0, delinquent_count: 0 })
+  if (!arRows || arRows.length === 0) return c.json({ late_fees_posted: 0, delinquent_count: 0, emailed: false })
 
   type ARRow = { lease_id: string; tenant_id: string; tenant_name: string; property_name: string | null; suite: string | null; balance: number }
+
+  // GRACE_DAYS cutoff is the same for every row — compute once.
+  const cutoffDate = new Date()
+  cutoffDate.setDate(cutoffDate.getDate() - GRACE_DAYS)
+  const cutoffStr = cutoffDate.toISOString().slice(0, 10)
 
   let lateFeesPosted = 0
   const delinquentLeases: { tenant_name: string; property: string; balance: number }[] = []
 
   for (const ar of arRows as ARRow[]) {
     // Find oldest unpaid charge to check if > GRACE_DAYS past due
-    const cutoffDate = new Date()
-    cutoffDate.setDate(cutoffDate.getDate() - GRACE_DAYS)
-    const cutoffStr = cutoffDate.toISOString().slice(0, 10)
-
     const { data: overdueCharges } = await db
       .from('charges')
       .select('id, due_date, amount')
@@ -276,9 +277,18 @@ cronRouter.post('/delinquency-check', async (c) => {
       idempotency_key: `late_fee_${ar.lease_id}_${year}_${month}`,
     })
 
+    const property = [ar.property_name, ar.suite].filter(Boolean).join(' ')
     if (!feeErr) {
       lateFeesPosted++
-      delinquentLeases.push({ tenant_name: ar.tenant_name, property: [ar.property_name, ar.suite].filter(Boolean).join(' '), balance: ar.balance + LATE_FEE_AMOUNT })
+      delinquentLeases.push({ tenant_name: ar.tenant_name, property, balance: ar.balance + LATE_FEE_AMOUNT })
+    } else if (feeErr.code === '23505') {
+      // Unique idempotency_key collision — a concurrent/prior run already posted this
+      // month's fee (the existingFee guard missed it by a hair). Still a delinquent tenant.
+      delinquentLeases.push({ tenant_name: ar.tenant_name, property, balance: ar.balance })
+    } else {
+      // Real insert failure — surface it so a delinquent tenant isn't silently dropped.
+      console.error(`late_fee insert failed for lease ${ar.lease_id}: ${feeErr.message}`)
+      delinquentLeases.push({ tenant_name: ar.tenant_name, property, balance: ar.balance })
     }
   }
 
