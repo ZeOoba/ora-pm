@@ -59,6 +59,8 @@ describe('POST /api/leases/:id/notices', () => {
       body: JSON.stringify({ notice_type: 'late_payment', sent_date: '2026-06-05', method: 'email' }),
     }, env)
     expect(res.status).toBe(201)
+    const body = await res.json() as { data: { id: string } }
+    expect(body.data.id).toBe('n2')
   })
 
   it('returns 400 when notice_type is missing', async () => {
