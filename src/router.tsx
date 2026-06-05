@@ -1,5 +1,7 @@
 import { createBrowserRouter } from 'react-router-dom'
 import { AppShell } from './components/AppShell'
+import { AdminAuthGuard } from './components/AdminAuthGuard'
+import { AdminLogin } from './pages/auth/AdminLogin'
 import { Dashboard } from './pages/Dashboard'
 import { PropertiesList } from './pages/properties/PropertiesList'
 import { PropertyForm } from './pages/properties/PropertyForm'
@@ -26,10 +28,15 @@ import { UnitsPage } from './pages/units/UnitsPage'
 import { RentRoll } from './pages/reports/RentRoll'
 
 function Layout({ children }: { children: React.ReactNode }) {
-  return <AppShell>{children}</AppShell>
+  return (
+    <AdminAuthGuard>
+      <AppShell>{children}</AppShell>
+    </AdminAuthGuard>
+  )
 }
 
 export const router = createBrowserRouter([
+  { path: '/login', element: <AdminLogin /> },
   { path: '/', element: <Layout><Dashboard /></Layout> },
   { path: '/properties', element: <Layout><PropertiesList /></Layout> },
   { path: '/properties/new', element: <Layout><PropertyForm /></Layout> },
