@@ -47,5 +47,7 @@ describe('POST /api/tenants/:id/correspondence', () => {
       body: JSON.stringify({ direction: 'outbound' }),
     }, env)
     expect(res.status).toBe(400)
+    const body = await res.json() as { error: string }
+    expect(body.error).toMatch(/required/)
   })
 })
