@@ -34,3 +34,53 @@ reportsRouter.get('/critical-dates', async (c) => {
   if (error) return c.json({ error: error.message }, 500)
   return c.json({ data })
 })
+
+// Actuals per budget category for a property+year (for budget vs actual).
+reportsRouter.get('/actuals', async (c) => {
+  const db = getDb(c.env)
+  const propertyId = c.req.query('property_id')
+  const year = c.req.query('year')
+  if (!propertyId || !year) return c.json({ error: 'property_id and year are required' }, 400)
+  const start = `${year}-01-01`
+  const end = `${year}-12-31`
+
+  // Expense actuals by category (expenses.category aligns with budget expense categories)
+  const { data: expenses, error: exErr } = await db
+    .from('expenses')
+    .select('category, amount')
+    .eq('property_id', propertyId)
+    .gte('expense_date', start).lte('expense_date', end)
+  if (exErr) return c.json({ error: exErr.message }, 500)
+
+  // Income actuals from charges on this property's leases, mapped to income budget categories
+  const { data: unitRows } = await db.from('units').select('id').eq('property_id', propertyId)
+  const unitIds = (unitRows ?? []).map((u: { id: string }) => u.id)
+  let leaseIds: string[] = []
+  if (unitIds.length) {
+    const { data: leaseRows } = await db.from('leases').select('id').in('unit_id', unitIds)
+    leaseIds = (leaseRows ?? []).map((l: { id: string }) => l.id)
+  }
+  let charges: { type: string; amount: number }[] = []
+  if (leaseIds.length) {
+    const { data: chargeRows } = await db
+      .from('charges')
+      .select('type, amount')
+      .in('lease_id', leaseIds)
+      .gte('charge_date', start).lte('charge_date', end)
+    charges = (chargeRows ?? []) as { type: string; amount: number }[]
+  }
+
+  const actuals: Record<string, number> = {}
+  const add = (cat: string, amt: number) => { actuals[cat] = (actuals[cat] ?? 0) + amt }
+
+  for (const e of (expenses ?? []) as { category: string; amount: number }[]) add(e.category, e.amount)
+  for (const ch of charges) {
+    if (ch.type === 'rent') add('rental_income', ch.amount)
+    else if (ch.type === 'cam_estimate' || ch.type === 'cam_true_up') add('cam_income', ch.amount)
+    else add('other_income', ch.amount)
+  }
+
+  // round
+  for (const k of Object.keys(actuals)) actuals[k] = Math.round(actuals[k] * 100) / 100
+  return c.json({ data: actuals })
+})
