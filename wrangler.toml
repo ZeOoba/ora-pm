@@ -8,3 +8,9 @@ pages_build_output_dir = "./dist"
 # CRON_SECRET            ← random 32-char string; ORA scheduler sends as Bearer token
 # STRIPE_SECRET_KEY      ← set via wrangler pages secret put STRIPE_SECRET_KEY
 # STRIPE_WEBHOOK_SECRET  ← set via wrangler pages secret put STRIPE_WEBHOOK_SECRET
+
+# Scheduled HTTP crons — invoked by the ORA fleet scheduler via POST with
+# `Authorization: Bearer <CRON_SECRET>` (Cloudflare Pages has no native cron triggers):
+#   POST /api/cron/monthly-billing            — monthly, 1st of month
+#   POST /api/cron/critical-dates-alerts      — daily ~09:00 ET
+#   POST /api/cron/delinquency-check          — daily ~09:05 ET

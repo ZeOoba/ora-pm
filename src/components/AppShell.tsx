@@ -3,6 +3,7 @@ import { Link, useLocation } from 'react-router-dom'
 const NAV = [
   { to: '/', label: 'Dashboard' },
   { to: '/properties', label: 'Properties' },
+  { to: '/units', label: 'Unit Matrix' },
   { to: '/tenants', label: 'Tenants' },
   { to: '/leases', label: 'Leases' },
   { to: '/billing', label: 'Billing' },
@@ -15,6 +16,7 @@ const NAV = [
   { to: '/renewals', label: 'Renewals' },
   { to: '/insurance', label: 'Insurance' },
   { to: '/exports', label: 'QB Export' },
+  { to: '/rent-roll', label: 'Rent Roll' },
 ]
 
 export function AppShell({ children }: { children: React.ReactNode }) {
