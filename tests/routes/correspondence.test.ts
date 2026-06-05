@@ -1,0 +1,51 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { createApp } from '../../server/index'
+
+const mockFrom = vi.hoisted(() => vi.fn())
+vi.mock('@supabase/supabase-js', () => ({ createClient: () => ({ from: mockFrom }) }))
+
+const env = {
+  SUPABASE_URL: 'http://localhost',
+  SUPABASE_SERVICE_ROLE_KEY: 'test',
+  CRON_SECRET: 'test',
+  STRIPE_SECRET_KEY: 'sk_test_dummy',
+  STRIPE_WEBHOOK_SECRET: 'whsec_dummy',
+}
+const app = createApp()
+beforeEach(() => vi.clearAllMocks())
+
+describe('POST /api/tenants/:id/correspondence', () => {
+  it('creates a correspondence entry and returns 201', async () => {
+    mockFrom.mockImplementation((table: string) => {
+      if (table === 'correspondence_log') return {
+        insert: vi.fn().mockReturnValue({
+          select: vi.fn().mockReturnValue({
+            single: vi.fn().mockResolvedValue({
+              data: { id: 'c1', tenant_id: 'tenant_1', direction: 'outbound', contact_date: '2026-06-05', subject: 'Rent due', summary: 'Called about June rent', method: 'phone' },
+              error: null,
+            }),
+          }),
+        }),
+      }
+      return { select: vi.fn() }
+    })
+
+    const res = await app.request('/api/tenants/tenant_1/correspondence', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ direction: 'outbound', contact_date: '2026-06-05', subject: 'Rent due', summary: 'Called about June rent', method: 'phone' }),
+    }, env)
+    expect(res.status).toBe(201)
+    const body = await res.json() as { data: { id: string } }
+    expect(body.data.id).toBe('c1')
+  })
+
+  it('returns 400 when required fields are missing', async () => {
+    const res = await app.request('/api/tenants/tenant_1/correspondence', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ direction: 'outbound' }),
+    }, env)
+    expect(res.status).toBe(400)
+  })
+})
