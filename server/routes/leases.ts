@@ -21,7 +21,7 @@ leasesRouter.get('/:id', async (c) => {
   const db = getDb(c.env)
   const { data, error } = await db
     .from('leases')
-    .select('*, tenants(*), units(*, properties(*)), lease_amendments(*), lease_documents(*), broker_commissions(*)')
+    .select('*, tenants(*), units(*, properties(*)), lease_amendments(*), lease_documents(*), broker_commissions(*), tenant_notices(*)')
     .eq('id', c.req.param('id'))
     .single()
   if (error) return c.json({ error: error.message }, 404)
@@ -64,6 +64,34 @@ leasesRouter.post('/:id/amendments', async (c) => {
   const body = await c.req.json()
   const { data, error } = await db
     .from('lease_amendments')
+    .insert({ ...body, lease_id: c.req.param('id') })
+    .select()
+    .single()
+  if (error) return c.json({ error: error.message }, 400)
+  return c.json({ data }, 201)
+})
+
+// GET /api/leases/:id/notices
+leasesRouter.get('/:id/notices', async (c) => {
+  const db = getDb(c.env)
+  const { data, error } = await db
+    .from('tenant_notices')
+    .select('*')
+    .eq('lease_id', c.req.param('id'))
+    .order('sent_date', { ascending: false })
+  if (error) return c.json({ error: error.message }, 500)
+  return c.json({ data })
+})
+
+// POST /api/leases/:id/notices
+leasesRouter.post('/:id/notices', async (c) => {
+  const body = await c.req.json()
+  if (!body.notice_type || !body.sent_date || !body.method) {
+    return c.json({ error: 'notice_type, sent_date, method required' }, 400)
+  }
+  const db = getDb(c.env)
+  const { data, error } = await db
+    .from('tenant_notices')
     .insert({ ...body, lease_id: c.req.param('id') })
     .select()
     .single()
