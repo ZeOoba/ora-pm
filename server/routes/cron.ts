@@ -161,7 +161,10 @@ cronRouter.post('/critical-dates-alerts', async (c) => {
     }))
   )
 
-  await db.from('sent_notifications').insert(notifications)
+  // Record dedup rows BEFORE emailing — if this fails, skip the email so the
+  // next run retries cleanly rather than re-sending alerts the principals already got.
+  const { error: insErr } = await db.from('sent_notifications').insert(notifications)
+  if (insErr) return c.json({ error: `Failed to record notifications: ${insErr.message}` }, 500)
 
   // Build email digest
   const urgencyOrder: Record<string, number> = { overdue: 0, urgent: 1, warning: 2, notice: 3 }
@@ -180,20 +183,25 @@ cronRouter.post('/critical-dates-alerts', async (c) => {
   let emailed = false
   if (c.env.RESEND_API_KEY) {
     const fromEmail = c.env.RESEND_FROM_EMAIL ?? 'pm@oxfordra.net'
-    const emailRes = await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${c.env.RESEND_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        from: `ORA Property Manager <${fromEmail}>`,
-        to: RECIPIENTS,
-        subject: `[ORA PM] ${newAlerts.length} Critical Date${newAlerts.length > 1 ? 's' : ''} — ${new Date().toISOString().slice(0,10)}`,
-        text: bodyText,
-      }),
-    })
-    emailed = emailRes.ok
+    try {
+      const emailRes = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${c.env.RESEND_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          from: `ORA Property Manager <${fromEmail}>`,
+          to: RECIPIENTS,
+          subject: `[ORA PM] ${newAlerts.length} Critical Date${newAlerts.length > 1 ? 's' : ''} — ${new Date().toISOString().slice(0,10)}`,
+          text: bodyText,
+        }),
+      })
+      emailed = emailRes.ok
+    } catch (err) {
+      // Network failure — dedup rows already recorded; report not-emailed, don't 500 the cron.
+      console.error('Resend fetch failed:', err)
+    }
   }
 
   return c.json({ new_alerts: newAlerts.length, skipped: criticalDates.length - newAlerts.length, emailed })
