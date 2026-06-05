@@ -114,3 +114,26 @@ describe('POST /api/cron/critical-dates-alerts', () => {
     expect(body.skipped).toBe(1)
   })
 })
+
+describe('POST /api/cron/delinquency-check', () => {
+  it('returns 401 without cron secret', async () => {
+    const res = await app.request('/api/cron/delinquency-check', { method: 'POST' }, env)
+    expect(res.status).toBe(401)
+  })
+
+  it('returns 0 late fees when no delinquent leases', async () => {
+    mockFrom.mockImplementation(() => ({
+      select: vi.fn().mockReturnValue({
+        gt: vi.fn().mockResolvedValue({ data: [], error: null }),
+      }),
+    }))
+
+    const res = await app.request('/api/cron/delinquency-check', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer test' },
+    }, env)
+    expect(res.status).toBe(200)
+    const body = await res.json() as { late_fees_posted: number }
+    expect(body.late_fees_posted).toBe(0)
+  })
+})
