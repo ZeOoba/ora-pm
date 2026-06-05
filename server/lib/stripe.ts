@@ -4,8 +4,6 @@ import Stripe from 'stripe'
 export function getStripe(secretKey: string): Stripe {
   if (!secretKey) throw new Error('STRIPE_SECRET_KEY is required')
   return new Stripe(secretKey, {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    apiVersion: '2024-06-20' as any,
     httpClient: Stripe.createFetchHttpClient(),
   })
 }
