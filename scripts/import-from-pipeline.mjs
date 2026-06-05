@@ -49,7 +49,6 @@ const PROPERTY_META = {
   'REDACTED-040':     { name: 'REDACTED-027',           address: 'REDACTED-027',           city: 'Columbus',     state: 'OH', zip: null,    property_type: 'industrial', entity_llc: null },
   'REDACTED-030':   { name: 'REDACTED-016',         address: 'REDACTED-016',         city: 'Cambridge',    state: 'MD', zip: null,    property_type: 'industrial', entity_llc: null },
   'REDACTED-033':   { name: 'REDACTED-019',          address: 'REDACTED-019',          city: 'Owings Mills', state: 'MD', zip: null,    property_type: 'industrial', entity_llc: null },
-  'REDACTED-026': { name: 'REDACTED-026 Ave',       address: 'REDACTED-026 Ave',       city: 'Beltsville',   state: 'MD', zip: '20705', property_type: 'industrial', entity_llc: null },
   'REDACTED-044':        { name: 'REDACTED-023',          address: 'REDACTED-023',          city: 'Columbus',     state: 'OH', zip: null,    property_type: 'industrial', entity_llc: null },
   'REDACTED-042':       { name: 'REDACTED-021',          address: 'REDACTED-021',          city: 'Baltimore',    state: 'MD', zip: null,    property_type: 'industrial', entity_llc: null },
   'E 5th Ave':      { name: 'REDACTED-028',           address: 'REDACTED-028',           city: 'Columbus',     state: 'OH', zip: null,    property_type: 'industrial', entity_llc: null },
@@ -63,6 +62,13 @@ const PROPERTY_META = {
   'Red Branch':     { name: 'REDACTED-006',     address: 'REDACTED-010',       city: 'Columbia',     state: 'MD', zip: '21045', property_type: 'industrial', entity_llc: null },
   'REDACTED-035':    { name: 'REDACTED-009',      address: 'REDACTED-009',      city: 'Columbus',     state: 'OH', zip: null,    property_type: 'industrial', entity_llc: null },
 }
+
+// Pipeline labels that appear in the rent roll but are NOT owned/managed properties
+// and must never be imported as such:
+//   - "REDACTED-026": SOLD via seller financing; it is a LOAN (note receivable) to
+//     REDACTED-001. The "$REDACTED-045/mo" is a loan payment, not rent. Belongs
+//     in a debt/notes module, not the rent roll.
+const EXCLUDE = new Set(['REDACTED-026'])
 
 // ── load .env ─────────────────────────────────────────────────────────────────
 function loadEnv() {
@@ -157,11 +163,17 @@ const all = JSON.parse(readFileSync(FILE, 'utf8'))
 
 function labelsToRun() {
   if (ALL) {
-    const present = [...new Set(all.map((r) => r.p))]
+    const present = [...new Set(all.map((r) => r.p))].filter((p) => !EXCLUDE.has(p))
     const known = present.filter((p) => PROPERTY_META[p])
     const unknown = present.filter((p) => !PROPERTY_META[p])
-    if (unknown.length) console.warn(`\n[WARN] No PROPERTY_META for: ${unknown.join(', ')} — skipped.\n`)
+    const excluded = [...new Set(all.map((r) => r.p))].filter((p) => EXCLUDE.has(p))
+    if (excluded.length) console.warn(`[EXCLUDED — not managed properties]: ${excluded.join(', ')}`)
+    if (unknown.length) console.warn(`[WARN] No PROPERTY_META for: ${unknown.join(', ')} — skipped.`)
     return known.sort()
+  }
+  if (EXCLUDE.has(PROPERTY_LABEL)) {
+    console.error(`"${PROPERTY_LABEL}" is excluded (not a managed property — see EXCLUDE in this script).`)
+    process.exit(1)
   }
   return [PROPERTY_LABEL]
 }
