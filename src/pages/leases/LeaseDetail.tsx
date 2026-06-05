@@ -272,7 +272,7 @@ export function LeaseDetail() {
                     <p className="text-sm font-medium text-gray-900">{doc.name}</p>
                     <p className="text-xs text-gray-500 capitalize">{doc.type.replace(/_/g, ' ')} · {doc.uploaded_at.slice(0, 10)}</p>
                   </div>
-                  <span className="text-xs bg-gray-100 text-gray-500 px-2 py-0.5 rounded">PDF</span>
+                  <span className="text-xs bg-gray-100 text-gray-500 px-2 py-0.5 rounded">{doc.storage_path.split('.').pop()?.toUpperCase() ?? 'FILE'}</span>
                 </div>
               ))}
             </div>
