@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
+import { adminAuthMiddleware } from './middleware/admin-auth'
 import { propertiesRouter } from './routes/properties'
 import { unitsRouter } from './routes/units'
 import { tenantsRouter } from './routes/tenants'
@@ -41,6 +42,21 @@ export function createApp() {
   app.get('/api/health', (c) =>
     c.json({ status: 'ok', ts: new Date().toISOString() })
   )
+
+  // Admin auth: gate all /api/* routes except public/already-authed paths
+  const ADMIN_EXEMPT = [
+    '/api/webhooks',
+    '/api/cron',
+    '/api/portal',
+    '/api/admin',
+    '/api/health',
+    '/api/stripe',
+  ]
+  app.use('/api/*', async (c, next) => {
+    const path = new URL(c.req.url).pathname
+    if (ADMIN_EXEMPT.some(prefix => path.startsWith(prefix))) return next()
+    return adminAuthMiddleware(c as Parameters<typeof adminAuthMiddleware>[0], next)
+  })
 
   app.route('/api/properties', propertiesRouter)
   app.route('/api/units', unitsRouter)
