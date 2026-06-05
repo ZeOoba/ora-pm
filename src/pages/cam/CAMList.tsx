@@ -64,9 +64,10 @@ export function CAMList() {
 
   // ── Filtered table rows ────────────────────────────────────────────────────
   const filteredRows = (camRows ?? []).filter(row => {
-    if (!propertyId) return true
-    const propName = properties?.find(p => p.id === propertyId)?.name
-    if (propName && row.leases?.units?.properties?.name !== propName) return false
+    if (propertyId) {
+      const propName = properties?.find(p => p.id === propertyId)?.name
+      if (row.leases?.units?.properties?.name !== propName) return false
+    }
     if (year && row.reconciliation_year !== year) return false
     return true
   })

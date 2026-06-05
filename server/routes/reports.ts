@@ -53,11 +53,13 @@ reportsRouter.get('/actuals', async (c) => {
   if (exErr) return c.json({ error: exErr.message }, 500)
 
   // Income actuals from charges on this property's leases, mapped to income budget categories
-  const { data: unitRows } = await db.from('units').select('id').eq('property_id', propertyId)
+  const { data: unitRows, error: unitErr } = await db.from('units').select('id').eq('property_id', propertyId)
+  if (unitErr) return c.json({ error: unitErr.message }, 500)
   const unitIds = (unitRows ?? []).map((u: { id: string }) => u.id)
   let leaseIds: string[] = []
   if (unitIds.length) {
-    const { data: leaseRows } = await db.from('leases').select('id').in('unit_id', unitIds)
+    const { data: leaseRows, error: leaseErr } = await db.from('leases').select('id').in('unit_id', unitIds)
+    if (leaseErr) return c.json({ error: leaseErr.message }, 500)
     leaseIds = (leaseRows ?? []).map((l: { id: string }) => l.id)
   }
   let charges: { type: string; amount: number }[] = []
