@@ -206,3 +206,105 @@ cronRouter.post('/critical-dates-alerts', async (c) => {
 
   return c.json({ new_alerts: newAlerts.length, skipped: criticalDates.length - newAlerts.length, emailed })
 })
+
+// POST /api/cron/delinquency-check
+// Daily: check AR for overdue balances, post late_fee if none this month
+cronRouter.post('/delinquency-check', async (c) => {
+  const db = getDb(c.env)
+  const today = new Date().toISOString().slice(0, 10)
+  const [year, month] = today.split('-')
+  const periodStart = `${year}-${month}-01`
+  const GRACE_DAYS = 30
+  const LATE_FEE_AMOUNT = 50 // $50 flat late fee — adjust as needed
+  const RECIPIENTS = ['ggoldberg@oxfordra.net', 'egoldberg@oxfordra.net']
+
+  // Fetch AR ledger rows with a positive balance
+  const { data: arRows, error: arErr } = await db
+    .from('ar_ledger')
+    .select('*')
+    .gt('balance', 0)
+
+  if (arErr) return c.json({ error: arErr.message }, 500)
+  if (!arRows || arRows.length === 0) return c.json({ late_fees_posted: 0, delinquent_count: 0 })
+
+  type ARRow = { lease_id: string; tenant_id: string; tenant_name: string; property_name: string | null; suite: string | null; balance: number }
+
+  let lateFeesPosted = 0
+  const delinquentLeases: { tenant_name: string; property: string; balance: number }[] = []
+
+  for (const ar of arRows as ARRow[]) {
+    // Find oldest unpaid charge to check if > GRACE_DAYS past due
+    const cutoffDate = new Date()
+    cutoffDate.setDate(cutoffDate.getDate() - GRACE_DAYS)
+    const cutoffStr = cutoffDate.toISOString().slice(0, 10)
+
+    const { data: overdueCharges } = await db
+      .from('charges')
+      .select('id, due_date, amount')
+      .eq('lease_id', ar.lease_id)
+      .lte('due_date', cutoffStr)
+      .order('due_date')
+      .limit(1)
+
+    if (!overdueCharges || overdueCharges.length === 0) continue
+
+    // Check if a late_fee charge already exists for this lease this period
+    const { data: existingFee } = await db
+      .from('charges')
+      .select('id')
+      .eq('lease_id', ar.lease_id)
+      .eq('type', 'late_fee')
+      .gte('charge_date', periodStart)
+      .limit(1)
+
+    if (existingFee && existingFee.length > 0) {
+      delinquentLeases.push({ tenant_name: ar.tenant_name, property: [ar.property_name, ar.suite].filter(Boolean).join(' '), balance: ar.balance })
+      continue
+    }
+
+    // Post late fee charge
+    const { error: feeErr } = await db.from('charges').insert({
+      lease_id: ar.lease_id,
+      charge_date: today,
+      due_date: today,
+      period_start: periodStart,
+      period_end: today,
+      type: 'late_fee',
+      amount: LATE_FEE_AMOUNT,
+      description: `Late fee — balance outstanding as of ${today}`,
+      source: 'auto',
+      idempotency_key: `late_fee_${ar.lease_id}_${year}_${month}`,
+    })
+
+    if (!feeErr) {
+      lateFeesPosted++
+      delinquentLeases.push({ tenant_name: ar.tenant_name, property: [ar.property_name, ar.suite].filter(Boolean).join(' '), balance: ar.balance + LATE_FEE_AMOUNT })
+    }
+  }
+
+  // Send delinquency digest email if Resend configured and there are delinquent leases
+  let emailed = false
+  if (delinquentLeases.length > 0 && c.env.RESEND_API_KEY) {
+    const lines = delinquentLeases.map(d => `  • ${d.tenant_name} | ${d.property} | Balance: $${d.balance.toFixed(2)}`)
+    const bodyText = `ORA PM — Delinquency Report\n${today}\n\n${lines.join('\n')}\n\nLate fees posted: ${lateFeesPosted}\nhttps://ora-pm.pages.dev/ar`
+    const fromEmail = c.env.RESEND_FROM_EMAIL ?? 'pm@oxfordra.net'
+    try {
+      const emailRes = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${c.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          from: `ORA Property Manager <${fromEmail}>`,
+          to: RECIPIENTS,
+          subject: `[ORA PM] ${delinquentLeases.length} Delinquent Tenant${delinquentLeases.length > 1 ? 's' : ''} — ${today}`,
+          text: bodyText,
+        }),
+      })
+      emailed = emailRes.ok
+    } catch (err) {
+      // Network failure — late fees already posted; report not-emailed, don't 500 the cron.
+      console.error('Resend fetch failed:', err)
+    }
+  }
+
+  return c.json({ late_fees_posted: lateFeesPosted, delinquent_count: delinquentLeases.length, emailed })
+})
