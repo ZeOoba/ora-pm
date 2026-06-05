@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 import { getDb } from '../db/client'
+import { ChargeInsertSchema } from '../lib/schemas'
 
 type Env = { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string }
 
@@ -17,13 +18,15 @@ chargesRouter.get('/', async (c) => {
 
 chargesRouter.post('/', async (c) => {
   const db = getDb(c.env)
-  const body = await c.req.json()
+  const raw = await c.req.json()
+  const parsed = ChargeInsertSchema.safeParse({ ...raw, source: 'manual' })
+  if (!parsed.success) return c.json({ error: parsed.error.flatten().fieldErrors }, 422)
   const { data, error } = await db
     .from('charges')
-    .insert({ ...body, source: 'manual' })
+    .insert(parsed.data)
     .select()
     .single()
-  if (error) return c.json({ error: error.message }, 400)
+  if (error) return c.json({ error: 'Failed to create charge' }, 400)
   return c.json({ data }, 201)
 })
 

@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 import { getDb } from '../db/client'
+import { ExpenseInsertSchema } from '../lib/schemas'
 
 type Env = { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string }
 
@@ -20,20 +21,26 @@ expensesRouter.get('/', async (c) => {
 
 expensesRouter.post('/', async (c) => {
   const db = getDb(c.env)
-  const { data, error } = await db.from('expenses').insert(await c.req.json()).select().single()
-  if (error) return c.json({ error: error.message }, 400)
+  const raw = await c.req.json()
+  const parsed = ExpenseInsertSchema.safeParse(raw)
+  if (!parsed.success) return c.json({ error: parsed.error.flatten().fieldErrors }, 422)
+  const { data, error } = await db.from('expenses').insert(parsed.data).select().single()
+  if (error) return c.json({ error: 'Failed to create expense' }, 400)
   return c.json({ data }, 201)
 })
 
 expensesRouter.put('/:id', async (c) => {
   const db = getDb(c.env)
+  const raw = await c.req.json()
+  const parsed = ExpenseInsertSchema.partial().safeParse(raw)
+  if (!parsed.success) return c.json({ error: parsed.error.flatten().fieldErrors }, 422)
   const { data, error } = await db
     .from('expenses')
-    .update(await c.req.json())
+    .update(parsed.data)
     .eq('id', c.req.param('id'))
     .select()
     .single()
-  if (error) return c.json({ error: error.message }, 400)
+  if (error) return c.json({ error: 'Failed to update expense' }, 400)
   return c.json({ data })
 })
 

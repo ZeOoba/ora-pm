@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 import { getDb } from '../db/client'
+import { PaymentInsertSchema } from '../lib/schemas'
 
 type Env = { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string }
 
@@ -21,12 +22,10 @@ paymentsRouter.get('/', async (c) => {
 // Record manual payment (check/wire/other only — ACH handled via Stripe in Phase 2)
 paymentsRouter.post('/', async (c) => {
   const db = getDb(c.env)
-  const body = await c.req.json()
-  const allowedMethods = ['check', 'wire', 'other']
-  if (!allowedMethods.includes(body.method)) {
-    return c.json({ error: 'Only check, wire, or other payments accepted via this endpoint' }, 400)
-  }
-  const { data, error } = await db.from('payments').insert(body).select().single()
-  if (error) return c.json({ error: error.message }, 400)
+  const raw = await c.req.json()
+  const parsed = PaymentInsertSchema.safeParse(raw)
+  if (!parsed.success) return c.json({ error: parsed.error.flatten().fieldErrors }, 422)
+  const { data, error } = await db.from('payments').insert(parsed.data).select().single()
+  if (error) return c.json({ error: 'Failed to create payment' }, 400)
   return c.json({ data }, 201)
 })

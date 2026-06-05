@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 import { getDb } from '../db/client'
+import { PropertyInsertSchema, PropertyUpdateSchema } from '../lib/schemas'
 
 type Env = { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string }
 
@@ -25,22 +26,26 @@ propertiesRouter.get('/:id', async (c) => {
 
 propertiesRouter.post('/', async (c) => {
   const db = getDb(c.env)
-  const body = await c.req.json()
-  const { data, error } = await db.from('properties').insert(body).select().single()
-  if (error) return c.json({ error: error.message }, 400)
+  const raw = await c.req.json()
+  const parsed = PropertyInsertSchema.safeParse(raw)
+  if (!parsed.success) return c.json({ error: parsed.error.flatten().fieldErrors }, 422)
+  const { data, error } = await db.from('properties').insert(parsed.data).select().single()
+  if (error) return c.json({ error: 'Failed to create property' }, 400)
   return c.json({ data }, 201)
 })
 
 propertiesRouter.put('/:id', async (c) => {
   const db = getDb(c.env)
-  const body = await c.req.json()
+  const raw = await c.req.json()
+  const parsed = PropertyUpdateSchema.safeParse(raw)
+  if (!parsed.success) return c.json({ error: parsed.error.flatten().fieldErrors }, 422)
   const { data, error } = await db
     .from('properties')
-    .update(body)
+    .update(parsed.data)
     .eq('id', c.req.param('id'))
     .select()
     .single()
-  if (error) return c.json({ error: error.message }, 400)
+  if (error) return c.json({ error: 'Failed to update property' }, 400)
   return c.json({ data })
 })
 
