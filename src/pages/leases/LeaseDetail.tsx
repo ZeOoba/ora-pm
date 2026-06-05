@@ -319,7 +319,7 @@ export function LeaseDetail() {
                     <td className="px-3 py-2 text-right">{bc.commission_rate_pct != null ? `${bc.commission_rate_pct}%` : '—'}</td>
                     <td className="px-3 py-2 text-right font-medium">{bc.commission_amount != null ? formatCurrency(bc.commission_amount) : '—'}</td>
                     <td className="px-3 py-2"><StatusBadge status={bc.payment_status} /></td>
-                    <td className="px-3 py-2 text-gray-600">{bc.payment_date ?? '—'}</td>
+                    <td className="px-3 py-2 text-gray-600">{formatDate(bc.payment_date)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -340,7 +340,7 @@ export function LeaseDetail() {
                 <div key={doc.id} className="flex items-center justify-between py-2">
                   <div>
                     <p className="text-sm font-medium text-gray-900">{doc.name}</p>
-                    <p className="text-xs text-gray-500 capitalize">{doc.type.replace(/_/g, ' ')} · {doc.uploaded_at.slice(0, 10)}</p>
+                    <p className="text-xs text-gray-500 capitalize">{doc.type.replace(/_/g, ' ')} · {formatDate(doc.uploaded_at)}</p>
                   </div>
                   <span className="text-xs bg-gray-100 text-gray-500 px-2 py-0.5 rounded">{doc.storage_path.split('.').pop()?.toUpperCase() ?? 'FILE'}</span>
                 </div>

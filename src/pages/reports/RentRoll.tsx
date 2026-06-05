@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../../lib/api'
 import { PageHeader } from '../../components/PageHeader'
-import { formatCurrency, formatSF, formatPSF } from '../../lib/format'
+import { formatCurrency, formatSF, formatPSF, formatDate } from '../../lib/format'
 import { StatusBadge } from '../../components/StatusBadge'
 import type { RentRollRow } from '../../types'
 
@@ -57,7 +57,7 @@ export function RentRoll() {
                   <td className="px-3 py-2">{r.suite}</td>
                   <td className="px-3 py-2 text-gray-600">{r.sf ? formatSF(r.sf) : '—'}</td>
                   <td className="px-3 py-2 text-gray-700">{r.tenant_name ?? <span className="text-gray-400 italic">Vacant</span>}</td>
-                  <td className="px-3 py-2 text-gray-600">{r.end_date ?? '—'}</td>
+                  <td className="px-3 py-2 text-gray-600">{formatDate(r.end_date)}</td>
                   <td className="px-3 py-2">{r.base_rent_monthly != null ? formatCurrency(r.base_rent_monthly) : '—'}</td>
                   <td className="px-3 py-2 text-gray-600">{r.cam_estimate_monthly != null ? formatCurrency(r.cam_estimate_monthly) : '—'}</td>
                   <td className="px-3 py-2 font-medium">{r.total_monthly != null ? formatCurrency(r.total_monthly) : '—'}</td>
