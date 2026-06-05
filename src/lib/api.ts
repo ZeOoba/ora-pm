@@ -1,9 +1,21 @@
+import { supabase } from './supabase'
+
 const BASE = '/api'
 
+async function getAdminJwt(): Promise<string | null> {
+  const { data: { session } } = await supabase.auth.getSession()
+  return session?.access_token ?? null
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const jwt = await getAdminJwt()
   const res = await fetch(`${BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...init?.headers },
     ...init,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}),
+      ...init?.headers,
+    },
   })
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }))
