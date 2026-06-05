@@ -14,6 +14,7 @@ import { budgetsRouter } from './routes/budgets'
 import { renewalsRouter } from './routes/renewals'
 import { insuranceRouter } from './routes/insurance'
 import { exportsRouter } from './routes/exports'
+import { stripeRouter } from './routes/stripe'
 
 export interface Env {
   SUPABASE_URL: string
@@ -46,6 +47,7 @@ export function createApp() {
   app.route('/api/renewals', renewalsRouter)
   app.route('/api/insurance', insuranceRouter)
   app.route('/api/exports', exportsRouter)
+  app.route('/api/stripe', stripeRouter)
 
   return app
 }
