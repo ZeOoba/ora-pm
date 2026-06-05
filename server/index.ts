@@ -20,6 +20,7 @@ import { webhookRouter } from './routes/webhook'
 import { portalAuthRouter } from './routes/portal-auth'
 import { portalRouter } from './routes/portal'
 import { portalInsuranceRouter } from './routes/portal-insurance'
+import { errorHandlerMiddleware } from './middleware/error-handler'
 
 export interface Env {
   SUPABASE_URL: string
@@ -33,6 +34,8 @@ export interface Env {
 
 export function createApp() {
   const app = new Hono<{ Bindings: Env }>()
+
+  app.use('*', errorHandlerMiddleware)
 
   // Webhook MUST be before CORS — needs raw body
   app.route('/api/webhooks', webhookRouter)
