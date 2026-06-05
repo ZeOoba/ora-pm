@@ -13,25 +13,25 @@ webhookRouter.post('/stripe', async (c) => {
   const rawBody = await c.req.text()
   const stripe = getStripe(c.env.STRIPE_SECRET_KEY)
 
-  let event
+  let event: import('stripe').default.Event
   try {
-    event = stripe.webhooks.constructEvent(rawBody, sig, c.env.STRIPE_WEBHOOK_SECRET)
+    event = await stripe.webhooks.constructEventAsync(rawBody, sig, c.env.STRIPE_WEBHOOK_SECRET)
   } catch (err) {
     return c.json({ error: `Webhook signature verification failed: ${(err as Error).message}` }, 400)
   }
 
   const db = getDb(c.env)
 
-  // Idempotency: skip if already processed
-  const { data: existing } = await db
+  // Idempotency: INSERT then check for PK violation (23505 = unique_violation).
+  // Two concurrent deliveries both attempt the insert; the second gets 23505 and skips.
+  const { error: insertError } = await db
     .from('stripe_webhook_events')
-    .select('id')
-    .eq('id', event.id)
-    .maybeSingle()
-  if (existing) return c.json({ received: true, skipped: true })
+    .insert({ id: event.id, event_type: event.type })
 
-  // Record event before processing (at-least-once delivery guard)
-  await db.from('stripe_webhook_events').insert({ id: event.id, event_type: event.type })
+  if (insertError) {
+    if (insertError.code === '23505') return c.json({ received: true, skipped: true })
+    return c.json({ error: 'Failed to record event' }, 500)
+  }
 
   try {
     await handleStripeEvent(event, db)
@@ -39,6 +39,8 @@ webhookRouter.post('/stripe', async (c) => {
     await db.from('stripe_webhook_events').update({ status: 'failed' }).eq('id', event.id)
     return c.json({ error: `Event handling failed: ${(err as Error).message}` }, 500)
   }
+
+  await db.from('stripe_webhook_events').update({ status: 'processed' }).eq('id', event.id)
 
   return c.json({ received: true })
 })
