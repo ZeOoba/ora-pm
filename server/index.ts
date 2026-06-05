@@ -55,7 +55,7 @@ export function createApp() {
   app.use('/api/*', async (c, next) => {
     const path = new URL(c.req.url).pathname
     if (ADMIN_EXEMPT.some(prefix => path.startsWith(prefix))) return next()
-    return adminAuthMiddleware(c as Parameters<typeof adminAuthMiddleware>[0], next)
+    return adminAuthMiddleware(c as unknown as Parameters<typeof adminAuthMiddleware>[0], next)
   })
 
   app.route('/api/properties', propertiesRouter)
