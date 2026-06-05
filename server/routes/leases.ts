@@ -89,10 +89,11 @@ leasesRouter.post('/:id/notices', async (c) => {
   if (!body.notice_type || !body.sent_date || !body.method) {
     return c.json({ error: 'notice_type, sent_date, method required' }, 400)
   }
+  const { notice_type, sent_date, method, document_path, notes } = body
   const db = getDb(c.env)
   const { data, error } = await db
     .from('tenant_notices')
-    .insert({ ...body, lease_id: c.req.param('id') })
+    .insert({ notice_type, sent_date, method, document_path, notes, lease_id: c.req.param('id') })
     .select()
     .single()
   if (error) return c.json({ error: error.message }, 400)
