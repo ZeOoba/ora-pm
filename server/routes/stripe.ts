@@ -4,6 +4,7 @@ import { getStripe } from '../lib/stripe'
 import { getDb } from '../db/client'
 import type { Env } from '../index'
 import { tenantAuthMiddleware } from '../middleware/tenant-auth'
+import { checkRateLimit } from '../lib/rate-limit'
 
 export const stripeRouter = new Hono<{ Bindings: Env }>()
 
@@ -74,6 +75,15 @@ stripeRouter.post('/setup-intent', async (c) => {
 
 // POST /api/stripe/payment-intent — create PaymentIntent for ACH charge
 stripeRouter.post('/payment-intent', async (c) => {
+  const ip = c.req.header('CF-Connecting-IP') ?? c.req.header('X-Forwarded-For') ?? 'unknown'
+  const { allowed, retryAfterMs } = checkRateLimit(ip)
+  if (!allowed) {
+    return c.json(
+      { error: `Too many payment requests — retry in ${Math.ceil(retryAfterMs / 1000)}s` },
+      429
+    )
+  }
+
   const { tenant_id, lease_id, amount_cents, payment_method_id, description } = await c.req.json()
   if (!tenant_id || !lease_id || !amount_cents || !payment_method_id) {
     return c.json({ error: 'tenant_id, lease_id, amount_cents, payment_method_id required' }, 400)
