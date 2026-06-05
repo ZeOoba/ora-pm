@@ -47,7 +47,6 @@ describe('POST /api/cron/critical-dates-alerts', () => {
   })
 
   it('records new alerts and returns count', async () => {
-    const insertMock = vi.fn().mockResolvedValue({ error: null })
     mockFrom.mockImplementation((table: string) => {
       if (table === 'critical_dates') return {
         select: vi.fn().mockReturnValue({
@@ -65,7 +64,7 @@ describe('POST /api/cron/critical-dates-alerts', () => {
         }),
         insert: vi.fn().mockReturnValue({ error: null }),
       }
-      return { select: vi.fn(), insert: insertMock }
+      return { select: vi.fn() }
     })
 
     const res = await app.request('/api/cron/critical-dates-alerts', {
@@ -76,5 +75,42 @@ describe('POST /api/cron/critical-dates-alerts', () => {
     const body = await res.json() as { new_alerts: number; skipped: number }
     expect(body.new_alerts).toBe(1)
     expect(body.skipped).toBe(0)
+  })
+
+  it('skips alerts already sent to all recipients', async () => {
+    mockFrom.mockImplementation((table: string) => {
+      if (table === 'critical_dates') return {
+        select: vi.fn().mockReturnValue({
+          lte: vi.fn().mockResolvedValue({
+            data: [
+              { date_type: 'lease_expiration', reference_id: 'lease_1', tenant_name: 'Acme', property_name: 'REDACTED-020', suite: '101', critical_date: '2026-07-01', days_until: 26, urgency: 'urgent' },
+            ],
+            error: null,
+          }),
+        }),
+      }
+      if (table === 'sent_notifications') return {
+        select: vi.fn().mockReturnValue({
+          in: vi.fn().mockResolvedValue({
+            data: [
+              { reference_id: 'lease_1', recipient: 'ggoldberg@oxfordra.net' },
+              { reference_id: 'lease_1', recipient: 'egoldberg@oxfordra.net' },
+            ],
+            error: null,
+          }),
+        }),
+        insert: vi.fn().mockResolvedValue({ error: null }),
+      }
+      return { select: vi.fn() }
+    })
+
+    const res = await app.request('/api/cron/critical-dates-alerts', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer test' },
+    }, env)
+    expect(res.status).toBe(200)
+    const body = await res.json() as { new_alerts: number; skipped: number }
+    expect(body.new_alerts).toBe(0)
+    expect(body.skipped).toBe(1)
   })
 })
