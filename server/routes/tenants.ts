@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { getDb } from '../db/client'
-import { TenantInsertSchema, TenantUpdateSchema } from '../lib/schemas'
+import { TenantInsertSchema, TenantUpdateSchema, PaginationSchema } from '../lib/schemas'
 
 type Env = { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string }
 
@@ -8,7 +8,15 @@ export const tenantsRouter = new Hono<{ Bindings: Env }>()
 
 tenantsRouter.get('/', async (c) => {
   const db = getDb(c.env)
-  const { data, error } = await db.from('tenants').select('*').order('name')
+  const { limit, offset } = PaginationSchema.parse({
+    limit: c.req.query('limit'),
+    offset: c.req.query('offset'),
+  })
+  const { data, error } = await db
+    .from('tenants')
+    .select('*')
+    .order('name')
+    .range(offset, offset + limit - 1)
   if (error) return c.json({ error: error.message }, 500)
   return c.json({ data })
 })
