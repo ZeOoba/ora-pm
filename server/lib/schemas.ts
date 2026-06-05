@@ -82,6 +82,7 @@ export const ExpenseInsertSchema = z.object({
   description: z.string().optional(),
   is_cam_recoverable: z.boolean().default(false),
 })
+export const ExpenseUpdateSchema = ExpenseInsertSchema.partial()
 
 // Pagination (shared by all list endpoints — added here for co-location)
 export const PaginationSchema = z.object({
