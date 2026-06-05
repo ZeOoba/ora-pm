@@ -3,6 +3,9 @@ import { createApp } from '../../server/index'
 
 const mockFrom = vi.hoisted(() => vi.fn())
 vi.mock('@supabase/supabase-js', () => ({ createClient: () => ({ from: mockFrom }) }))
+vi.mock('../../server/middleware/admin-auth', () => ({
+  adminAuthMiddleware: vi.fn(async (_c: unknown, next: () => Promise<void>) => next()),
+}))
 
 const env = {
   SUPABASE_URL: 'http://localhost',
