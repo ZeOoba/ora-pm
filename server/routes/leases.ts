@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 import { getDb } from '../db/client'
+import { LeaseInsertSchema, LeaseUpdateSchema } from '../lib/schemas'
 
 type Env = { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string }
 
@@ -30,9 +31,11 @@ leasesRouter.get('/:id', async (c) => {
 
 leasesRouter.post('/', async (c) => {
   const db = getDb(c.env)
-  const body = await c.req.json()
-  const { data, error } = await db.from('leases').insert(body).select().single()
-  if (error) return c.json({ error: error.message }, 400)
+  const raw = await c.req.json()
+  const parsed = LeaseInsertSchema.safeParse(raw)
+  if (!parsed.success) return c.json({ error: parsed.error.flatten().fieldErrors }, 422)
+  const { data, error } = await db.from('leases').insert(parsed.data).select().single()
+  if (error) return c.json({ error: 'Failed to create lease' }, 400)
   // Auto-create renewal tracking record — swallow error if renewals table not ready
   if (data) {
     const lease = data as { id: string; end_date: string }
@@ -47,14 +50,16 @@ leasesRouter.post('/', async (c) => {
 
 leasesRouter.put('/:id', async (c) => {
   const db = getDb(c.env)
-  const body = await c.req.json()
+  const raw = await c.req.json()
+  const parsed = LeaseUpdateSchema.safeParse(raw)
+  if (!parsed.success) return c.json({ error: parsed.error.flatten().fieldErrors }, 422)
   const { data, error } = await db
     .from('leases')
-    .update(body)
+    .update(parsed.data)
     .eq('id', c.req.param('id'))
     .select()
     .single()
-  if (error) return c.json({ error: error.message }, 400)
+  if (error) return c.json({ error: 'Failed to update lease' }, 400)
   return c.json({ data })
 })
 

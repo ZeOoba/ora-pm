@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 import { getDb } from '../db/client'
+import { TenantInsertSchema, TenantUpdateSchema } from '../lib/schemas'
 
 type Env = { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string }
 
@@ -25,22 +26,26 @@ tenantsRouter.get('/:id', async (c) => {
 
 tenantsRouter.post('/', async (c) => {
   const db = getDb(c.env)
-  const body = await c.req.json()
-  const { data, error } = await db.from('tenants').insert(body).select().single()
-  if (error) return c.json({ error: error.message }, 400)
+  const raw = await c.req.json()
+  const parsed = TenantInsertSchema.safeParse(raw)
+  if (!parsed.success) return c.json({ error: parsed.error.flatten().fieldErrors }, 422)
+  const { data, error } = await db.from('tenants').insert(parsed.data).select().single()
+  if (error) return c.json({ error: 'Failed to create tenant' }, 400)
   return c.json({ data }, 201)
 })
 
 tenantsRouter.put('/:id', async (c) => {
   const db = getDb(c.env)
-  const body = await c.req.json()
+  const raw = await c.req.json()
+  const parsed = TenantUpdateSchema.safeParse(raw)
+  if (!parsed.success) return c.json({ error: parsed.error.flatten().fieldErrors }, 422)
   const { data, error } = await db
     .from('tenants')
-    .update(body)
+    .update(parsed.data)
     .eq('id', c.req.param('id'))
     .select()
     .single()
-  if (error) return c.json({ error: error.message }, 400)
+  if (error) return c.json({ error: 'Failed to update tenant' }, 400)
   return c.json({ data })
 })
 
