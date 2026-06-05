@@ -1,1 +1,35 @@
 @import "tailwindcss";
+
+@theme {
+  /* Brand */
+  --color-navy:      #1B2A4A;
+  --color-navy-700:  #243660;
+  --color-gold:      #C9A96E;
+  --color-gold-600:  #B8975A;
+  --color-parchment: #F5F0E8;
+  --color-ivory:     #FBF9F4;
+
+  /* Status (canonical — consumed by Badge) */
+  --color-status-active:  #15803D;
+  --color-status-warning: #B45309;
+  --color-status-danger:  #B91C1C;
+  --color-status-pending: #4338CA;
+  --color-status-neutral: #475569;
+
+  /* Type */
+  --font-display: "EB Garamond", Georgia, serif;
+  --font-sans:    "DM Sans", system-ui, sans-serif;
+  --font-mono:    "IBM Plex Mono", ui-monospace, monospace;
+
+  /* Radius */
+  --radius-card: 0.625rem;
+}
+
+@layer base {
+  body {
+    @apply font-sans bg-ivory text-navy antialiased;
+  }
+  h1, h2, h3 {
+    @apply font-display;
+  }
+}
