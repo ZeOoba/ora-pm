@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { getDb } from '../db/client'
-import { ChargeInsertSchema } from '../lib/schemas'
+import { ChargeInsertSchema, PaginationSchema } from '../lib/schemas'
 
 type Env = { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string }
 
@@ -9,9 +9,13 @@ export const chargesRouter = new Hono<{ Bindings: Env }>()
 chargesRouter.get('/', async (c) => {
   const db = getDb(c.env)
   const leaseId = c.req.query('lease_id')
+  const { limit, offset } = PaginationSchema.parse({
+    limit: c.req.query('limit'),
+    offset: c.req.query('offset'),
+  })
   let q = db.from('charges').select('*, leases(tenant_id, tenants(name))').order('charge_date', { ascending: false })
   if (leaseId) q = q.eq('lease_id', leaseId)
-  const { data, error } = await q
+  const { data, error } = await q.range(offset, offset + limit - 1)
   if (error) return c.json({ error: error.message }, 500)
   return c.json({ data })
 })
