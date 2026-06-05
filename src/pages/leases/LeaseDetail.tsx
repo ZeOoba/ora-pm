@@ -8,12 +8,14 @@ import { StatusBadge } from '../../components/StatusBadge'
 import { Field } from '../../components/form/Field'
 import { TextInput, DateInput } from '../../components/form/inputs'
 import { formatCurrency, formatDate, formatSF, formatPSF } from '../../lib/format'
-import type { Lease, Tenant, Unit, Property, LeaseAmendment } from '../../types'
+import type { Lease, Tenant, Unit, Property, LeaseAmendment, BrokerCommission, LeaseDocument } from '../../types'
 
 type LeaseDetail = Lease & {
   tenants: Tenant
   units: Unit & { properties: Property }
   lease_amendments: LeaseAmendment[]
+  broker_commissions: BrokerCommission[]
+  lease_documents: LeaseDocument[]
 }
 
 interface AmendmentForm {
@@ -214,6 +216,63 @@ export function LeaseDetail() {
                     <p className="font-medium text-gray-900">{a.description}</p>
                     <p className="text-gray-400 text-xs">Effective {formatDate(a.effective_date)}</p>
                   </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Broker Commissions */}
+        <div className="col-span-2 bg-white rounded-lg border border-gray-200 p-4">
+          <h2 className="text-xs font-semibold text-gray-400 uppercase mb-3">
+            Broker Commissions ({data.broker_commissions.length})
+          </h2>
+          {data.broker_commissions.length === 0 ? (
+            <p className="text-sm text-gray-400">No commissions recorded.</p>
+          ) : (
+            <table className="w-full text-sm">
+              <thead className="text-xs text-gray-500 uppercase bg-gray-50">
+                <tr>
+                  <th className="px-3 py-2 text-left">Broker</th>
+                  <th className="px-3 py-2 text-left">Company</th>
+                  <th className="px-3 py-2 text-right">Rate</th>
+                  <th className="px-3 py-2 text-right">Amount</th>
+                  <th className="px-3 py-2 text-left">Status</th>
+                  <th className="px-3 py-2 text-left">Paid</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.broker_commissions.map(bc => (
+                  <tr key={bc.id} className="border-t border-gray-100">
+                    <td className="px-3 py-2 font-medium">{bc.broker_name}</td>
+                    <td className="px-3 py-2 text-gray-600">{bc.broker_company ?? '—'}</td>
+                    <td className="px-3 py-2 text-right">{bc.commission_rate_pct != null ? `${bc.commission_rate_pct}%` : '—'}</td>
+                    <td className="px-3 py-2 text-right font-medium">{bc.commission_amount != null ? formatCurrency(bc.commission_amount) : '—'}</td>
+                    <td className="px-3 py-2"><StatusBadge status={bc.payment_status} /></td>
+                    <td className="px-3 py-2 text-gray-600">{bc.payment_date ?? '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+
+        {/* Lease Documents */}
+        <div className="col-span-2 bg-white rounded-lg border border-gray-200 p-4">
+          <h2 className="text-xs font-semibold text-gray-400 uppercase mb-3">
+            Documents ({data.lease_documents.length})
+          </h2>
+          {data.lease_documents.length === 0 ? (
+            <p className="text-sm text-gray-400">No documents on file.</p>
+          ) : (
+            <div className="divide-y divide-gray-100">
+              {data.lease_documents.map(doc => (
+                <div key={doc.id} className="flex items-center justify-between py-2">
+                  <div>
+                    <p className="text-sm font-medium text-gray-900">{doc.name}</p>
+                    <p className="text-xs text-gray-500 capitalize">{doc.type.replace(/_/g, ' ')} · {doc.uploaded_at.slice(0, 10)}</p>
+                  </div>
+                  <span className="text-xs bg-gray-100 text-gray-500 px-2 py-0.5 rounded">PDF</span>
                 </div>
               ))}
             </div>
