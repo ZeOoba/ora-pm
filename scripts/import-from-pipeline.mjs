@@ -49,7 +49,6 @@ const PROPERTY_META = {
   '3540 E 5th':     { name: '3540 E 5th Ave',           address: '3540 E 5th Ave',           city: 'Columbus',     state: 'OH', zip: null,    property_type: 'industrial', entity_llc: null },
   '401 Sunburst':   { name: '401 Sunburst Hwy',         address: '401 Sunburst Hwy',         city: 'Cambridge',    state: 'MD', zip: null,    property_type: 'industrial', entity_llc: null },
   '55 New Plant':   { name: '55 New Plant Ct',          address: '55 New Plant Ct',          city: 'Owings Mills', state: 'MD', zip: null,    property_type: 'industrial', entity_llc: null },
-  '5600 Sunnyside': { name: '5600 Sunnyside Ave',       address: '5600 Sunnyside Ave',       city: 'Beltsville',   state: 'MD', zip: '20705', property_type: 'industrial', entity_llc: null },
   'Banwick':        { name: '2800 Banwick Rd',          address: '2800 Banwick Rd',          city: 'Columbus',     state: 'OH', zip: null,    property_type: 'industrial', entity_llc: null },
   'Broadway':       { name: '1900 N Broadway',          address: '1900 N Broadway',          city: 'Baltimore',    state: 'MD', zip: null,    property_type: 'industrial', entity_llc: null },
   'E 5th Ave':      { name: '4595 E 5th Ave',           address: '4595 E 5th Ave',           city: 'Columbus',     state: 'OH', zip: null,    property_type: 'industrial', entity_llc: null },
@@ -63,6 +62,13 @@ const PROPERTY_META = {
   'Red Branch':     { name: '9050 Red Branch Road',     address: '9050 Red Branch Rd',       city: 'Columbia',     state: 'MD', zip: '21045', property_type: 'industrial', entity_llc: null },
   'Westerville':    { name: '3034 Westerville Rd',      address: '3034 Westerville Rd',      city: 'Columbus',     state: 'OH', zip: null,    property_type: 'industrial', entity_llc: null },
 }
+
+// Pipeline labels that appear in the rent roll but are NOT owned/managed properties
+// and must never be imported as such:
+//   - "5600 Sunnyside": SOLD via seller financing; it is a LOAN (note receivable) to
+//     Restoration Church Trust. The "$16,713/mo" is a loan payment, not rent. Belongs
+//     in a debt/notes module, not the rent roll.
+const EXCLUDE = new Set(['5600 Sunnyside'])
 
 // ── load .env ─────────────────────────────────────────────────────────────────
 function loadEnv() {
@@ -157,11 +163,17 @@ const all = JSON.parse(readFileSync(FILE, 'utf8'))
 
 function labelsToRun() {
   if (ALL) {
-    const present = [...new Set(all.map((r) => r.p))]
+    const present = [...new Set(all.map((r) => r.p))].filter((p) => !EXCLUDE.has(p))
     const known = present.filter((p) => PROPERTY_META[p])
     const unknown = present.filter((p) => !PROPERTY_META[p])
-    if (unknown.length) console.warn(`\n[WARN] No PROPERTY_META for: ${unknown.join(', ')} — skipped.\n`)
+    const excluded = [...new Set(all.map((r) => r.p))].filter((p) => EXCLUDE.has(p))
+    if (excluded.length) console.warn(`[EXCLUDED — not managed properties]: ${excluded.join(', ')}`)
+    if (unknown.length) console.warn(`[WARN] No PROPERTY_META for: ${unknown.join(', ')} — skipped.`)
     return known.sort()
+  }
+  if (EXCLUDE.has(PROPERTY_LABEL)) {
+    console.error(`"${PROPERTY_LABEL}" is excluded (not a managed property — see EXCLUDE in this script).`)
+    process.exit(1)
   }
   return [PROPERTY_LABEL]
 }
