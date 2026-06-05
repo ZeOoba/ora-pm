@@ -4,7 +4,7 @@ import { api } from '../../lib/api'
 import { PageHeader } from '../../components/PageHeader'
 import { StatusBadge } from '../../components/StatusBadge'
 import { formatCurrency, formatDate } from '../../lib/format'
-import type { Tenant, Lease, InsuranceCertificate, Unit, Property } from '../../types'
+import type { Tenant, Lease, InsuranceCertificate, Unit, Property, CorrespondenceEntry } from '../../types'
 import { TenantPortalAdmin } from '../admin/TenantPortalAdmin'
 
 type LeaseWithJoins = Lease & {
@@ -14,7 +14,7 @@ type LeaseWithJoins = Lease & {
 type TenantWithJoins = Tenant & {
   leases?: LeaseWithJoins[]
   insurance_certificates?: InsuranceCertificate[]
-  correspondence_log?: unknown[]
+  correspondence_log?: CorrespondenceEntry[]
 }
 
 export function TenantDetail() {
@@ -32,6 +32,7 @@ export function TenantDetail() {
 
   const leases = data.leases ?? []
   const certs = data.insurance_certificates ?? []
+  const correspondence = data.correspondence_log ?? []
 
   return (
     <div>
@@ -169,6 +170,40 @@ export function TenantDetail() {
                   <td className="px-4 py-3">
                     <StatusBadge status={cert.status} />
                   </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Correspondence Log */}
+      <div className="mt-6">
+        <h2 className="text-base font-semibold text-gray-800 mb-3">Correspondence Log</h2>
+        <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
+          <table className="min-w-full divide-y divide-gray-200 text-sm">
+            <thead className="bg-gray-50">
+              <tr>
+                {['Date', 'Direction', 'Method', 'Subject', 'Summary'].map(h => (
+                  <th key={h} className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-200">
+              {correspondence.length === 0 && (
+                <tr><td colSpan={5} className="px-4 py-8 text-center text-gray-400">No correspondence on file.</td></tr>
+              )}
+              {correspondence.map(entry => (
+                <tr key={entry.id} className="hover:bg-gray-50">
+                  <td className="px-4 py-3 text-gray-600">{entry.contact_date}</td>
+                  <td className="px-4 py-3">
+                    <span className={`inline-block px-2 py-0.5 rounded-full text-xs ${entry.direction === 'inbound' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'}`}>
+                      {entry.direction}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3 text-gray-600 capitalize">{entry.method.replace('_', ' ')}</td>
+                  <td className="px-4 py-3 font-medium text-gray-900">{entry.subject}</td>
+                  <td className="px-4 py-3 text-gray-600 max-w-xs truncate">{entry.summary}</td>
                 </tr>
               ))}
             </tbody>
