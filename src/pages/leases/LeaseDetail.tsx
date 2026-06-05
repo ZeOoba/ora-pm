@@ -98,7 +98,7 @@ function NoticesSection({ leaseId, notices }: { leaseId: string; notices: Tenant
             <div key={n.id} className="flex justify-between py-2 text-sm">
               <div>
                 <p className="font-medium text-gray-900 capitalize">{n.notice_type.replace(/_/g,' ')}</p>
-                <p className="text-xs text-gray-500">{n.sent_date} · via {n.method.replace(/_/g,' ')}</p>
+                <p className="text-xs text-gray-500">{formatDate(n.sent_date)} · via {n.method.replace(/_/g,' ')}</p>
                 {n.notes && <p className="text-xs text-gray-400 mt-0.5">{n.notes}</p>}
               </div>
             </div>
