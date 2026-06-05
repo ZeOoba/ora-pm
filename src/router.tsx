@@ -21,6 +21,7 @@ import { ExpensesList }     from './pages/expenses/ExpensesList'
 import { BudgetsList }      from './pages/budgets/BudgetsList'
 import { RenewalsPipeline } from './pages/renewals/RenewalsPipeline'
 import { InsuranceList }    from './pages/insurance/InsuranceList'
+import { PortalApp } from './portal/PortalApp'
 
 function Layout({ children }: { children: React.ReactNode }) {
   return <AppShell>{children}</AppShell>
@@ -50,4 +51,6 @@ export const router = createBrowserRouter([
   { path: '/renewals',  element: <Layout><RenewalsPipeline /></Layout> },
   { path: '/insurance', element: <Layout><InsuranceList /></Layout> },
   { path: '/insurance/new', element: <Layout><InsuranceForm /></Layout> },
+  { path: '/portal/*', element: <PortalApp /> },
+  { path: '/portal', element: <PortalApp /> },
 ])
