@@ -31,6 +31,10 @@ vi.mock('../../server/lib/stripe', () => ({
   getStripe: vi.fn(() => mockStripe),
 }))
 
+vi.mock('../../server/lib/rate-limit', () => ({
+  checkRateLimit: vi.fn(() => ({ allowed: true, retryAfterMs: 0 })),
+}))
+
 // ---------------------------------------------------------------------------
 // Mock @supabase/supabase-js — chainable query builder
 // ---------------------------------------------------------------------------
