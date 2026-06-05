@@ -10,7 +10,7 @@ export function RentRoll() {
   const [propertyFilter, setPropertyFilter] = useState('')
 
   const { data, isLoading } = useQuery({
-    queryKey: ['rent-roll'],
+    queryKey: ['rent-roll'], // full dataset; property filter is client-side
     queryFn: () => api.get<{ data: RentRollRow[] }>('/reports/rent-roll').then(r => r.data),
   })
 
@@ -32,9 +32,11 @@ export function RentRoll() {
           onChange={e => setPropertyFilter(e.target.value)}
           className="border border-gray-300 rounded px-3 py-1.5 text-sm w-56"
         />
-        <span className="text-sm text-gray-500">
-          {occupied} occupied · {formatCurrency(totalMonthly)}/mo total
-        </span>
+        {!isLoading && (
+          <span className="text-sm text-gray-500">
+            {occupied} occupied · {formatCurrency(totalMonthly)}/mo total
+          </span>
+        )}
       </div>
       {isLoading ? (
         <p className="text-gray-500">Loading…</p>
