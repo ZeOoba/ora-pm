@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { getDb } from '../db/client'
-import { ExpenseInsertSchema, ExpenseUpdateSchema } from '../lib/schemas'
+import { ExpenseInsertSchema, ExpenseUpdateSchema, PaginationSchema } from '../lib/schemas'
 
 type Env = { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string }
 
@@ -9,12 +9,16 @@ export const expensesRouter = new Hono<{ Bindings: Env }>()
 expensesRouter.get('/', async (c) => {
   const db = getDb(c.env)
   const propertyId = c.req.query('property_id')
+  const { limit, offset } = PaginationSchema.parse({
+    limit: c.req.query('limit'),
+    offset: c.req.query('offset'),
+  })
   let q = db
     .from('expenses')
     .select('*, properties(name)')
     .order('expense_date', { ascending: false })
   if (propertyId) q = q.eq('property_id', propertyId)
-  const { data, error } = await q
+  const { data, error } = await q.range(offset, offset + limit - 1)
   if (error) return c.json({ error: error.message }, 500)
   return c.json({ data })
 })
