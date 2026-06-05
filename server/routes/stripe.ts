@@ -3,8 +3,13 @@ import Stripe from 'stripe'
 import { getStripe } from '../lib/stripe'
 import { getDb } from '../db/client'
 import type { Env } from '../index'
+import { tenantAuthMiddleware } from '../middleware/tenant-auth'
 
 export const stripeRouter = new Hono<{ Bindings: Env }>()
+
+stripeRouter.use('/customer', tenantAuthMiddleware)
+stripeRouter.use('/setup-intent', tenantAuthMiddleware)
+stripeRouter.use('/payment-intent', tenantAuthMiddleware)
 
 // POST /api/stripe/customer — create Stripe customer + store on tenant record
 stripeRouter.post('/customer', async (c) => {
@@ -67,8 +72,6 @@ stripeRouter.post('/setup-intent', async (c) => {
   return c.json({ client_secret: setupIntent.client_secret })
 })
 
-// NOTE: Authenticated via tenant JWT middleware (T10) when mounted in portal routes.
-// Until T10 lands, this endpoint trusts the caller — used only from the portal UI.
 // POST /api/stripe/payment-intent — create PaymentIntent for ACH charge
 stripeRouter.post('/payment-intent', async (c) => {
   const { tenant_id, lease_id, amount_cents, payment_method_id, description } = await c.req.json()

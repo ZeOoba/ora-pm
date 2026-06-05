@@ -34,11 +34,11 @@ export function PortalPayNow() {
     const tenant = meData.tenant
 
     if (!tenant.stripe_customer_id) {
-      await fetch('/api/stripe/customer', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tenant_id: tenant.id }),
-      })
+      await portalApi.ensureStripeCustomer(
+        tenant.id,
+        tenant.contact_email ?? undefined,
+        tenant.name
+      )
     }
 
     const leaseId = selectedCharges[0]?.lease_id

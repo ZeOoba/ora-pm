@@ -2,6 +2,17 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { createApp } from '../../server/index'
 
 // ---------------------------------------------------------------------------
+// Mock auth middleware — pass through in tests
+// ---------------------------------------------------------------------------
+vi.mock('../../server/middleware/tenant-auth', () => ({
+  tenantAuthMiddleware: vi.fn(async (_c: unknown, next: () => Promise<void>) => next()),
+}))
+
+vi.mock('../../server/middleware/admin-auth', () => ({
+  adminAuthMiddleware: vi.fn(async (_c: unknown, next: () => Promise<void>) => next()),
+}))
+
+// ---------------------------------------------------------------------------
 // Mock server/lib/stripe — return a controllable stub
 // ---------------------------------------------------------------------------
 const mockStripe = {
