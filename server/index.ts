@@ -15,6 +15,7 @@ import { renewalsRouter } from './routes/renewals'
 import { insuranceRouter } from './routes/insurance'
 import { exportsRouter } from './routes/exports'
 import { stripeRouter } from './routes/stripe'
+import { webhookRouter } from './routes/webhook'
 
 export interface Env {
   SUPABASE_URL: string
@@ -26,6 +27,9 @@ export interface Env {
 
 export function createApp() {
   const app = new Hono<{ Bindings: Env }>()
+
+  // Webhook MUST be before CORS — needs raw body
+  app.route('/api/webhooks', webhookRouter)
 
   app.use('/api/*', cors())
 
