@@ -17,6 +17,7 @@ import { exportsRouter } from './routes/exports'
 import { stripeRouter } from './routes/stripe'
 import { webhookRouter } from './routes/webhook'
 import { portalAuthRouter } from './routes/portal-auth'
+import { portalRouter } from './routes/portal'
 
 export interface Env {
   SUPABASE_URL: string
@@ -54,6 +55,7 @@ export function createApp() {
   app.route('/api/exports', exportsRouter)
   app.route('/api/stripe', stripeRouter)
   app.route('/api/admin', portalAuthRouter)
+  app.route('/api/portal', portalRouter)
 
   return app
 }
