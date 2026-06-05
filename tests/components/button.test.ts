@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { buttonClasses } from '../../src/components/ui/button'
+import { buttonClasses } from '../../src/components/ui/button-variants'
 
 describe('buttonClasses', () => {
   it('navy is the primary (navy background)', () => {

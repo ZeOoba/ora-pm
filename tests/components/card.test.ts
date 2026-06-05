@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { cardClasses } from '../../src/components/ui/card'
+import { cardClasses } from '../../src/components/ui/card-variants'
 
 describe('cardClasses', () => {
   it('defaults to bordered + shadow', () => {
