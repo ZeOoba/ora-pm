@@ -38,6 +38,7 @@ describe('domain types', () => {
       expense_stop_amount: null, ti_allowance: null, ti_reimbursement_schedule: null,
       percentage_rent_terms: null, options: null, notes: null,
       created_at: '2026-01-01T00:00:00Z',
+      autopay_enabled: false, autopay_payment_method_id: null,
     }
     expect(l.base_rent_monthly).toBe(3000)
   })

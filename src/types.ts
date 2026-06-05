@@ -57,6 +57,8 @@ export interface Lease {
   ti_reimbursement_schedule: unknown | null
   percentage_rent_terms: PercentageRentTerms | null
   options: LeaseOption[] | null; notes: string | null; created_at: string
+  autopay_enabled: boolean
+  autopay_payment_method_id: string | null
 }
 
 export interface LeaseAmendment {
