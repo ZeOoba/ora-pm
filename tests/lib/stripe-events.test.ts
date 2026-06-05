@@ -139,3 +139,40 @@ describe('handleStripeEvent — unknown event type', () => {
     expect((db as unknown as { updateFn: ReturnType<typeof vi.fn> }).updateFn).not.toHaveBeenCalled()
   })
 })
+
+describe('handleStripeEvent — DB error propagation', () => {
+  it('throws when DB update fails so Stripe retries delivery', async () => {
+    const eqFn = vi.fn().mockResolvedValue({ error: { message: 'connection refused' } })
+    const updateFn = vi.fn().mockReturnValue({ eq: eqFn })
+    const from = vi.fn().mockReturnValue({ update: updateFn })
+    const db = { from } as unknown as DB
+
+    const event = {
+      type: 'payment_intent.succeeded',
+      data: { object: { id: 'pi_dberr', metadata: {} } },
+    } as unknown as Stripe.Event
+
+    await expect(handleStripeEvent(event, db)).rejects.toThrow('DB update failed')
+  })
+})
+
+describe('handleStripeEvent — expanded payment_intent object', () => {
+  it('extracts .id when charge.payment_intent is an expanded object', async () => {
+    const db = makeDb()
+    const event = {
+      type: 'charge.failed',
+      data: {
+        object: {
+          id: 'ch_exp',
+          payment_intent: { id: 'pi_expanded', object: 'payment_intent' },
+          failure_code: 'nsf',
+          failure_message: 'Insufficient funds',
+        },
+      },
+    } as unknown as Stripe.Event
+
+    await handleStripeEvent(event, db as unknown as DB)
+
+    expect((db as unknown as { eqFn: ReturnType<typeof vi.fn> }).eqFn).toHaveBeenCalledWith('stripe_payment_intent_id', 'pi_expanded')
+  })
+})
