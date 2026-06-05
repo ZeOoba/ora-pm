@@ -4,6 +4,7 @@ import { api } from '../lib/api'
 import { PageHeader } from '../components/PageHeader'
 import { StatusBadge } from '../components/StatusBadge'
 import { KpiStat } from '../components/ui/KpiStat'
+import { EmptyState } from '../components/ui/EmptyState'
 import { formatCurrency, formatDate } from '../lib/format'
 import type { RentRollRow, CriticalDateRow, ARLedgerRow } from '../types'
 
@@ -94,10 +95,7 @@ export function Dashboard() {
 
       {/* Empty state when everything is healthy */}
       {urgentDates.length === 0 && totalAR === 0 && (
-        <div className="text-center py-12 text-gray-400">
-          <p className="text-lg">✓ Portfolio is healthy</p>
-          <p className="text-sm mt-1">No urgent dates or outstanding AR.</p>
-        </div>
+        <EmptyState title="Portfolio is healthy" message="No urgent dates or outstanding AR." />
       )}
     </div>
   )
