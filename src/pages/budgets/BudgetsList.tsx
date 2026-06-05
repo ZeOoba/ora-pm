@@ -133,10 +133,10 @@ export function BudgetsList() {
     setSaving(true)
     setSaveError(null)
     try {
-      // Only save categories that have a non-empty draft value
+      // Only save categories that have a non-empty, numeric draft value
       const toSave = ALL_CATEGORIES.filter(cat => {
-        const raw = getDraftValue(cat)
-        return raw !== ''
+        const v = getDraftValue(cat)
+        return v !== '' && !isNaN(Number(v))
       })
       await Promise.all(
         toSave.map(cat =>
