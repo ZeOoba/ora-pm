@@ -9,6 +9,8 @@ type Env = {
   SUPABASE_SERVICE_ROLE_KEY: string
   CRON_SECRET: string
   STRIPE_SECRET_KEY: string
+  RESEND_API_KEY?: string
+  RESEND_FROM_EMAIL?: string
 }
 
 export const cronRouter = new Hono<{ Bindings: Env }>()
@@ -107,4 +109,92 @@ cronRouter.post('/monthly-billing', async (c) => {
   }
 
   return c.json({ posted, skipped, errors, errorMessages, year, month })
+})
+
+// POST /api/cron/critical-dates-alerts
+// Daily: query critical_dates view, dedup via sent_notifications, send email digest
+cronRouter.post('/critical-dates-alerts', async (c) => {
+  const db = getDb(c.env)
+  const RECIPIENTS = ['ggoldberg@oxfordra.net', 'egoldberg@oxfordra.net']
+  const HORIZON_DAYS = 90
+
+  // Query critical dates within horizon
+  const horizonDate = new Date()
+  horizonDate.setDate(horizonDate.getDate() + HORIZON_DAYS)
+  const horizonStr = horizonDate.toISOString().slice(0, 10)
+
+  const { data: criticalDates, error: cdErr } = await db
+    .from('critical_dates')
+    .select('*')
+    .lte('critical_date', horizonStr)
+
+  if (cdErr) return c.json({ error: cdErr.message }, 500)
+  if (!criticalDates || criticalDates.length === 0) {
+    return c.json({ new_alerts: 0, skipped: 0, emailed: false })
+  }
+
+  // Dedup: check which reference_ids already notified this recipient
+  const refIds = criticalDates.map((r: { reference_id: string }) => r.reference_id)
+  const { data: alreadySent } = await db
+    .from('sent_notifications')
+    .select('reference_id, recipient')
+    .in('reference_id', refIds)
+
+  const sentSet = new Set((alreadySent ?? []).map((s: { reference_id: string; recipient: string }) => `${s.reference_id}:${s.recipient}`))
+
+  // Determine new alerts (items not yet sent to at least one recipient)
+  type CritRow = { date_type: string; reference_id: string; tenant_name: string; property_name: string | null; suite: string | null; critical_date: string; days_until: number; urgency: string }
+  const newAlerts: CritRow[] = (criticalDates as CritRow[]).filter(r =>
+    RECIPIENTS.some(rec => !sentSet.has(`${r.reference_id}:${rec}`))
+  )
+
+  if (newAlerts.length === 0) {
+    return c.json({ new_alerts: 0, skipped: criticalDates.length, emailed: false })
+  }
+
+  // Record in sent_notifications (upsert / ignore duplicates)
+  const notifications = newAlerts.flatMap(r =>
+    RECIPIENTS.map(rec => ({
+      notification_type: 'critical_date_alert',
+      reference_id: r.reference_id,
+      recipient: rec,
+    }))
+  )
+
+  await db.from('sent_notifications').insert(notifications)
+
+  // Build email digest
+  const urgencyOrder: Record<string, number> = { overdue: 0, urgent: 1, warning: 2, notice: 3 }
+  const sorted = [...newAlerts].sort((a, b) => (urgencyOrder[a.urgency] ?? 9) - (urgencyOrder[b.urgency] ?? 9))
+
+  const urgencyLabel: Record<string, string> = { overdue: '🔴 OVERDUE', urgent: '🟠 URGENT (≤30d)', warning: '🟡 WARNING (≤60d)', notice: '⚪ NOTICE (≤90d)' }
+
+  const lines = sorted.map(r => {
+    const location = [r.property_name, r.suite].filter(Boolean).join(' · ')
+    return `${urgencyLabel[r.urgency] ?? r.urgency} | ${r.date_type.replace(/_/g,' ')} | ${r.tenant_name} | ${location} | ${r.critical_date} (${r.days_until}d)`
+  })
+
+  const bodyText = `ORA PM — Critical Dates Alert\n${new Date().toISOString().slice(0,10)}\n\n${lines.join('\n')}\n\nTotal: ${newAlerts.length} item(s)\nhttps://ora-pm.pages.dev/critical-dates`
+
+  // Send email if Resend is configured
+  let emailed = false
+  if (c.env.RESEND_API_KEY) {
+    const fromEmail = c.env.RESEND_FROM_EMAIL ?? 'pm@oxfordra.net'
+    const emailRes = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${c.env.RESEND_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        from: `ORA Property Manager <${fromEmail}>`,
+        to: RECIPIENTS,
+        subject: `[ORA PM] ${newAlerts.length} Critical Date${newAlerts.length > 1 ? 's' : ''} — ${new Date().toISOString().slice(0,10)}`,
+        text: bodyText,
+      }),
+    })
+    emailed = emailRes.ok
+  }
+
+  return c.json({ new_alerts: newAlerts.length, skipped: criticalDates.length - newAlerts.length, emailed })
 })
