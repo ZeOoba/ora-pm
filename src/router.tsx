@@ -26,6 +26,7 @@ import { InsuranceList }    from './pages/insurance/InsuranceList'
 import { PortalApp } from './portal/PortalApp'
 import { UnitsPage } from './pages/units/UnitsPage'
 import { RentRoll } from './pages/reports/RentRoll'
+import { StyleGuide } from './pages/StyleGuide'
 
 function Layout({ children }: { children: React.ReactNode }) {
   return (
@@ -37,6 +38,7 @@ function Layout({ children }: { children: React.ReactNode }) {
 
 export const router = createBrowserRouter([
   { path: '/login', element: <AdminLogin /> },
+  { path: '/styleguide', element: <StyleGuide /> },
   { path: '/', element: <Layout><Dashboard /></Layout> },
   { path: '/properties', element: <Layout><PropertiesList /></Layout> },
   { path: '/properties/new', element: <Layout><PropertyForm /></Layout> },
