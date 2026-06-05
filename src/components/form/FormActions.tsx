@@ -20,11 +20,11 @@ export function FormActions({
         <button
           type="submit"
           disabled={pending}
-          className="bg-blue-600 hover:bg-blue-700 text-white rounded-md px-4 py-2 text-sm font-medium disabled:opacity-50 transition-colors"
+          className="bg-navy hover:bg-navy-700 text-white rounded-md px-4 py-2 text-sm font-medium disabled:opacity-50 transition-colors"
         >
           {pending ? 'Saving…' : submitLabel}
         </button>
-        <Link to={cancelTo} className="text-sm text-gray-600 hover:text-gray-900">
+        <Link to={cancelTo} className="text-sm text-status-neutral hover:text-navy">
           Cancel
         </Link>
       </div>
