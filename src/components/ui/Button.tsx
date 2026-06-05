@@ -1,4 +1,4 @@
-import { buttonClasses, type ButtonVariant } from './button'
+import { buttonClasses, type ButtonVariant } from './button-variants'
 
 export function Button({
   variant = 'navy',

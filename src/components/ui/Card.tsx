@@ -1,4 +1,4 @@
-import { cardClasses, type CardVariant } from './card'
+import { cardClasses, type CardVariant } from './card-variants'
 
 export function Card({
   variant = 'default',
