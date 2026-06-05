@@ -133,3 +133,29 @@ export interface CriticalDateRow {
   property_name: string | null; suite: string | null
   critical_date: string; days_until: number; urgency: CriticalDateUrgency
 }
+
+export type NoticeMethod = 'email' | 'certified_mail' | 'portal' | 'hand_delivered'
+export type CorrespondenceDirection = 'inbound' | 'outbound'
+export type CorrespondenceMethod = 'email' | 'phone' | 'letter' | 'portal' | 'in_person'
+
+export interface TenantNotice {
+  id: string; lease_id: string; notice_type: NoticeType; sent_date: string
+  method: NoticeMethod; document_path: string | null; notes: string | null; created_at: string
+}
+
+export interface CorrespondenceEntry {
+  id: string; tenant_id: string; direction: CorrespondenceDirection; contact_date: string
+  subject: string; summary: string; method: CorrespondenceMethod
+  linked_notice_id: string | null; created_at: string; created_by: string | null
+}
+
+export interface BrokerCommission {
+  id: string; lease_id: string; broker_name: string; broker_company: string | null
+  commission_rate_pct: number | null; commission_amount: number | null
+  payment_status: 'pending' | 'paid'; payment_date: string | null; notes: string | null; created_at: string
+}
+
+export interface LeaseDocument {
+  id: string; lease_id: string; type: 'lease' | 'amendment' | 'estoppel' | 'notice' | 'other'
+  name: string; storage_path: string; uploaded_at: string; uploaded_by: string | null
+}

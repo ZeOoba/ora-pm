@@ -43,3 +43,20 @@ tenantsRouter.put('/:id', async (c) => {
   if (error) return c.json({ error: error.message }, 400)
   return c.json({ data })
 })
+
+// POST /api/tenants/:id/correspondence
+tenantsRouter.post('/:id/correspondence', async (c) => {
+  const body = await c.req.json()
+  if (!body.direction || !body.contact_date || !body.subject || !body.summary || !body.method) {
+    return c.json({ error: 'direction, contact_date, subject, summary, method required' }, 400)
+  }
+  const { direction, contact_date, subject, summary, method } = body
+  const db = getDb(c.env)
+  const { data, error } = await db
+    .from('correspondence_log')
+    .insert({ direction, contact_date, subject, summary, method, tenant_id: c.req.param('id') })
+    .select()
+    .single()
+  if (error) return c.json({ error: error.message }, 400)
+  return c.json({ data }, 201)
+})
