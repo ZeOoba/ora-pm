@@ -19,6 +19,25 @@ async function portalFetch<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>
 }
 
+async function stripeFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  const { data: { session } } = await portalSupabase.auth.getSession()
+  const jwt = session?.access_token
+  if (!jwt) throw new Error('Not authenticated')
+
+  const res = await fetch(`/api/stripe${path}`, {
+    ...init,
+    headers: {
+      Authorization: `Bearer ${jwt}`,
+      ...init?.headers,
+    },
+  })
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({})) as { error?: string }
+    throw new Error(body.error ?? `HTTP ${res.status}`)
+  }
+  return res.json() as Promise<T>
+}
+
 export interface TenantMe {
   tenant: {
     id: string
@@ -90,11 +109,11 @@ export const portalApi = {
     }),
 
   createSetupIntent: (tenant_id: string) =>
-    fetch('/api/stripe/setup-intent', {
+    stripeFetch<{ client_secret: string }>('/setup-intent', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ tenant_id }),
-    }).then(r => r.json()) as Promise<{ client_secret: string }>,
+    }),
 
   createPaymentIntent: (body: {
     tenant_id: string
@@ -103,9 +122,16 @@ export const portalApi = {
     payment_method_id: string
     description?: string
   }) =>
-    fetch('/api/stripe/payment-intent', {
+    stripeFetch<{ payment_intent_id: string; status: string }>('/payment-intent', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-    }).then(r => r.json()) as Promise<{ payment_intent_id: string; status: string }>,
+    }),
+
+  ensureStripeCustomer: (tenant_id: string, email?: string, name?: string) =>
+    stripeFetch<{ customer_id: string }>('/customer', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tenant_id, email, name }),
+    }),
 }
