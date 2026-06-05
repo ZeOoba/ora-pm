@@ -32,10 +32,12 @@ portalRouter.get('/charges', async (c) => {
   const userId = c.get('tenantUserId')
   const db = getDb(c.env)
 
-  const { data: tenant } = await db.from('tenants').select('id').eq('auth_user_id', userId).single()
+  const { data: tenant, error: tenantErr } = await db.from('tenants').select('id').eq('auth_user_id', userId).single()
+  if (tenantErr) return c.json({ error: 'DB error' }, 500)
   if (!tenant) return c.json({ error: 'Tenant not found' }, 404)
 
-  const { data: leases } = await db.from('leases').select('id').eq('tenant_id', tenant.id).eq('status', 'active')
+  const { data: leases, error: leasesErr } = await db.from('leases').select('id').eq('tenant_id', tenant.id).eq('status', 'active')
+  if (leasesErr) return c.json({ error: 'DB error' }, 500)
   const leaseIds = (leases ?? []).map((l: { id: string }) => l.id)
   if (!leaseIds.length) return c.json({ data: [] })
 
@@ -54,10 +56,12 @@ portalRouter.get('/payments', async (c) => {
   const userId = c.get('tenantUserId')
   const db = getDb(c.env)
 
-  const { data: tenant } = await db.from('tenants').select('id').eq('auth_user_id', userId).single()
+  const { data: tenant, error: tenantErr } = await db.from('tenants').select('id').eq('auth_user_id', userId).single()
+  if (tenantErr) return c.json({ error: 'DB error' }, 500)
   if (!tenant) return c.json({ error: 'Tenant not found' }, 404)
 
-  const { data: leases } = await db.from('leases').select('id').eq('tenant_id', tenant.id)
+  const { data: leases, error: leasesErr } = await db.from('leases').select('id').eq('tenant_id', tenant.id)
+  if (leasesErr) return c.json({ error: 'DB error' }, 500)
   const leaseIds = (leases ?? []).map((l: { id: string }) => l.id)
   if (!leaseIds.length) return c.json({ data: [] })
 
@@ -76,7 +80,8 @@ portalRouter.get('/lease', async (c) => {
   const userId = c.get('tenantUserId')
   const db = getDb(c.env)
 
-  const { data: tenant } = await db.from('tenants').select('id').eq('auth_user_id', userId).single()
+  const { data: tenant, error: tenantErr } = await db.from('tenants').select('id').eq('auth_user_id', userId).single()
+  if (tenantErr) return c.json({ error: 'DB error' }, 500)
   if (!tenant) return c.json({ error: 'Tenant not found' }, 404)
 
   const { data, error } = await db
@@ -94,10 +99,12 @@ portalRouter.get('/documents', async (c) => {
   const userId = c.get('tenantUserId')
   const db = getDb(c.env)
 
-  const { data: tenant } = await db.from('tenants').select('id').eq('auth_user_id', userId).single()
+  const { data: tenant, error: tenantErr } = await db.from('tenants').select('id').eq('auth_user_id', userId).single()
+  if (tenantErr) return c.json({ error: 'DB error' }, 500)
   if (!tenant) return c.json({ error: 'Tenant not found' }, 404)
 
-  const { data: leases } = await db.from('leases').select('id').eq('tenant_id', tenant.id)
+  const { data: leases, error: leasesErr } = await db.from('leases').select('id').eq('tenant_id', tenant.id)
+  if (leasesErr) return c.json({ error: 'DB error' }, 500)
   const leaseIds = (leases ?? []).map((l: { id: string }) => l.id)
   if (!leaseIds.length) return c.json({ data: [] })
 
@@ -118,10 +125,11 @@ portalRouter.patch('/autopay', async (c) => {
   if (!lease_id) return c.json({ error: 'lease_id required' }, 400)
 
   const db = getDb(c.env)
-  const { data: tenant } = await db.from('tenants').select('id').eq('auth_user_id', userId).single()
+  const { data: tenant, error: tenantErr } = await db.from('tenants').select('id').eq('auth_user_id', userId).single()
+  if (tenantErr) return c.json({ error: 'DB error' }, 500)
   if (!tenant) return c.json({ error: 'Tenant not found' }, 404)
 
-  // Verify this lease belongs to this tenant
+  // Verify this lease belongs to this tenant (IDOR guard)
   const { data: lease } = await db.from('leases').select('id, tenant_id').eq('id', lease_id).single()
   if (!lease || lease.tenant_id !== tenant.id) return c.json({ error: 'Lease not found' }, 404)
 
