@@ -195,13 +195,13 @@ export function TenantDetail() {
               )}
               {correspondence.map(entry => (
                 <tr key={entry.id} className="hover:bg-gray-50">
-                  <td className="px-4 py-3 text-gray-600">{entry.contact_date}</td>
+                  <td className="px-4 py-3 text-gray-600">{formatDate(entry.contact_date)}</td>
                   <td className="px-4 py-3">
                     <span className={`inline-block px-2 py-0.5 rounded-full text-xs ${entry.direction === 'inbound' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'}`}>
                       {entry.direction}
                     </span>
                   </td>
-                  <td className="px-4 py-3 text-gray-600 capitalize">{entry.method.replace('_', ' ')}</td>
+                  <td className="px-4 py-3 text-gray-600 capitalize">{entry.method.replace(/_/g, ' ')}</td>
                   <td className="px-4 py-3 font-medium text-gray-900">{entry.subject}</td>
                   <td className="px-4 py-3 text-gray-600 max-w-xs truncate">{entry.summary}</td>
                 </tr>
