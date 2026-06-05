@@ -5,6 +5,7 @@ import { PageHeader } from '../../components/PageHeader'
 import { StatusBadge } from '../../components/StatusBadge'
 import { formatCurrency, formatDate } from '../../lib/format'
 import type { Tenant, Lease, InsuranceCertificate, Unit, Property } from '../../types'
+import { TenantPortalAdmin } from '../admin/TenantPortalAdmin'
 
 type LeaseWithJoins = Lease & {
   units?: Unit & { properties?: Property }
@@ -65,6 +66,11 @@ export function TenantDetail() {
         {data.notes && (
           <p className="text-sm text-gray-500 mt-3 pt-3 border-t border-gray-100">{data.notes}</p>
         )}
+      </div>
+
+      {/* Tenant Portal admin */}
+      <div className="mb-6">
+        <TenantPortalAdmin tenant={data} />
       </div>
 
       {/* Leases section */}
