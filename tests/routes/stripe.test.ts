@@ -25,21 +25,9 @@ vi.mock('../../server/lib/stripe', () => ({
 // ---------------------------------------------------------------------------
 // We keep a mutable map so individual tests can override return values.
 const supabaseMocks = {
-  tenantSelectResult: { data: null as Record<string, unknown> | null, error: null },
+  tenantSelectResult: { data: null as Record<string, unknown> | null, error: null as { message: string } | null },
   tenantUpdateError: null as { message: string } | null,
   paymentsInsertError: null as { message: string } | null,
-}
-
-// Build a chainable mock that captures the method chain and resolves at .single()
-function makeChain(resolveWith: () => { data: unknown; error: unknown }) {
-  const chain: Record<string, unknown> = {}
-  const noop = () => chain
-  chain.select = noop
-  chain.eq = noop
-  chain.update = noop
-  chain.insert = () => ({ select: () => ({ single: resolveWith }), then: resolveWith })
-  chain.single = resolveWith
-  return chain
 }
 
 const mockDb = {
@@ -67,7 +55,13 @@ const mockDb = {
         })),
       }
     }
-    return makeChain(() => Promise.resolve({ data: null, error: null }))
+    return {
+      select: vi.fn().mockReturnValue({
+        eq: vi.fn().mockReturnValue({
+          single: vi.fn().mockResolvedValue({ data: null, error: null }),
+        }),
+      }),
+    }
   }),
 }
 
@@ -140,6 +134,26 @@ describe('POST /api/stripe/customer', () => {
     expect(body.customer_id).toBe('cus_existing')
     expect(mockStripe.customers.create).not.toHaveBeenCalled()
   })
+
+  it('3b. returns 404 when tenant not found in DB', async () => {
+    supabaseMocks.tenantSelectResult = { data: null, error: { message: 'not found' } }
+
+    const res = await post('/api/stripe/customer', { tenant_id: 'missing-tenant' })
+    expect(res.status).toBe(404)
+    const body = await res.json() as { error: string }
+    expect(body.error).toMatch(/tenant/i)
+  })
+
+  it('3c. returns 500 when DB update fails (ghost customer prevention)', async () => {
+    supabaseMocks.tenantSelectResult = { data: { stripe_customer_id: null }, error: null }
+    supabaseMocks.tenantUpdateError = { message: 'DB write failed' }
+    mockStripe.customers.create.mockResolvedValue({ id: 'cus_ghost' })
+
+    const res = await post('/api/stripe/customer', { tenant_id: 'tenant-1', email: 'x@example.com' })
+    expect(res.status).toBe(500)
+    const body = await res.json() as { error: string }
+    expect(body.error).toMatch(/save/i)
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -165,6 +179,15 @@ describe('POST /api/stripe/setup-intent', () => {
     const body = await res.json() as { error: string }
     expect(body.error).toMatch(/customer/i)
     expect(mockStripe.setupIntents.create).not.toHaveBeenCalled()
+  })
+
+  it('5b. returns 404 when tenant not found in DB', async () => {
+    supabaseMocks.tenantSelectResult = { data: null, error: { message: 'not found' } }
+
+    const res = await post('/api/stripe/setup-intent', { tenant_id: 'missing-tenant' })
+    expect(res.status).toBe(404)
+    const body = await res.json() as { error: string }
+    expect(body.error).toMatch(/tenant/i)
   })
 })
 
@@ -213,5 +236,38 @@ describe('POST /api/stripe/payment-intent', () => {
     const res = await post('/api/stripe/payment-intent', incomplete)
     expect(res.status).toBe(400)
     expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
+  })
+
+  it('9. returns 400 when amount_cents is not an integer', async () => {
+    supabaseMocks.tenantSelectResult = { data: { stripe_customer_id: 'cus_test123' }, error: null }
+
+    const res = await post('/api/stripe/payment-intent', { ...validPayload, amount_cents: 250.50 })
+    expect(res.status).toBe(400)
+    const body = await res.json() as { error: string }
+    expect(body.error).toMatch(/integer/i)
+    expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
+  })
+
+  it('10. returns 404 when tenant not found in DB', async () => {
+    supabaseMocks.tenantSelectResult = { data: null, error: { message: 'not found' } }
+
+    const res = await post('/api/stripe/payment-intent', validPayload)
+    expect(res.status).toBe(404)
+    const body = await res.json() as { error: string }
+    expect(body.error).toMatch(/tenant/i)
+  })
+
+  it('11. returns 500 when payments DB insert fails', async () => {
+    supabaseMocks.tenantSelectResult = { data: { stripe_customer_id: 'cus_test123' }, error: null }
+    supabaseMocks.paymentsInsertError = { message: 'insert failed' }
+    mockStripe.paymentIntents.create.mockResolvedValue({
+      id: 'pi_test789',
+      status: 'processing',
+    })
+
+    const res = await post('/api/stripe/payment-intent', validPayload)
+    expect(res.status).toBe(500)
+    const body = await res.json() as { error: string }
+    expect(body.error).toMatch(/record/i)
   })
 })
