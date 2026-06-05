@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { getDb } from '../db/client'
-import { ExpenseInsertSchema } from '../lib/schemas'
+import { ExpenseInsertSchema, ExpenseUpdateSchema } from '../lib/schemas'
 
 type Env = { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string }
 
@@ -32,7 +32,7 @@ expensesRouter.post('/', async (c) => {
 expensesRouter.put('/:id', async (c) => {
   const db = getDb(c.env)
   const raw = await c.req.json()
-  const parsed = ExpenseInsertSchema.partial().safeParse(raw)
+  const parsed = ExpenseUpdateSchema.safeParse(raw)
   if (!parsed.success) return c.json({ error: parsed.error.flatten().fieldErrors }, 422)
   const { data, error } = await db
     .from('expenses')
