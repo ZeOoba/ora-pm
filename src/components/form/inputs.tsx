@@ -1,7 +1,7 @@
 import { forwardRef } from 'react'
 
 const base =
-  'w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-50 disabled:text-gray-500'
+  'w-full border border-navy/15 rounded-md px-3 py-2 text-sm text-navy placeholder:text-status-neutral/50 focus:outline-none focus:ring-2 focus:ring-gold focus:border-transparent disabled:bg-parchment/40 disabled:text-status-neutral'
 
 export const TextInput = forwardRef<HTMLInputElement, React.InputHTMLAttributes<HTMLInputElement>>(
   (props, ref) => <input ref={ref} type="text" {...props} className={`${base} ${props.className ?? ''}`} />
@@ -37,8 +37,8 @@ export function Checkbox({
   ...props
 }: { label: string } & React.InputHTMLAttributes<HTMLInputElement>) {
   return (
-    <label className="flex items-center gap-2 text-sm text-gray-700 mb-4 cursor-pointer">
-      <input type="checkbox" {...props} className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
+    <label className="flex items-center gap-2 text-sm text-navy mb-4 cursor-pointer">
+      <input type="checkbox" {...props} className="h-4 w-4 rounded border-navy/20 text-navy focus:ring-gold" />
       {label}
     </label>
   )
