@@ -3,6 +3,8 @@ import { Link } from 'react-router-dom'
 import { api } from '../lib/api'
 import { PageHeader } from '../components/PageHeader'
 import { StatusBadge } from '../components/StatusBadge'
+import { KpiStat } from '../components/ui/KpiStat'
+import { EmptyState } from '../components/ui/EmptyState'
 import { formatCurrency, formatDate } from '../lib/format'
 import type { RentRollRow, CriticalDateRow, ARLedgerRow } from '../types'
 
@@ -41,41 +43,10 @@ export function Dashboard() {
 
       {/* KPI strip */}
       <div className="grid grid-cols-4 gap-4 mb-8">
-        {[
-          {
-            label: 'Occupancy',
-            value: `${occupancyPct}%`,
-            sub: `${occupied} of ${totalUnits} units`,
-            warn: false,
-          },
-          {
-            label: 'Monthly Rent Roll',
-            value: formatCurrency(totalRentRoll),
-            sub: 'Active leases',
-            warn: false,
-          },
-          {
-            label: 'Outstanding AR',
-            value: formatCurrency(totalAR),
-            sub: 'Unpaid charges',
-            warn: totalAR > 0,
-          },
-          {
-            label: 'Critical Dates',
-            value: String(urgentDates.length),
-            sub: 'Urgent or overdue',
-            warn: urgentDates.length > 0,
-          },
-        ].map(({ label, value, sub, warn }) => (
-          <div
-            key={label}
-            className={`rounded-lg border p-4 ${warn ? 'border-red-200 bg-red-50' : 'border-gray-200 bg-white'}`}
-          >
-            <p className="text-xs text-gray-500 uppercase tracking-wider">{label}</p>
-            <p className={`text-2xl font-bold mt-1 ${warn ? 'text-red-700' : 'text-gray-900'}`}>{value}</p>
-            <p className="text-xs text-gray-400 mt-0.5">{sub}</p>
-          </div>
-        ))}
+        <KpiStat label="Occupancy" value={`${occupancyPct}%`} sub={`${occupied} of ${totalUnits} units`} />
+        <KpiStat label="Monthly Rent Roll" value={formatCurrency(totalRentRoll)} sub="Active leases" />
+        <KpiStat label="Outstanding AR" value={formatCurrency(totalAR)} sub="Unpaid charges" warn={totalAR > 0} />
+        <KpiStat label="Critical Dates" value={urgentDates.length} sub="Urgent or overdue" warn={urgentDates.length > 0} />
       </div>
 
       {/* Urgent critical dates */}
@@ -124,10 +95,7 @@ export function Dashboard() {
 
       {/* Empty state when everything is healthy */}
       {urgentDates.length === 0 && totalAR === 0 && (
-        <div className="text-center py-12 text-gray-400">
-          <p className="text-lg">✓ Portfolio is healthy</p>
-          <p className="text-sm mt-1">No urgent dates or outstanding AR.</p>
-        </div>
+        <EmptyState title="Portfolio is healthy" message="No urgent dates or outstanding AR." />
       )}
     </div>
   )

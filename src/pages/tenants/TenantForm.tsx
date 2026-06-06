@@ -125,13 +125,12 @@ export function TenantForm() {
           </Field>
 
           <Field label="Contact Email" htmlFor="contact_email" error={errors.contact_email}>
-            <input
+            <TextInput
               id="contact_email"
               type="email"
               value={form.contact_email}
               onChange={e => set('contact_email', e.target.value)}
               placeholder="e.g. jane@acme.com"
-              className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
             />
           </Field>
 

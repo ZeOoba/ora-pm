@@ -13,6 +13,7 @@ import { InsuranceForm } from './pages/insurance/InsuranceForm'
 import { LeasesList } from './pages/leases/LeasesList'
 import { LeaseDetail } from './pages/leases/LeaseDetail'
 import { LeaseForm } from './pages/leases/LeaseForm'
+import { LeaseIntake } from './pages/leases/LeaseIntake'
 import { BillingDashboard } from './pages/billing/BillingDashboard'
 import { ARDashboard } from './pages/ar/ARDashboard'
 import { CriticalDatesFeed } from './pages/critical-dates/CriticalDatesFeed'
@@ -26,6 +27,7 @@ import { InsuranceList }    from './pages/insurance/InsuranceList'
 import { PortalApp } from './portal/PortalApp'
 import { UnitsPage } from './pages/units/UnitsPage'
 import { RentRoll } from './pages/reports/RentRoll'
+import { StyleGuide } from './pages/StyleGuide'
 
 function Layout({ children }: { children: React.ReactNode }) {
   return (
@@ -37,6 +39,7 @@ function Layout({ children }: { children: React.ReactNode }) {
 
 export const router = createBrowserRouter([
   { path: '/login', element: <AdminLogin /> },
+  { path: '/styleguide', element: <StyleGuide /> },
   { path: '/', element: <Layout><Dashboard /></Layout> },
   { path: '/properties', element: <Layout><PropertiesList /></Layout> },
   { path: '/properties/new', element: <Layout><PropertyForm /></Layout> },
@@ -48,6 +51,7 @@ export const router = createBrowserRouter([
   { path: '/tenants/:id', element: <Layout><TenantDetail /></Layout> },
   { path: '/leases', element: <Layout><LeasesList /></Layout> },
   { path: '/leases/new', element: <Layout><LeaseForm /></Layout> },
+  { path: '/leases/intake', element: <Layout><LeaseIntake /></Layout> },
   { path: '/leases/:id', element: <Layout><LeaseDetail /></Layout> },
   { path: '/billing', element: <Layout><BillingDashboard /></Layout> },
   { path: '/ar', element: <Layout><ARDashboard /></Layout> },
