@@ -20,6 +20,7 @@ import { webhookRouter } from './routes/webhook'
 import { portalAuthRouter } from './routes/portal-auth'
 import { portalRouter } from './routes/portal'
 import { portalInsuranceRouter } from './routes/portal-insurance'
+import { intakeRouter } from './routes/intake'
 import { errorHandlerMiddleware } from './middleware/error-handler'
 
 export interface Env {
@@ -30,6 +31,9 @@ export interface Env {
   STRIPE_WEBHOOK_SECRET: string
   RESEND_API_KEY?: string
   RESEND_FROM_EMAIL?: string
+  ANTHROPIC_API_KEY?: string
+  CONFIDENTIAL_TERMS?: string  // comma-separated denylist; never commit real terms
+  INTAKE_MODEL?: string        // optional override for the lease-intake extraction model
 }
 
 export function createApp() {
@@ -75,6 +79,7 @@ export function createApp() {
   app.route('/api/renewals', renewalsRouter)
   app.route('/api/insurance', insuranceRouter)
   app.route('/api/exports', exportsRouter)
+  app.route('/api/intake', intakeRouter)
   app.route('/api/stripe', stripeRouter)
   app.route('/api/admin', portalAuthRouter)
   app.route('/api/portal', portalRouter)
