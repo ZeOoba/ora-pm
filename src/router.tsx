@@ -13,6 +13,7 @@ import { InsuranceForm } from './pages/insurance/InsuranceForm'
 import { LeasesList } from './pages/leases/LeasesList'
 import { LeaseDetail } from './pages/leases/LeaseDetail'
 import { LeaseForm } from './pages/leases/LeaseForm'
+import { LeaseIntake } from './pages/leases/LeaseIntake'
 import { BillingDashboard } from './pages/billing/BillingDashboard'
 import { ARDashboard } from './pages/ar/ARDashboard'
 import { CriticalDatesFeed } from './pages/critical-dates/CriticalDatesFeed'
@@ -50,6 +51,7 @@ export const router = createBrowserRouter([
   { path: '/tenants/:id', element: <Layout><TenantDetail /></Layout> },
   { path: '/leases', element: <Layout><LeasesList /></Layout> },
   { path: '/leases/new', element: <Layout><LeaseForm /></Layout> },
+  { path: '/leases/intake', element: <Layout><LeaseIntake /></Layout> },
   { path: '/leases/:id', element: <Layout><LeaseDetail /></Layout> },
   { path: '/billing', element: <Layout><BillingDashboard /></Layout> },
   { path: '/ar', element: <Layout><ARDashboard /></Layout> },
