@@ -12,6 +12,9 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "@fontsource/dm-sans": "^5.2.8",
+    "@fontsource/eb-garamond": "^5.2.7",
+    "@fontsource/ibm-plex-mono": "^5.2.7",
     "@stripe/react-stripe-js": "^6.6.0",
     "@stripe/stripe-js": "^9.7.0",
     "@supabase/supabase-js": "^2.45.0",

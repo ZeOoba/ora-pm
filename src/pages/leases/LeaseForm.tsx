@@ -73,11 +73,21 @@ function validate(f: FormState): FormErrors {
   return e
 }
 
-export function LeaseForm() {
+export function LeaseForm({
+  initialValues,
+  confidence,
+}: {
+  initialValues?: Partial<Record<keyof FormState, string>>
+  confidence?: Record<string, number>
+} = {}) {
   const navigate = useNavigate()
 
-  const [form, setForm] = useState<FormState>(EMPTY)
+  const [form, setForm] = useState<FormState>({ ...EMPTY, ...(initialValues ?? {}) } as FormState)
   const [errors, setErrors] = useState<FormErrors>({})
+
+  // Auto-extracted fields below this confidence get a "verify" hint in the form.
+  const lowConf = (k: string) =>
+    confidence !== undefined && confidence[k] !== undefined && confidence[k] < 0.85
 
   const tenantsQ = useQuery({
     queryKey: ['tenants'],
@@ -213,14 +223,14 @@ export function LeaseForm() {
 
           {/* Dates row */}
           <div className="grid grid-cols-2 gap-4">
-            <Field label="Start Date" htmlFor="start_date" required error={errors.start_date}>
+            <Field label="Start Date" htmlFor="start_date" required error={errors.start_date} hint={lowConf('start_date') ? '⚠ Verify — auto-extracted' : undefined}>
               <DateInput
                 id="start_date"
                 value={form.start_date}
                 onChange={e => set('start_date', e.target.value)}
               />
             </Field>
-            <Field label="End Date" htmlFor="end_date" required error={errors.end_date}>
+            <Field label="End Date" htmlFor="end_date" required error={errors.end_date} hint={lowConf('end_date') ? '⚠ Verify — auto-extracted' : undefined}>
               <DateInput
                 id="end_date"
                 value={form.end_date}
@@ -258,7 +268,7 @@ export function LeaseForm() {
 
           {/* Money fields — 2 columns */}
           <div className="grid grid-cols-2 gap-4">
-            <Field label="Base Rent ($/mo)" htmlFor="base_rent_monthly" required error={errors.base_rent_monthly}>
+            <Field label="Base Rent ($/mo)" htmlFor="base_rent_monthly" required error={errors.base_rent_monthly} hint={lowConf('base_rent_monthly') ? '⚠ Verify — auto-extracted' : undefined}>
               <NumberInput
                 id="base_rent_monthly"
                 value={form.base_rent_monthly}
@@ -267,7 +277,7 @@ export function LeaseForm() {
                 min={0}
               />
             </Field>
-            <Field label="CAM Estimate ($/mo)" htmlFor="cam_estimate_monthly" error={errors.cam_estimate_monthly}>
+            <Field label="CAM Estimate ($/mo)" htmlFor="cam_estimate_monthly" error={errors.cam_estimate_monthly} hint={lowConf('cam_estimate_monthly') ? '⚠ Verify — auto-extracted' : undefined}>
               <NumberInput
                 id="cam_estimate_monthly"
                 value={form.cam_estimate_monthly}
