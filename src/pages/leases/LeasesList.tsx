@@ -24,9 +24,14 @@ export function LeasesList() {
       <PageHeader
         title="Leases"
         action={
-          <Link to="/leases/new" className="bg-blue-600 hover:bg-blue-700 text-white text-sm px-3 py-1.5 rounded">
-            + Add Lease
-          </Link>
+          <div className="flex items-center gap-2">
+            <Link to="/leases/intake" className="border border-navy/30 hover:border-gold text-navy text-sm px-3 py-1.5 rounded">
+              Upload lease
+            </Link>
+            <Link to="/leases/new" className="bg-blue-600 hover:bg-blue-700 text-white text-sm px-3 py-1.5 rounded">
+              + Add Lease
+            </Link>
+          </div>
         }
       />
       <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
