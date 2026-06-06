@@ -40,7 +40,7 @@ leasesRouter.post('/', async (c) => {
   const parsed = LeaseInsertSchema.safeParse(raw)
   if (!parsed.success) return c.json({ error: parsed.error.flatten().fieldErrors }, 422)
   const { data, error } = await db.from('leases').insert(parsed.data).select().single()
-  if (error) return c.json({ error: 'Failed to create lease' }, 400)
+  if (error) return c.json({ error: error.message }, 400)
   // Auto-create renewal tracking record — swallow error if renewals table not ready
   if (data) {
     const lease = data as { id: string; end_date: string }

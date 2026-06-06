@@ -41,7 +41,9 @@ export const LeaseInsertSchema = z.object({
   cam_estimate_monthly: nonNegativeAmount.default(0),
   rent_type: z.enum(['nnn', 'gross', 'modified_gross']).default('nnn'),
   security_deposit: nonNegativeAmount.optional(),
-  notes: z.string().optional(),
+  expense_stop_amount: nonNegativeAmount.nullish(),
+  ti_allowance: nonNegativeAmount.nullish(),
+  notes: z.string().nullish(),
 })
 export const LeaseUpdateSchema = LeaseInsertSchema.partial()
 
