@@ -50,12 +50,13 @@ export function createApp() {
     c.json({ status: 'ok', ts: new Date().toISOString() })
   )
 
-  // Admin auth: gate all /api/* routes except public/already-authed paths
+  // Admin auth: gate all /api/* routes except public/already-authed paths.
+  // NOTE: /api/admin is intentionally NOT exempt — its tenant invite/revoke
+  // endpoints are privileged admin actions and must pass adminAuthMiddleware.
   const ADMIN_EXEMPT = [
     '/api/webhooks',
     '/api/cron',
     '/api/portal',
-    '/api/admin',
     '/api/health',
     '/api/stripe',
   ]

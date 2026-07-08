@@ -1,9 +1,15 @@
 import { Hono } from 'hono'
 import { createClient } from '@supabase/supabase-js'
 import { getDb } from '../db/client'
+import { adminAuthMiddleware } from '../middleware/admin-auth'
 import type { Env } from '../index'
 
 export const portalAuthRouter = new Hono<{ Bindings: Env }>()
+
+// Defense in depth: these endpoints create/delete Supabase auth users, so the
+// router enforces admin auth itself (not only via the app-level gate in
+// server/index.ts). Mirrors portalRouter's self-gating with tenantAuthMiddleware.
+portalAuthRouter.use('/*', adminAuthMiddleware)
 
 function adminClient(env: Env) {
   return createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
