@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
+import { api } from '../../lib/api'
 
 interface Tenant {
   id: string
@@ -16,21 +17,25 @@ export function TenantPortalAdmin({ tenant }: { tenant: Tenant }) {
   async function invite() {
     setStatus('sending')
     setErrorMsg('')
-    const res = await fetch(`/api/admin/tenants/${tenant.id}/invite`, { method: 'POST' })
-    if (res.ok) {
+    try {
+      await api.post(`/admin/tenants/${tenant.id}/invite`, {})
       setStatus('done')
       qc.invalidateQueries({ queryKey: ['tenant', tenant.id] })
-    } else {
-      const e = await res.json() as { error: string }
+    } catch (e) {
       setStatus('error')
-      setErrorMsg(e.error)
+      setErrorMsg((e as Error).message)
     }
   }
 
   async function revoke() {
     if (!confirm(`Revoke portal access for ${tenant.name}? They will be signed out immediately.`)) return
-    const res = await fetch(`/api/admin/tenants/${tenant.id}/revoke-access`, { method: 'DELETE' })
-    if (res.ok) qc.invalidateQueries({ queryKey: ['tenant', tenant.id] })
+    try {
+      await api.del(`/admin/tenants/${tenant.id}/revoke-access`)
+      qc.invalidateQueries({ queryKey: ['tenant', tenant.id] })
+    } catch (e) {
+      // Surface the failure so a revoke can't silently no-op.
+      alert(`Failed to revoke access: ${(e as Error).message}`)
+    }
   }
 
   const hasAccess = !!tenant.auth_user_id
