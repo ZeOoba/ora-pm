@@ -27,19 +27,13 @@ export function QBExport() {
     setLoading(true)
     setError(null)
     try {
-      const res = await fetch(
-        `/api/exports/qb-iif?property_id=${propertyId}&year=${year}&month=${month}`
+      const { blob, filename } = await api.download(
+        `/exports/qb-iif?property_id=${propertyId}&year=${year}&month=${month}`,
+        'export.iif'
       )
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({ error: res.statusText }))
-        throw new Error((body as { error: string }).error)
-      }
-      const blob  = await res.blob()
-      const fname = res.headers.get('Content-Disposition')
-        ?.match(/filename="([^"]+)"/)?.[1] ?? 'export.iif'
       const a = document.createElement('a')
       a.href = URL.createObjectURL(blob)
-      a.download = fname
+      a.download = filename
       a.click()
       URL.revokeObjectURL(a.href)
     } catch (e) {
