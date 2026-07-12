@@ -1,0 +1,3 @@
+# Normalize line endings repo-wide: git stores LF; Windows working tree gets CRLF via core.autocrlf.
+# Added 2026-07-12 to end perpetual phantom-modified flags from pre-existing CRLF blobs.
+* text=auto
