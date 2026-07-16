@@ -133,6 +133,11 @@ describe('ar_ledger view — balance arithmetic under multiple charges + payment
     expect(Number(row.balance)).toBe(1000)
   })
 
+  it('returns the property name, not just property_id (cron.ts and reports.ts read ar.property_name)', () => {
+    const [row] = db.many(`SELECT property_name FROM ar_ledger WHERE lease_id = '${LEASE}'`)
+    expect(row.property_name).toBe('9050 Red Branch')
+  })
+
   it('two leases with different charge/payment counts do not contaminate each other (the exact shape a fan-out regression would break)', () => {
     const TENANT_B = '00000000-0000-0000-0000-000000000005'
     const UNIT_B = '00000000-0000-0000-0000-000000000006'

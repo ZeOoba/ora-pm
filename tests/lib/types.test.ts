@@ -23,7 +23,7 @@ describe('domain types', () => {
   it('ARLedgerRow has balance, total_charged, total_paid', () => {
     const row: ARLedgerRow = {
       lease_id: 'l1', tenant_id: 't1', unit_id: 'u1',
-      tenant_name: 'Acme', property_id: 'p1', suite: 'A1',
+      tenant_name: 'Acme', property_id: 'p1', property_name: '9050 Red Branch', suite: 'A1',
       total_charged: 5000, total_paid: 4000, balance: 1000,
     }
     expect(row.balance).toBe(1000)

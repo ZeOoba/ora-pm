@@ -114,7 +114,7 @@ export interface Budget {
 // ── View types ─────────────────────────────────────────────────────────────
 export interface ARLedgerRow {
   lease_id: string; tenant_id: string; unit_id: string; tenant_name: string
-  property_id: string; suite: string
+  property_id: string; property_name: string; suite: string
   total_charged: number; total_paid: number; balance: number
 }
 
