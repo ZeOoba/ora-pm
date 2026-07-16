@@ -41,7 +41,7 @@ export function ARDashboard() {
         <table className="min-w-full divide-y divide-gray-200 text-sm">
           <thead className="bg-gray-50">
             <tr>
-              {['Tenant', 'Suite', 'Total Charged', 'Total Paid', 'Balance'].map(h => (
+              {['Tenant', 'Property', 'Suite', 'Total Charged', 'Total Paid', 'Balance'].map(h => (
                 <th key={h} className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">{h}</th>
               ))}
             </tr>
@@ -49,12 +49,13 @@ export function ARDashboard() {
           <tbody className="divide-y divide-gray-200">
             {data?.length === 0 && (
               <tr>
-                <td colSpan={5} className="px-4 py-8 text-center text-gray-400">No outstanding balances.</td>
+                <td colSpan={6} className="px-4 py-8 text-center text-gray-400">No outstanding balances.</td>
               </tr>
             )}
             {data?.map(row => (
               <tr key={row.lease_id} className={row.balance > 0 ? 'bg-red-50' : ''}>
                 <td className="px-4 py-3 font-medium">{row.tenant_name}</td>
+                <td className="px-4 py-3 text-gray-500">{row.property_name}</td>
                 <td className="px-4 py-3 text-gray-500">{row.suite}</td>
                 <td className="px-4 py-3">{formatCurrency(row.total_charged)}</td>
                 <td className="px-4 py-3">{formatCurrency(row.total_paid)}</td>
