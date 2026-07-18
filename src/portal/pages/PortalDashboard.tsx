@@ -9,7 +9,10 @@ export function PortalDashboard() {
 
   const balance = meQuery.data?.total_balance ?? 0
   const lastPayment = paymentsQuery.data?.data[0] ?? null
-  const openCharges = (chargesQuery.data?.data ?? []).filter(c => c.status === 'open')
+  // No per-row paid/open column on charges and no payments-to-charge link (schema gap — see
+  // 2026-07-16 audit finding #7), so every returned charge is treated as payable, per Gabriel's
+  // 2026-07-18 ruling.
+  const openCharges = chargesQuery.data?.data ?? []
 
   return (
     <div className="p-6 max-w-4xl mx-auto">
@@ -73,7 +76,7 @@ export function PortalDashboard() {
             <tbody>
               {openCharges.map(c => (
                 <tr key={c.id} className="border-t border-gray-100">
-                  <td className="px-5 py-3 text-gray-700">{c.description ?? c.charge_type}</td>
+                  <td className="px-5 py-3 text-gray-700">{c.description ?? c.type}</td>
                   <td className="px-5 py-3 text-gray-500">{formatDate(c.due_date)}</td>
                   <td className="px-5 py-3 text-right font-medium text-gray-800">{formatCurrency(c.amount)}</td>
                 </tr>

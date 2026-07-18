@@ -3,16 +3,9 @@ import { portalApi } from '../lib/portal-api'
 import { formatCurrency } from '../../lib/format'
 import type { Lease } from '../lib/portal-api'
 
-interface LeaseRow extends Lease {
-  base_rent_monthly: number
-  cam_estimate_monthly: number
-  rent_type: string
-  lease_amendments: Array<{ id: string; effective_date: string; description: string }>
-}
-
 export function PortalMyLease() {
   const { data, isLoading } = useQuery({ queryKey: ['portal-lease'], queryFn: portalApi.getLease })
-  const leases = (data?.data ?? []) as LeaseRow[]
+  const leases = (data?.data ?? []) as Lease[]
 
   if (isLoading) return <div className="p-6 text-gray-500">Loading…</div>
   if (leases.length === 0) return <div className="p-6 text-gray-500">No active lease found.</div>
@@ -40,7 +33,7 @@ export function PortalMyLease() {
             <div>
               <span className="text-gray-500">Base rent</span>
               <br />
-              <span className="font-medium">{formatCurrency(lease.base_rent_monthly ?? lease.monthly_rent)}/mo</span>
+              <span className="font-medium">{formatCurrency(lease.base_rent_monthly)}/mo</span>
             </div>
             {lease.cam_estimate_monthly != null && (
               <div>
@@ -57,10 +50,10 @@ export function PortalMyLease() {
               </div>
             )}
           </div>
-          {lease.lease_amendments?.length > 0 && (
+          {(lease.lease_amendments?.length ?? 0) > 0 && (
             <div>
               <p className="text-sm font-medium text-gray-700 mb-2">Amendments</p>
-              {lease.lease_amendments.map(a => (
+              {lease.lease_amendments!.map(a => (
                 <div key={a.id} className="text-xs text-gray-600 border-l-2 border-gray-200 pl-3 mb-1">
                   <span className="font-medium">{a.effective_date}</span> — {a.description}
                 </div>

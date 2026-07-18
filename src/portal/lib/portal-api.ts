@@ -1,4 +1,5 @@
 import { portalSupabase } from './supabase-portal'
+import type { Charge as DBCharge, Lease as DBLease } from '../../types'
 
 async function portalFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const { data: { session } } = await portalSupabase.auth.getSession()
@@ -49,14 +50,8 @@ export interface TenantMe {
   total_balance: number
 }
 
-export interface Charge {
-  id: string
-  lease_id: string
-  charge_type: string
-  amount: number
-  due_date: string
-  status: string
-  description: string | null
+export interface Charge extends DBCharge {
+  leases?: { units?: { properties?: { name: string; address: string } } }
 }
 
 export interface Payment {
@@ -68,17 +63,9 @@ export interface Payment {
   notes: string | null
 }
 
-export interface Lease {
-  id: string
-  tenant_id: string
-  unit_id: string
-  status: string
-  start_date: string
-  end_date: string
-  monthly_rent: number
-  autopay_enabled: boolean
-  autopay_payment_method_id: string | null
+export interface Lease extends DBLease {
   units?: { suite: string; sf: number; properties?: { name: string; address: string; city: string; state: string } }
+  lease_amendments?: Array<{ id: string; effective_date: string; description: string }>
 }
 
 export interface Document {
