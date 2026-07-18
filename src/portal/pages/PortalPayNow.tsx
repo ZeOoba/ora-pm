@@ -4,6 +4,7 @@ import { loadStripe } from '@stripe/stripe-js'
 import { portalApi } from '../lib/portal-api'
 import { formatCurrency } from '../../lib/format'
 import type { Charge } from '../lib/portal-api'
+import { singleLeaseId } from '../lib/charges'
 
 const stripePromise = loadStripe(import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY as string)
 
@@ -17,9 +18,14 @@ export function PortalPayNow() {
   const { data: chargesData, isLoading } = useQuery({ queryKey: ['portal-charges'], queryFn: portalApi.getCharges })
 
   const charges = (chargesData?.data ?? []) as Charge[]
-  const openCharges = charges.filter(ch => ch.status === 'open')
+  // `charges` has no per-row paid/open column and `payments` isn't linked to a specific charge
+  // (schema gap — see 2026-07-16 audit finding #7), so every charge the API returns for an
+  // active lease is treated as payable, per Gabriel's 2026-07-18 ruling.
+  const openCharges = charges
   const selectedCharges = openCharges.filter(ch => selected.has(ch.id))
   const totalCents = Math.round(selectedCharges.reduce((s, ch) => s + ch.amount, 0) * 100)
+  const selectedLeaseId = singleLeaseId(selectedCharges)
+  const spansMultipleLeases = selectedCharges.length > 0 && selectedLeaseId === null
 
   function toggleAll() {
     if (selected.size === openCharges.length) setSelected(new Set())
@@ -28,6 +34,11 @@ export function PortalPayNow() {
 
   async function handlePay() {
     if (!meData?.tenant || totalCents < 50) return
+    if (spansMultipleLeases) {
+      setStep('error')
+      setErrorMsg('Selected charges span more than one lease — pay each lease separately.')
+      return
+    }
     setStep('processing')
     setErrorMsg('')
 
@@ -41,7 +52,7 @@ export function PortalPayNow() {
       )
     }
 
-    const leaseId = selectedCharges[0]?.lease_id
+    const leaseId = selectedLeaseId
     if (!leaseId) { setStep('error'); setErrorMsg('No lease found'); return }
 
     const stripe = await stripePromise
@@ -136,7 +147,7 @@ export function PortalPayNow() {
                 />
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-medium text-gray-900">
-                    {ch.description ?? ch.charge_type.replace(/_/g, ' ')}
+                    {ch.description ?? ch.type.replace(/_/g, ' ')}
                   </p>
                   <p className="text-xs text-gray-500">Due {ch.due_date}</p>
                 </div>
@@ -146,17 +157,24 @@ export function PortalPayNow() {
           </div>
 
           {selected.size > 0 && (
-            <div className="flex items-center justify-between pt-2">
-              <span className="text-sm font-medium text-gray-700">
-                Total: {formatCurrency(totalCents / 100)}
-              </span>
-              <button
-                onClick={handlePay}
-                disabled={step === 'processing'}
-                className="bg-[#1B2A4A] text-white rounded px-6 py-2.5 text-sm font-medium hover:bg-[#243660] disabled:opacity-50"
-              >
-                {step === 'processing' ? 'Processing…' : `Pay ${formatCurrency(totalCents / 100)} via ACH`}
-              </button>
+            <div className="pt-2 space-y-2">
+              {spansMultipleLeases && (
+                <p className="text-sm text-red-600">
+                  Selected charges span more than one lease — pay each lease separately.
+                </p>
+              )}
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-medium text-gray-700">
+                  Total: {formatCurrency(totalCents / 100)}
+                </span>
+                <button
+                  onClick={handlePay}
+                  disabled={step === 'processing' || spansMultipleLeases}
+                  className="bg-[#1B2A4A] text-white rounded px-6 py-2.5 text-sm font-medium hover:bg-[#243660] disabled:opacity-50"
+                >
+                  {step === 'processing' ? 'Processing…' : `Pay ${formatCurrency(totalCents / 100)} via ACH`}
+                </button>
+              </div>
             </div>
           )}
         </>
