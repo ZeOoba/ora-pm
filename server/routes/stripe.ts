@@ -8,34 +8,38 @@ import { checkRateLimit } from '../lib/rate-limit'
 
 export const stripeRouter = new Hono<{ Bindings: Env }>()
 
-stripeRouter.use('/customer', tenantAuthMiddleware)
-stripeRouter.use('/setup-intent', tenantAuthMiddleware)
-stripeRouter.use('/payment-intent', tenantAuthMiddleware)
+// Router-wide gate: any future stripe endpoint is tenant-authenticated by
+// default (this router is in ADMIN_EXEMPT, so this is its only auth layer).
+// The Stripe webhook lives on its own router (/api/webhooks) — not gated here.
+stripeRouter.use('/*', tenantAuthMiddleware)
 
 // POST /api/stripe/customer — create Stripe customer + store on tenant record
 stripeRouter.post('/customer', async (c) => {
+  const userId = c.get('tenantUserId')
   const { tenant_id, email, name } = await c.req.json()
   if (!tenant_id) return c.json({ error: 'tenant_id required' }, 400)
 
   const stripe = getStripe(c.env.STRIPE_SECRET_KEY)
   const db = getDb(c.env)
 
-  // Check if already has a customer ID
-  const { data: tenant, error: tenantErr } = await db.from('tenants').select('stripe_customer_id').eq('id', tenant_id).single()
+  // Resolve the AUTHENTICATED tenant and verify the request-body tenant_id
+  // belongs to them (IDOR guard — OI-018)
+  const { data: tenant, error: tenantErr } = await db.from('tenants').select('id, stripe_customer_id').eq('auth_user_id', userId).single()
   if (tenantErr || !tenant) return c.json({ error: 'Tenant not found' }, 404)
+  if (tenant.id !== tenant_id) return c.json({ error: 'Forbidden' }, 403)
   if (tenant?.stripe_customer_id) {
     return c.json({ customer_id: tenant.stripe_customer_id })
   }
 
   let customer: Stripe.Customer
   try {
-    customer = await stripe.customers.create({ email, name, metadata: { tenant_id } })
+    customer = await stripe.customers.create({ email, name, metadata: { tenant_id: tenant.id } })
   } catch (err) {
     if (err instanceof Stripe.errors.StripeError) return c.json({ error: err.message }, 400)
     throw err
   }
 
-  const { error: updateErr } = await db.from('tenants').update({ stripe_customer_id: customer.id }).eq('id', tenant_id)
+  const { error: updateErr } = await db.from('tenants').update({ stripe_customer_id: customer.id }).eq('id', tenant.id)
   if (updateErr) return c.json({ error: 'Failed to save customer ID' }, 500)
 
   return c.json({ customer_id: customer.id })
@@ -43,14 +47,18 @@ stripeRouter.post('/customer', async (c) => {
 
 // POST /api/stripe/setup-intent — create SetupIntent for Financial Connections bank linking
 stripeRouter.post('/setup-intent', async (c) => {
+  const userId = c.get('tenantUserId')
   const { tenant_id } = await c.req.json()
   if (!tenant_id) return c.json({ error: 'tenant_id required' }, 400)
 
   const stripe = getStripe(c.env.STRIPE_SECRET_KEY)
   const db = getDb(c.env)
 
-  const { data: tenant, error: tenantErr } = await db.from('tenants').select('stripe_customer_id').eq('id', tenant_id).single()
+  // Resolve the AUTHENTICATED tenant and verify the request-body tenant_id
+  // belongs to them (IDOR guard — OI-018)
+  const { data: tenant, error: tenantErr } = await db.from('tenants').select('id, stripe_customer_id').eq('auth_user_id', userId).single()
   if (tenantErr || !tenant) return c.json({ error: 'Tenant not found' }, 404)
+  if (tenant.id !== tenant_id) return c.json({ error: 'Forbidden' }, 403)
   if (!tenant?.stripe_customer_id) return c.json({ error: 'No Stripe customer — call /customer first' }, 400)
 
   let setupIntent: Stripe.SetupIntent
@@ -75,6 +83,7 @@ stripeRouter.post('/setup-intent', async (c) => {
 
 // POST /api/stripe/payment-intent — create PaymentIntent for ACH charge
 stripeRouter.post('/payment-intent', async (c) => {
+  const userId = c.get('tenantUserId')
   const ip = c.req.header('CF-Connecting-IP') ?? c.req.header('X-Forwarded-For') ?? 'unknown'
   const { allowed, retryAfterMs } = checkRateLimit(ip)
   if (!allowed) {
@@ -94,9 +103,18 @@ stripeRouter.post('/payment-intent', async (c) => {
   const stripe = getStripe(c.env.STRIPE_SECRET_KEY)
   const db = getDb(c.env)
 
-  const { data: tenant, error: tenantErr } = await db.from('tenants').select('stripe_customer_id').eq('id', tenant_id).single()
+  // Resolve the AUTHENTICATED tenant and verify the request-body tenant_id
+  // belongs to them (IDOR guard — OI-018)
+  const { data: tenant, error: tenantErr } = await db.from('tenants').select('id, stripe_customer_id').eq('auth_user_id', userId).single()
   if (tenantErr || !tenant) return c.json({ error: 'Tenant not found' }, 404)
+  if (tenant.id !== tenant_id) return c.json({ error: 'Forbidden' }, 403)
   if (!tenant?.stripe_customer_id) return c.json({ error: 'No Stripe customer' }, 400)
+
+  // Verify this lease belongs to this tenant (IDOR guard) — before any Stripe
+  // call, so a cross-tenant lease_id can never reach the charge or the
+  // payments insert (same pattern as /portal/autopay)
+  const { data: lease } = await db.from('leases').select('id, tenant_id').eq('id', lease_id).single()
+  if (!lease || lease.tenant_id !== tenant.id) return c.json({ error: 'Lease not found' }, 404)
 
   let pi: Stripe.PaymentIntent
   try {
@@ -109,7 +127,7 @@ stripeRouter.post('/payment-intent', async (c) => {
       confirm: true,
       setup_future_usage: 'off_session' as const,
       description: description ?? `Rent payment — lease ${lease_id}`,
-      metadata: { lease_id, tenant_id },
+      metadata: { lease_id: lease.id, tenant_id: tenant.id },
     })
   } catch (err) {
     if (err instanceof Stripe.errors.StripeError) return c.json({ error: err.message }, 400)
@@ -118,7 +136,7 @@ stripeRouter.post('/payment-intent', async (c) => {
 
   // Record payment in DB immediately as pending
   const { error: insertErr } = await db.from('payments').insert({
-    lease_id,
+    lease_id: lease.id,
     payment_date: new Date().toISOString().slice(0, 10),
     amount: amount_cents / 100,
     method: 'ach_stripe',

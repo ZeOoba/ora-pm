@@ -1,11 +1,18 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { createApp } from '../../server/index'
+import { tenantAuthMiddleware } from '../../server/middleware/tenant-auth'
 
 // ---------------------------------------------------------------------------
-// Mock auth middleware — pass through in tests
+// Mock auth middleware — authenticate as a fixed user in tests.
+// 'auth-user-A' resolves (via the tenants mock below) to tenant 'tenant-1'.
 // ---------------------------------------------------------------------------
 vi.mock('../../server/middleware/tenant-auth', () => ({
-  tenantAuthMiddleware: vi.fn(async (_c: unknown, next: () => Promise<void>) => next()),
+  tenantAuthMiddleware: vi.fn(
+    async (c: { set: (k: string, v: string) => void }, next: () => Promise<void>) => {
+      c.set('tenantUserId', 'auth-user-A')
+      await next()
+    }
+  ),
 }))
 
 vi.mock('../../server/middleware/admin-auth', () => ({
@@ -43,22 +50,40 @@ const supabaseMocks = {
   tenantSelectResult: { data: null as Record<string, unknown> | null, error: null as { message: string } | null },
   tenantUpdateError: null as { message: string } | null,
   paymentsInsertError: null as { message: string } | null,
+  leaseSelectResult: { data: null as Record<string, unknown> | null, error: null as { message: string } | null },
 }
 
 const mockDb = {
   from: vi.fn((table: string) => {
     if (table === 'tenants') {
       return {
+        // Arg-aware: the tenant row resolves ONLY when queried by the
+        // authenticated user's auth_user_id. A regression back to resolving by
+        // the request-body tenant_id (.eq('id', ...)) — the original OI-018
+        // vulnerability — gets { data: null } and fails these tests.
         select: vi.fn().mockReturnValue({
-          eq: vi.fn().mockReturnValue({
-            single: vi.fn().mockImplementation(async () => supabaseMocks.tenantSelectResult),
-          }),
+          eq: vi.fn().mockImplementation((column: string, value: string) => ({
+            single: vi.fn().mockImplementation(async () =>
+              column === 'auth_user_id' && value === 'auth-user-A'
+                ? supabaseMocks.tenantSelectResult
+                : { data: null, error: { message: 'not found' } }
+            ),
+          })),
         }),
         update: vi.fn().mockReturnValue({
           eq: vi.fn().mockImplementation(async () => ({
             data: null,
             error: supabaseMocks.tenantUpdateError,
           })),
+        }),
+      }
+    }
+    if (table === 'leases') {
+      return {
+        select: vi.fn().mockReturnValue({
+          eq: vi.fn().mockReturnValue({
+            single: vi.fn().mockImplementation(async () => supabaseMocks.leaseSelectResult),
+          }),
         }),
       }
     }
@@ -112,6 +137,8 @@ beforeEach(() => {
   supabaseMocks.tenantSelectResult = { data: null, error: null }
   supabaseMocks.tenantUpdateError = null
   supabaseMocks.paymentsInsertError = null
+  // Default: the authenticated tenant (tenant-1) owns lease-1
+  supabaseMocks.leaseSelectResult = { data: { id: 'lease-1', tenant_id: 'tenant-1' }, error: null }
 })
 
 // ---------------------------------------------------------------------------
@@ -119,7 +146,7 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 describe('POST /api/stripe/customer', () => {
   it('1. creates a Stripe customer and returns customer_id (200)', async () => {
-    supabaseMocks.tenantSelectResult = { data: { stripe_customer_id: null }, error: null }
+    supabaseMocks.tenantSelectResult = { data: { id: 'tenant-1', stripe_customer_id: null }, error: null }
     mockStripe.customers.create.mockResolvedValue({ id: 'cus_test123' })
 
     const res = await post('/api/stripe/customer', {
@@ -141,7 +168,7 @@ describe('POST /api/stripe/customer', () => {
   })
 
   it('3. returns existing stripe_customer_id without calling Stripe', async () => {
-    supabaseMocks.tenantSelectResult = { data: { stripe_customer_id: 'cus_existing' }, error: null }
+    supabaseMocks.tenantSelectResult = { data: { id: 'tenant-1', stripe_customer_id: 'cus_existing' }, error: null }
 
     const res = await post('/api/stripe/customer', { tenant_id: 'tenant-1' })
     expect(res.status).toBe(200)
@@ -160,7 +187,7 @@ describe('POST /api/stripe/customer', () => {
   })
 
   it('3c. returns 500 when DB update fails (ghost customer prevention)', async () => {
-    supabaseMocks.tenantSelectResult = { data: { stripe_customer_id: null }, error: null }
+    supabaseMocks.tenantSelectResult = { data: { id: 'tenant-1', stripe_customer_id: null }, error: null }
     supabaseMocks.tenantUpdateError = { message: 'DB write failed' }
     mockStripe.customers.create.mockResolvedValue({ id: 'cus_ghost' })
 
@@ -176,7 +203,7 @@ describe('POST /api/stripe/customer', () => {
 // ---------------------------------------------------------------------------
 describe('POST /api/stripe/setup-intent', () => {
   it('4. creates SetupIntent and returns client_secret (200)', async () => {
-    supabaseMocks.tenantSelectResult = { data: { stripe_customer_id: 'cus_test123' }, error: null }
+    supabaseMocks.tenantSelectResult = { data: { id: 'tenant-1', stripe_customer_id: 'cus_test123' }, error: null }
     mockStripe.setupIntents.create.mockResolvedValue({ client_secret: 'seti_test_secret' })
 
     const res = await post('/api/stripe/setup-intent', { tenant_id: 'tenant-1' })
@@ -187,7 +214,7 @@ describe('POST /api/stripe/setup-intent', () => {
   })
 
   it('5. returns 400 when tenant has no Stripe customer', async () => {
-    supabaseMocks.tenantSelectResult = { data: { stripe_customer_id: null }, error: null }
+    supabaseMocks.tenantSelectResult = { data: { id: 'tenant-1', stripe_customer_id: null }, error: null }
 
     const res = await post('/api/stripe/setup-intent', { tenant_id: 'tenant-1' })
     expect(res.status).toBe(400)
@@ -219,7 +246,7 @@ describe('POST /api/stripe/payment-intent', () => {
   }
 
   it('6. creates PaymentIntent, records payment, returns id + status (200)', async () => {
-    supabaseMocks.tenantSelectResult = { data: { stripe_customer_id: 'cus_test123' }, error: null }
+    supabaseMocks.tenantSelectResult = { data: { id: 'tenant-1', stripe_customer_id: 'cus_test123' }, error: null }
     mockStripe.paymentIntents.create.mockResolvedValue({
       id: 'pi_test456',
       status: 'processing',
@@ -236,7 +263,7 @@ describe('POST /api/stripe/payment-intent', () => {
   })
 
   it('7. returns 400 when amount_cents < 50', async () => {
-    supabaseMocks.tenantSelectResult = { data: { stripe_customer_id: 'cus_test123' }, error: null }
+    supabaseMocks.tenantSelectResult = { data: { id: 'tenant-1', stripe_customer_id: 'cus_test123' }, error: null }
 
     const res = await post('/api/stripe/payment-intent', { ...validPayload, amount_cents: 49 })
     expect(res.status).toBe(400)
@@ -254,7 +281,7 @@ describe('POST /api/stripe/payment-intent', () => {
   })
 
   it('9. returns 400 when amount_cents is not an integer', async () => {
-    supabaseMocks.tenantSelectResult = { data: { stripe_customer_id: 'cus_test123' }, error: null }
+    supabaseMocks.tenantSelectResult = { data: { id: 'tenant-1', stripe_customer_id: 'cus_test123' }, error: null }
 
     const res = await post('/api/stripe/payment-intent', { ...validPayload, amount_cents: 250.50 })
     expect(res.status).toBe(400)
@@ -272,8 +299,17 @@ describe('POST /api/stripe/payment-intent', () => {
     expect(body.error).toMatch(/tenant/i)
   })
 
+  it('11a. returns 404 when lease not found', async () => {
+    supabaseMocks.tenantSelectResult = { data: { id: 'tenant-1', stripe_customer_id: 'cus_test123' }, error: null }
+    supabaseMocks.leaseSelectResult = { data: null, error: { message: 'not found' } }
+
+    const res = await post('/api/stripe/payment-intent', validPayload)
+    expect(res.status).toBe(404)
+    expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
+  })
+
   it('11. returns 500 when payments DB insert fails', async () => {
-    supabaseMocks.tenantSelectResult = { data: { stripe_customer_id: 'cus_test123' }, error: null }
+    supabaseMocks.tenantSelectResult = { data: { id: 'tenant-1', stripe_customer_id: 'cus_test123' }, error: null }
     supabaseMocks.paymentsInsertError = { message: 'insert failed' }
     mockStripe.paymentIntents.create.mockResolvedValue({
       id: 'pi_test789',
@@ -284,5 +320,103 @@ describe('POST /api/stripe/payment-intent', () => {
     expect(res.status).toBe(500)
     const body = await res.json() as { error: string }
     expect(body.error).toMatch(/record/i)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// IDOR guard (OI-018) — request-body tenant_id / lease_id must belong to the
+// authenticated user. The mocked tenantAuthMiddleware authenticates as
+// 'auth-user-A', whose tenant row (via .eq('auth_user_id', ...)) is 'tenant-1'.
+// A request naming any OTHER tenant's ids must be rejected BEFORE any Stripe
+// call or DB write.
+// ---------------------------------------------------------------------------
+describe('IDOR guard (OI-018)', () => {
+  it('I1. POST /customer rejects a tenant_id belonging to another tenant (403)', async () => {
+    supabaseMocks.tenantSelectResult = { data: { id: 'tenant-1', stripe_customer_id: null }, error: null }
+    mockStripe.customers.create.mockResolvedValue({ id: 'cus_should_never_exist' })
+
+    const res = await post('/api/stripe/customer', {
+      tenant_id: 'tenant-B',
+      email: 'attacker@example.com',
+      name: 'Tenant A',
+    })
+    expect(res.status).toBe(403)
+    expect(mockStripe.customers.create).not.toHaveBeenCalled()
+  })
+
+  it('I2. POST /setup-intent rejects a tenant_id belonging to another tenant (403)', async () => {
+    // tenant-B's record has a Stripe customer — the leaked client_secret would
+    // let tenant A attach a bank account to tenant B's customer.
+    supabaseMocks.tenantSelectResult = { data: { id: 'tenant-1', stripe_customer_id: 'cus_own' }, error: null }
+    mockStripe.setupIntents.create.mockResolvedValue({ client_secret: 'seti_leaked_secret' })
+
+    const res = await post('/api/stripe/setup-intent', { tenant_id: 'tenant-B' })
+    expect(res.status).toBe(403)
+    expect(mockStripe.setupIntents.create).not.toHaveBeenCalled()
+  })
+
+  it('I3. POST /payment-intent rejects a tenant_id belonging to another tenant (403)', async () => {
+    supabaseMocks.tenantSelectResult = { data: { id: 'tenant-1', stripe_customer_id: 'cus_own' }, error: null }
+    mockStripe.paymentIntents.create.mockResolvedValue({ id: 'pi_leak', status: 'processing' })
+
+    const res = await post('/api/stripe/payment-intent', {
+      tenant_id: 'tenant-B',
+      lease_id: 'lease-1',
+      amount_cents: 250000,
+      payment_method_id: 'pm_test_bank',
+    })
+    expect(res.status).toBe(403)
+    expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
+    expect(mockDb.from).not.toHaveBeenCalledWith('payments')
+  })
+
+  it('I4. POST /payment-intent rejects a lease_id belonging to another tenant (404)', async () => {
+    supabaseMocks.tenantSelectResult = { data: { id: 'tenant-1', stripe_customer_id: 'cus_own' }, error: null }
+    supabaseMocks.leaseSelectResult = { data: { id: 'lease-B', tenant_id: 'tenant-B' }, error: null }
+    mockStripe.paymentIntents.create.mockResolvedValue({ id: 'pi_leak', status: 'processing' })
+
+    const res = await post('/api/stripe/payment-intent', {
+      tenant_id: 'tenant-1',
+      lease_id: 'lease-B',
+      amount_cents: 250000,
+      payment_method_id: 'pm_test_bank',
+    })
+    expect(res.status).toBe(404)
+    expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
+    expect(mockDb.from).not.toHaveBeenCalledWith('payments')
+  })
+
+  it('I6. all 3 stripe endpoints are wired through tenantAuthMiddleware', async () => {
+    // /api/stripe is ADMIN_EXEMPT, so this middleware is its ONLY auth layer.
+    // If the router-wide use('/*', tenantAuthMiddleware) were removed, these
+    // requests would reach the handlers without it ever being invoked.
+    supabaseMocks.tenantSelectResult = { data: { id: 'tenant-1', stripe_customer_id: 'cus_own' }, error: null }
+    mockStripe.setupIntents.create.mockResolvedValue({ client_secret: 'seti_x' })
+    mockStripe.paymentIntents.create.mockResolvedValue({ id: 'pi_x', status: 'processing' })
+
+    await post('/api/stripe/customer', { tenant_id: 'tenant-1' })
+    await post('/api/stripe/setup-intent', { tenant_id: 'tenant-1' })
+    await post('/api/stripe/payment-intent', {
+      tenant_id: 'tenant-1',
+      lease_id: 'lease-1',
+      amount_cents: 250000,
+      payment_method_id: 'pm_test_bank',
+    })
+    expect(tenantAuthMiddleware).toHaveBeenCalledTimes(3)
+  })
+
+  it('I5. positive path — own tenant_id + own lease_id still succeeds (200)', async () => {
+    supabaseMocks.tenantSelectResult = { data: { id: 'tenant-1', stripe_customer_id: 'cus_own' }, error: null }
+    mockStripe.paymentIntents.create.mockResolvedValue({ id: 'pi_own', status: 'processing' })
+
+    const res = await post('/api/stripe/payment-intent', {
+      tenant_id: 'tenant-1',
+      lease_id: 'lease-1',
+      amount_cents: 250000,
+      payment_method_id: 'pm_test_bank',
+    })
+    expect(res.status).toBe(200)
+    const body = await res.json() as { payment_intent_id: string }
+    expect(body.payment_intent_id).toBe('pi_own')
   })
 })
