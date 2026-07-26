@@ -22,10 +22,17 @@ jobs:
 
       - name: Debug react-router-dom resolution
         run: |
-          npx tsc --version
-          node -e "console.log(require.resolve('react-router-dom/package.json'))"
-          cat node_modules/react-router-dom/package.json
-          npx tsc --noEmit --traceResolution 2>&1 | grep -B2 -A 20 "'react-router-dom'" | head -200
+          echo "--- node_modules top-level count ---"
+          ls node_modules | wc -l
+          echo "--- react-router entries in node_modules ---"
+          ls -la node_modules | grep -i router || echo "NONE FOUND"
+          echo "--- npm ls ---"
+          npm ls react-router-dom react-router 2>&1 || true
+          echo "--- package-lock.json integrity check ---"
+          npm ci --dry-run 2>&1 | grep -i "react-router" || echo "no react-router lines in dry-run"
+          echo "--- .npmrc / env ---"
+          npm config list
+          env | grep -i npm || true
 
       - name: Type check
         run: npm run typecheck
