@@ -5,7 +5,7 @@ import { extractLease } from '../lib/lease-extract'
 
 export const intakeRouter = new Hono<{ Bindings: Env }>()
 
-const DEFAULT_MODEL = 'claude-opus-4-8'
+const DEFAULT_MODEL = 'claude-opus-5'
 const MAX_PDF_BYTES = 10 * 1024 * 1024 // mirror the client cap; the client check is bypassable
 
 intakeRouter.post('/lease', async (c) => {
