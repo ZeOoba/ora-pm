@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { useParams, Link } from 'react-router-dom'
+import { useParams, Link } from 'react-router'
 import { api } from '../../lib/api'
 import { useSaveMutation } from '../../lib/mutations'
 import { PageHeader } from '../../components/PageHeader'

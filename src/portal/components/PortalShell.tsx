@@ -1,4 +1,4 @@
-import { Link, useLocation } from 'react-router-dom'
+import { Link, useLocation } from 'react-router'
 import type { Session } from '@supabase/supabase-js'
 import { portalSupabase } from '../lib/supabase-portal'
 
