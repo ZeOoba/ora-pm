@@ -20,18 +20,18 @@ function PrivateRoute({ session, children }: { session: Session | null; children
 export function PortalRouter({ session }: Props) {
   return (
     <Routes>
-      <Route path="/portal/login" element={<PortalLogin />} />
-      <Route path="/portal/*" element={
+      <Route path="login" element={<PortalLogin />} />
+      <Route path="*" element={
         <PrivateRoute session={session}>
           <PortalShell session={session!}>
             <Routes>
-              <Route path="/" element={<PortalDashboard />} />
-              <Route path="/pay" element={<PortalPayNow />} />
-              <Route path="/payments" element={<PortalPaymentHistory />} />
-              <Route path="/lease" element={<PortalMyLease />} />
-              <Route path="/documents" element={<PortalDocuments />} />
-              <Route path="/insurance" element={<PortalInsurance />} />
-              <Route path="/account" element={<PortalAccount />} />
+              <Route index element={<PortalDashboard />} />
+              <Route path="pay" element={<PortalPayNow />} />
+              <Route path="payments" element={<PortalPaymentHistory />} />
+              <Route path="lease" element={<PortalMyLease />} />
+              <Route path="documents" element={<PortalDocuments />} />
+              <Route path="insurance" element={<PortalInsurance />} />
+              <Route path="account" element={<PortalAccount />} />
             </Routes>
           </PortalShell>
         </PrivateRoute>
