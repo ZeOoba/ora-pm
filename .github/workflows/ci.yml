@@ -20,6 +20,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Debug react-router-dom resolution
+        run: |
+          npx tsc --version
+          node -e "console.log(require.resolve('react-router-dom/package.json'))"
+          cat node_modules/react-router-dom/package.json
+          npx tsc --noEmit --traceResolution 2>&1 | grep -B2 -A 20 "'react-router-dom'" | head -200
+
       - name: Type check
         run: npm run typecheck
 
