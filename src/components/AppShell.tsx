@@ -1,4 +1,4 @@
-import { Link, useLocation } from 'react-router-dom'
+import { Link, useLocation } from 'react-router'
 
 type NavItem = { to: string; label: string }
 type NavGroup = { heading: string; items: NavItem[] }

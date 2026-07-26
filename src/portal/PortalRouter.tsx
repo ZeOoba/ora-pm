@@ -1,4 +1,4 @@
-import { Routes, Route, Navigate } from 'react-router-dom'
+import { Routes, Route, Navigate } from 'react-router'
 import type { Session } from '@supabase/supabase-js'
 import { PortalLogin } from './pages/PortalLogin'
 import { PortalDashboard } from './pages/PortalDashboard'
