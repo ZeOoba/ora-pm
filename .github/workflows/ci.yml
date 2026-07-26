@@ -20,20 +20,6 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Debug react-router-dom resolution
-        run: |
-          echo "--- node_modules top-level count ---"
-          ls node_modules | wc -l
-          echo "--- react-router entries in node_modules ---"
-          ls -la node_modules | grep -i router || echo "NONE FOUND"
-          echo "--- npm ls ---"
-          npm ls react-router-dom react-router 2>&1 || true
-          echo "--- package-lock.json integrity check ---"
-          npm ci --dry-run 2>&1 | grep -i "react-router" || echo "no react-router lines in dry-run"
-          echo "--- .npmrc / env ---"
-          npm config list
-          env | grep -i npm || true
-
       - name: Type check
         run: npm run typecheck
 

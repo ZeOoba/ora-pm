@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { createElement } from 'react'
-import { createMemoryRouter, RouterProvider } from 'react-router-dom'
+import { createMemoryRouter, RouterProvider } from 'react-router'
 import { PortalRouter } from '../../src/portal/PortalRouter'
 
 vi.mock('../../src/portal/lib/supabase-portal', () => ({
