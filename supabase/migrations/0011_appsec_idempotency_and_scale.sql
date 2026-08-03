@@ -70,6 +70,15 @@ ALTER TABLE charges ALTER COLUMN idempotency_key SET NOT NULL;
 --    NUMERIC(12,2) with the unit documented. Ratio/percentage columns
 --    (e.g. cam_reconciliations.tenant_pro_rata_share_pct, 0-1 CHECK) are
 --    deliberately untouched.
+--
+--    ar_ledger (last defined in 0010) sums charges.amount and payments.amount,
+--    and Postgres refuses ALTER COLUMN TYPE on a column a view depends on
+--    ("cannot alter type of a column used by a view or rule") — even for a
+--    binary-compatible re-type. Drop the view first, recreate it (verbatim
+--    0010 definition) after the re-types. rent_roll/critical_dates touch none
+--    of the altered columns.
+DROP VIEW IF EXISTS ar_ledger;
+
 ALTER TABLE charges ALTER COLUMN amount TYPE NUMERIC(12,2);
 COMMENT ON COLUMN charges.amount IS 'US dollars (not cents), 2dp';
 
@@ -99,6 +108,47 @@ COMMENT ON COLUMN tenant_sales_reports.reported_sales IS 'US dollars (not cents)
 
 ALTER TABLE tenant_sales_reports ALTER COLUMN percentage_rent_owed TYPE NUMERIC(12,2);
 COMMENT ON COLUMN tenant_sales_reports.percentage_rent_owed IS 'US dollars (not cents), 2dp';
+
+-- Recreate ar_ledger — VERBATIM copy of the live definition from
+-- 0010_ar_ledger_property_name.sql (no behavior change; dropped above only to
+-- release the column dependency). tests/db/ar-ledger.test.ts extracts the
+-- LAST ar_ledger definition across all migrations, so this copy is what its
+-- behavioral suite now verifies — any accidental divergence from 0010 fails
+-- those tests.
+CREATE OR REPLACE VIEW ar_ledger AS
+WITH charge_totals AS (
+  SELECT lease_id, COALESCE(SUM(amount), 0) AS total_charged
+  FROM charges
+  GROUP BY lease_id
+),
+payment_totals AS (
+  SELECT lease_id, COALESCE(SUM(
+    CASE
+      WHEN method = 'ach_stripe' AND stripe_status = 'succeeded' THEN amount
+      WHEN method IN ('check','wire','other') THEN amount
+      ELSE 0
+    END
+  ), 0) AS total_paid
+  FROM payments
+  GROUP BY lease_id
+)
+SELECT
+  l.id AS lease_id,
+  l.tenant_id,
+  l.unit_id,
+  t.name AS tenant_name,
+  u.property_id,
+  u.suite,
+  COALESCE(ct.total_charged, 0) AS total_charged,
+  COALESCE(pt.total_paid, 0) AS total_paid,
+  COALESCE(ct.total_charged, 0) - COALESCE(pt.total_paid, 0) AS balance,
+  p.name AS property_name
+FROM leases l
+JOIN tenants t ON t.id = l.tenant_id
+JOIN units u ON u.id = l.unit_id
+JOIN properties p ON p.id = u.property_id
+LEFT JOIN charge_totals ct ON ct.lease_id = l.id
+LEFT JOIN payment_totals pt ON pt.lease_id = l.id;
 
 -- ---------------------------------------------------------------------------
 -- Rollback (reference):

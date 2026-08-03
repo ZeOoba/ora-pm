@@ -30,12 +30,16 @@ const MIGRATIONS_DIR = join(__dirname, '../../supabase/migrations')
 //    This is migration 0011's one-time dedupe backfill; it is a no-op on the
 //    empty test database, and its presence in the migration TEXT is asserted
 //    separately below so it cannot be silently dropped.
+//  - DROP VIEW IF EXISTS: not parseable; 0011 uses it to release ar_ledger's
+//    dependency on charges.amount/payments.amount before ALTER COLUMN TYPE
+//    (the drop/recreate ordering is asserted textually below).
 // ---------------------------------------------------------------------------
 const PG_MEM_SKIP: RegExp[] = [
   /^ALTER TABLE\s+\S+\s+ENABLE ROW LEVEL SECURITY$/i,
   /^CREATE POLICY\b/i,
   /^CREATE OR REPLACE VIEW\b/i,
   /^DELETE FROM payments a\s+USING\b/i,
+  /^DROP VIEW IF EXISTS\b/i,
 ]
 
 // Splits SQL into statements on ";" while respecting single-quoted strings
@@ -284,6 +288,28 @@ describe('migration 0011 — payment/charge idempotency + money-column hardening
 
     it('does NOT touch tenant_pro_rata_share_pct (a 0-1 ratio, not money)', () => {
       expect(text).not.toMatch(/ALTER COLUMN\s+tenant_pro_rata_share_pct/i)
+    })
+
+    it('wraps the money-column re-types in an ar_ledger drop/recreate (a dependent view blocks ALTER COLUMN TYPE in real Postgres)', () => {
+      // ar_ledger (0010) sums charges.amount and payments.amount; Postgres
+      // refuses ALTER COLUMN TYPE on a column any view depends on ("cannot
+      // alter type of a column used by a view or rule"). pg-mem cannot catch
+      // this at runtime because the loader skips views, so the ordering is
+      // pinned textually: DROP VIEW before the first money ALTER, recreate
+      // after the last. The recreated definition is then behaviorally
+      // verified by tests/db/ar-ledger.test.ts, which always extracts the
+      // LAST ar_ledger definition across all migration files.
+      const file0011 = readFileSync(join(MIGRATIONS_DIR, '0011_appsec_idempotency_and_scale.sql'), 'utf8')
+      const drop = file0011.search(/DROP VIEW IF EXISTS ar_ledger/i)
+      const firstAlter = file0011.search(/ALTER TABLE\s+charges\s+ALTER COLUMN\s+amount\s+TYPE/i)
+      const recreate = file0011.search(/CREATE OR REPLACE VIEW ar_ledger AS/i)
+      const lastComment = file0011.search(/COMMENT ON COLUMN\s+tenant_sales_reports\.percentage_rent_owed/i)
+      expect(drop).toBeGreaterThan(-1)
+      expect(firstAlter).toBeGreaterThan(-1)
+      expect(recreate).toBeGreaterThan(-1)
+      expect(lastComment).toBeGreaterThan(-1)
+      expect(drop).toBeLessThan(firstAlter)
+      expect(recreate).toBeGreaterThan(lastComment)
     })
 
     it('ships the destructive backfill pre-steps the loader cannot execute (dedupe DELETE, legacy-key UPDATE)', () => {
