@@ -34,6 +34,7 @@ export interface Env {
   ANTHROPIC_API_KEY?: string
   CONFIDENTIAL_TERMS?: string  // comma-separated denylist; never commit real terms
   INTAKE_MODEL?: string        // optional override for the lease-intake extraction model
+  ADMIN_EMAILS?: string        // comma-separated exact-match admin allowlist (OI-036); see admin-auth.ts
 }
 
 export function createApp() {
