@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { loadStripe } from '@stripe/stripe-js'
 import { portalApi } from '../lib/portal-api'
@@ -13,6 +13,19 @@ export function PortalPayNow() {
   const [step, setStep] = useState<'select' | 'processing' | 'done' | 'error'>('select')
   const [errorMsg, setErrorMsg] = useState('')
   const qc = useQueryClient()
+
+  // client_request_id: one per pay attempt (OI-035). Generated lazily on the
+  // first Pay click for a given selection and reused verbatim across retries
+  // (e.g. clicking Pay again after a network error) so the server's
+  // idempotency key stays stable. Cleared whenever the selection changes —
+  // a different set of charges is a genuinely different attempt, and reusing
+  // the key across a changed amount would make Stripe reject the retry as an
+  // idempotency-key/parameter mismatch — and after a successful payment, so
+  // the next payment gets its own fresh id.
+  const clientRequestIdRef = useRef<string | null>(null)
+  useEffect(() => {
+    clientRequestIdRef.current = null
+  }, [selected])
 
   const { data: meData } = useQuery({ queryKey: ['portal-me'], queryFn: portalApi.getMe })
   const { data: chargesData, isLoading } = useQuery({ queryKey: ['portal-charges'], queryFn: portalApi.getCharges })
@@ -79,16 +92,20 @@ export function PortalPayNow() {
         ? setupIntent.payment_method
         : setupIntent.payment_method.id
 
+      if (!clientRequestIdRef.current) clientRequestIdRef.current = crypto.randomUUID()
+
       const result = await portalApi.createPaymentIntent({
         tenant_id: tenant.id,
         lease_id: leaseId,
         amount_cents: totalCents,
         payment_method_id: paymentMethodId,
         description: `Rent payment — ${selectedCharges.length} charge(s)`,
+        client_request_id: clientRequestIdRef.current,
       })
 
       if (!result.payment_intent_id) throw new Error('Payment intent creation failed')
 
+      clientRequestIdRef.current = null // this attempt is done — the next payment gets a fresh id
       setStep('done')
       qc.invalidateQueries({ queryKey: ['portal-me'] })
       qc.invalidateQueries({ queryKey: ['portal-payments'] })

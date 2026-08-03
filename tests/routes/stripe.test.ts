@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { createApp } from '../../server/index'
 import { tenantAuthMiddleware } from '../../server/middleware/tenant-auth'
+import { checkRateLimit } from '../../server/lib/rate-limit'
 
 // ---------------------------------------------------------------------------
 // Mock auth middleware — authenticate as a fixed user in tests.
@@ -49,8 +50,14 @@ vi.mock('../../server/lib/rate-limit', () => ({
 const supabaseMocks = {
   tenantSelectResult: { data: null as Record<string, unknown> | null, error: null as { message: string } | null },
   tenantUpdateError: null as { message: string } | null,
-  paymentsInsertError: null as { message: string } | null,
+  paymentsInsertError: null as { message: string; code?: string } | null,
   leaseSelectResult: { data: null as Record<string, unknown> | null, error: null as { message: string } | null },
+  // ar_ledger.balance is in US dollars (matches the live view — see
+  // ar-ledger.test.ts / cron.ts's autopay debit cap). Default is comfortably
+  // above every existing test's amount_cents so the new balance-cap check
+  // (OI-040) doesn't over-block tests that predate it; individual RED cases
+  // override this to exercise the cap itself.
+  arLedgerResult: { data: [{ balance: 999_999 }] as Array<{ balance: number }> | null, error: null as { message: string } | null },
 }
 
 const mockDb = {
@@ -93,6 +100,15 @@ const mockDb = {
           data: null,
           error: supabaseMocks.paymentsInsertError,
         })),
+      }
+    }
+    if (table === 'ar_ledger') {
+      return {
+        select: vi.fn().mockReturnValue({
+          eq: vi.fn().mockReturnValue({
+            limit: vi.fn().mockImplementation(async () => supabaseMocks.arLedgerResult),
+          }),
+        }),
       }
     }
     return {
@@ -139,6 +155,7 @@ beforeEach(() => {
   supabaseMocks.paymentsInsertError = null
   // Default: the authenticated tenant (tenant-1) owns lease-1
   supabaseMocks.leaseSelectResult = { data: { id: 'lease-1', tenant_id: 'tenant-1' }, error: null }
+  supabaseMocks.arLedgerResult = { data: [{ balance: 999_999 }], error: null }
 })
 
 // ---------------------------------------------------------------------------
@@ -243,6 +260,7 @@ describe('POST /api/stripe/payment-intent', () => {
     amount_cents: 250000,
     payment_method_id: 'pm_test_bank',
     description: 'June 2026 rent',
+    client_request_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
   }
 
   it('6. creates PaymentIntent, records payment, returns id + status (200)', async () => {
@@ -321,6 +339,123 @@ describe('POST /api/stripe/payment-intent', () => {
     const body = await res.json() as { error: string }
     expect(body.error).toMatch(/record/i)
   })
+
+  // -------------------------------------------------------------------------
+  // OI-035 route half — idempotent retries via client_request_id
+  // -------------------------------------------------------------------------
+  it('RED1. a duplicate client_request_id whose payments insert collides (23505) is a successful dedupe, not a 500', async () => {
+    supabaseMocks.tenantSelectResult = { data: { id: 'tenant-1', stripe_customer_id: 'cus_test123' }, error: null }
+    mockStripe.paymentIntents.create.mockResolvedValue({ id: 'pi_dedupe_1', status: 'processing' })
+    const payload = { ...validPayload, client_request_id: '11111111-1111-4111-8111-111111111111' }
+
+    const res1 = await post('/api/stripe/payment-intent', payload)
+    expect(res1.status).toBe(200)
+
+    // Client retry, same client_request_id — Stripe's idempotency cache returns
+    // the same PI, and the payments insert now collides on the unique
+    // stripe_payment_intent_id (payments_stripe_pi_uniq, Task 1).
+    supabaseMocks.paymentsInsertError = { code: '23505', message: 'duplicate key value violates unique constraint "payments_stripe_pi_uniq"' }
+    const res2 = await post('/api/stripe/payment-intent', payload)
+    expect(res2.status).toBe(200)
+    const body2 = await res2.json() as { payment_intent_id: string; status: string; deduped?: boolean }
+    expect(body2.deduped).toBe(true)
+    expect(body2.payment_intent_id).toBe('pi_dedupe_1')
+  })
+
+  it('RED2. passes idempotencyKey pi:<tenantId>:<client_request_id> to paymentIntents.create', async () => {
+    supabaseMocks.tenantSelectResult = { data: { id: 'tenant-1', stripe_customer_id: 'cus_test123' }, error: null }
+    mockStripe.paymentIntents.create.mockResolvedValue({ id: 'pi_key_check', status: 'processing' })
+    const payload = { ...validPayload, client_request_id: '22222222-2222-4222-8222-222222222222' }
+
+    await post('/api/stripe/payment-intent', payload)
+
+    expect(mockStripe.paymentIntents.create).toHaveBeenCalledWith(
+      expect.objectContaining({ amount: payload.amount_cents }),
+      expect.objectContaining({ idempotencyKey: 'pi:tenant-1:22222222-2222-4222-8222-222222222222' }),
+    )
+  })
+
+  // -------------------------------------------------------------------------
+  // OI-040 — amount caps + ar_ledger reconciliation
+  // -------------------------------------------------------------------------
+  it('RED3. returns 422 when amount_cents exceeds the $50,000 hard cap', async () => {
+    supabaseMocks.tenantSelectResult = { data: { id: 'tenant-1', stripe_customer_id: 'cus_test123' }, error: null }
+
+    const res = await post('/api/stripe/payment-intent', { ...validPayload, amount_cents: 10_000_000 })
+    expect(res.status).toBe(422)
+    expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
+  })
+
+  it('RED4. returns 422 "Amount exceeds outstanding balance" when amount_cents exceeds the ar_ledger balance', async () => {
+    supabaseMocks.tenantSelectResult = { data: { id: 'tenant-1', stripe_customer_id: 'cus_test123' }, error: null }
+    supabaseMocks.arLedgerResult = { data: [{ balance: 500 }], error: null } // $500 = 50,000 cents
+
+    const res = await post('/api/stripe/payment-intent', { ...validPayload, amount_cents: 60000 })
+    expect(res.status).toBe(422)
+    const body = await res.json() as { error: string }
+    expect(body.error).toMatch(/exceeds outstanding balance/i)
+    expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
+  })
+
+  it('RED5. returns 422 "No balance due" when the ar_ledger balance is $0, regardless of requested amount', async () => {
+    supabaseMocks.tenantSelectResult = { data: { id: 'tenant-1', stripe_customer_id: 'cus_test123' }, error: null }
+    supabaseMocks.arLedgerResult = { data: [{ balance: 0 }], error: null }
+
+    const res = await post('/api/stripe/payment-intent', validPayload)
+    expect(res.status).toBe(422)
+    const body = await res.json() as { error: string }
+    expect(body.error).toMatch(/no balance due/i)
+    expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
+  })
+
+  it('RED6. allows amount_cents exactly equal to the outstanding balance (boundary — must not over-block)', async () => {
+    supabaseMocks.tenantSelectResult = { data: { id: 'tenant-1', stripe_customer_id: 'cus_test123' }, error: null }
+    supabaseMocks.arLedgerResult = { data: [{ balance: 500 }], error: null } // $500 = 50,000 cents
+    mockStripe.paymentIntents.create.mockResolvedValue({ id: 'pi_boundary', status: 'processing' })
+
+    const res = await post('/api/stripe/payment-intent', { ...validPayload, amount_cents: 50000 })
+    expect(res.status).toBe(200)
+    expect(mockStripe.paymentIntents.create).toHaveBeenCalledOnce()
+  })
+
+  it('BONUS. returns 500 (never a blind allow) when the ar_ledger query itself fails', async () => {
+    supabaseMocks.tenantSelectResult = { data: { id: 'tenant-1', stripe_customer_id: 'cus_test123' }, error: null }
+    supabaseMocks.arLedgerResult = { data: null, error: { message: 'connection reset' } }
+
+    const res = await post('/api/stripe/payment-intent', validPayload)
+    expect(res.status).toBe(500)
+    expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
+  })
+
+  it('BONUS. rejects a malformed (non-UUID) client_request_id before ever calling Stripe', async () => {
+    supabaseMocks.tenantSelectResult = { data: { id: 'tenant-1', stripe_customer_id: 'cus_test123' }, error: null }
+
+    const res = await post('/api/stripe/payment-intent', { ...validPayload, client_request_id: 'not-a-uuid' })
+    expect(res.status).toBe(400)
+    const body = await res.json() as { error: string }
+    expect(body.error).toMatch(/uuid/i)
+    expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
+  })
+
+  // -------------------------------------------------------------------------
+  // OI-038, IP-handling slice — CF-Connecting-IP over spoofable X-Forwarded-For
+  // -------------------------------------------------------------------------
+  it('RED7. rate-limits by the tenant user id when only X-Forwarded-For is present (no CF-Connecting-IP)', async () => {
+    supabaseMocks.tenantSelectResult = { data: { id: 'tenant-1', stripe_customer_id: 'cus_test123' }, error: null }
+    mockStripe.paymentIntents.create.mockResolvedValue({ id: 'pi_ip_check', status: 'processing' })
+
+    const app = createApp()
+    await app.request('/api/stripe/payment-intent', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '203.0.113.7' },
+      body: JSON.stringify(validPayload),
+    }, ENV as unknown as Record<string, string>)
+
+    // 'auth-user-A' is the tenantUserId the mocked tenantAuthMiddleware sets —
+    // the spoofable X-Forwarded-For value ('203.0.113.7') must never reach the
+    // rate limiter as the key.
+    expect(checkRateLimit).toHaveBeenCalledWith('auth-user-A')
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -364,6 +499,7 @@ describe('IDOR guard (OI-018)', () => {
       lease_id: 'lease-1',
       amount_cents: 250000,
       payment_method_id: 'pm_test_bank',
+      client_request_id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
     })
     expect(res.status).toBe(403)
     expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
@@ -380,6 +516,7 @@ describe('IDOR guard (OI-018)', () => {
       lease_id: 'lease-B',
       amount_cents: 250000,
       payment_method_id: 'pm_test_bank',
+      client_request_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
     })
     expect(res.status).toBe(404)
     expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
@@ -401,6 +538,7 @@ describe('IDOR guard (OI-018)', () => {
       lease_id: 'lease-1',
       amount_cents: 250000,
       payment_method_id: 'pm_test_bank',
+      client_request_id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
     })
     expect(tenantAuthMiddleware).toHaveBeenCalledTimes(3)
   })
@@ -414,6 +552,7 @@ describe('IDOR guard (OI-018)', () => {
       lease_id: 'lease-1',
       amount_cents: 250000,
       payment_method_id: 'pm_test_bank',
+      client_request_id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
     })
     expect(res.status).toBe(200)
     const body = await res.json() as { payment_intent_id: string }
