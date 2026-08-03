@@ -74,6 +74,12 @@ export const PaymentInsertSchema = z.object({
   notes: z.string().optional(),
 })
 
+// Stripe payment-intent client-generated idempotency token — one per pay
+// attempt, reused verbatim by the client on retry. Echoed into the Stripe
+// idempotencyKey (`pi:<tenantId>:<client_request_id>`) so a client retry
+// after a network timeout can't mint a second PaymentIntent (OI-035).
+export const PaymentIntentClientRequestIdSchema = z.string().uuid('client_request_id must be a valid UUID')
+
 // Expense
 export const ExpenseInsertSchema = z.object({
   property_id: z.string().uuid(),
