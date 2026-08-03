@@ -182,7 +182,18 @@ stripeRouter.post('/payment-intent', async (c) => {
     notes: description ?? null,
   })
   if (insertErr) {
-    if (insertErr.code === '23505') {
+    // Scoped to payments_stripe_pi_uniq specifically, not any 23505 — this
+    // insert never sets autopay_period, so payments_autopay_period_uniq
+    // (0011_appsec_idempotency_and_scale.sql:51-53) can't fire on it today,
+    // but a future insert-path change (e.g. a shared insert helper reused
+    // with cron.ts) could start stamping autopay_period here. Without this
+    // constraint-name check, a 23505 from that OTHER index — an unrelated
+    // autopay collision on the same lease — would be silently misreported
+    // as `deduped: true` instead of surfacing as a real, uninvestigated
+    // collision. Postgres/PostgREST puts the constraint name in the error
+    // message (`duplicate key value violates unique constraint "..."`), the
+    // same shape already relied on in tests/routes/cron-billing.test.ts.
+    if (insertErr.code === '23505' && insertErr.message?.includes('payments_stripe_pi_uniq')) {
       // Duplicate stripe_payment_intent_id (payments_stripe_pi_uniq, Task 1) —
       // a retry with the same client_request_id already recorded this exact
       // PaymentIntent (Stripe's idempotency cache already returned the same
