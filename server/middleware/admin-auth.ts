@@ -51,11 +51,17 @@ export async function adminAuthMiddleware(
   // Closes the case where an allowlisted admin email is also, somehow, a tenant's
   // contact — and more importantly closes the case where a non-allowlisted tenant
   // address would otherwise have passed a looser check.
-  const { data: tenantRow } = await supabase
+  const { data: tenantRow, error: tenantLookupError } = await supabase
     .from('tenants')
     .select('id')
     .eq('auth_user_id', user.id)
     .maybeSingle()
+  // Fail CLOSED: a query failure (network blip, RLS misconfiguration, transient
+  // outage) must not silently degrade into "no tenant row found" — that would
+  // skip the tenant-exclusion check entirely and let the request through.
+  if (tenantLookupError) {
+    return c.json({ error: 'Unable to verify account type' }, 500)
+  }
   if (tenantRow) {
     return c.json({ error: 'Forbidden: tenant accounts cannot access admin routes' }, 403)
   }
