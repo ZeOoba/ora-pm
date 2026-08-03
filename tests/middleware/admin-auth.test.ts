@@ -155,4 +155,26 @@ describe('adminAuthMiddleware', () => {
     }, env)
     expect(res.status).toBe(200)
   })
+
+  it('fails closed (rejects, does not reach next()) when the tenant-exclusion query errors', async () => {
+    // A network blip, RLS misconfiguration, or transient outage on the tenants
+    // lookup must never silently degrade to "not a tenant, let them through" —
+    // the request must be rejected, not passed to next().
+    mockGetUser.mockResolvedValue({
+      data: { user: { id: 'u1', email: 'ggoldberg@oxfordra.net' } },
+      error: null,
+    })
+    mockMaybeSingle.mockResolvedValue({
+      data: null,
+      error: { message: 'connection timeout', code: '08006' },
+    })
+    const app = makeApp()
+    const res = await app.request('/ping', {
+      headers: { Authorization: 'Bearer some-token' },
+    }, env)
+    expect(res.status).not.toBe(200)
+    expect(res.status).toBeGreaterThanOrEqual(400)
+    const body = await res.json() as { error: string }
+    expect(body.error).toBeTruthy()
+  })
 })
