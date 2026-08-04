@@ -64,6 +64,37 @@ describe('PortalAccount MFA enrollment modal (OI-045)', () => {
   })
 })
 
+describe('PortalMfaChallenge — verified-factor filtering (review finding, post-effd6a3)', () => {
+  const source = readFileSync(
+    join(__dirname, '../../src/portal/components/PortalMfaChallenge.tsx'),
+    'utf-8'
+  )
+  const accountSource = readFileSync(
+    join(__dirname, '../../src/portal/pages/PortalAccount.tsx'),
+    'utf-8'
+  )
+
+  // Review finding (Important, post-effd6a3): `factorsData?.totp?.[0]` picked the
+  // first TOTP factor with no status filter, unlike PortalAccount.tsx's loadFactors,
+  // which explicitly filters `f.status === 'verified'`. A stale/orphaned unverified
+  // factor sorted first (e.g. a second tab open mid-enrollment when this guard
+  // screen fires) could target the wrong factorId for the actual security step-up
+  // challenge. Must match PortalAccount's existing filter, not invent new logic.
+  it('FIX 2: filters to status === "verified" before picking the factor to challenge, matching PortalAccount', () => {
+    expect(accountSource).toMatch(/status\s*===\s*'verified'/)
+
+    expect(source).toMatch(/status\s*===\s*'verified'/)
+    // the unfiltered raw pick must be gone
+    expect(source).not.toMatch(/factorsData\?\.totp\?\.\[0\]/)
+    // the filter must run on factorsData.totp before the factor is used in the
+    // challenge call
+    const filterIdx = source.search(/status\s*===\s*'verified'/)
+    const challengeIdx = source.indexOf('mfa.challenge(')
+    expect(filterIdx).toBeGreaterThan(-1)
+    expect(challengeIdx).toBeGreaterThan(filterIdx)
+  })
+})
+
 describe('checkAal2Guard — pure AAL2 decision function (OI-045, RED 4)', () => {
   it('RED 4a: returns "challenge required" when currentLevel is aal1 but a verified factor makes aal2 reachable', () => {
     expect(checkAal2Guard({ currentLevel: 'aal1', nextLevel: 'aal2' })).toBe('challenge required')
@@ -98,5 +129,48 @@ describe('PortalApp — AAL2 guard call site (OI-045)', () => {
     expect(source).toMatch(/import\s*\{\s*PortalMfaChallenge\s*\}\s*from\s*['"]\.\/components\/PortalMfaChallenge['"]/)
     expect(source).toMatch(/'challenge required'/)
     expect(source).toMatch(/<PortalMfaChallenge/)
+  })
+
+  // Review finding (Important, post-effd6a3): getAuthenticatorAssuranceLevel().then(...)
+  // had no .catch() / try-catch, so a rejection (network blip, Supabase outage) left
+  // aalStatus stuck at 'checking' forever -- an indefinite silent spinner for EVERY
+  // tenant with a session, with no error, no retry, no way to proceed. Every other
+  // async Supabase call in this diff (PortalAccount.tsx, PortalMfaChallenge.tsx) wraps
+  // in try/catch with a surfaced error state; this call site must match that pattern.
+  it('FIX 1: wraps the AAL check in error handling that sets a distinct error state', () => {
+    // the effect body must catch a thrown/rejected error from the AAL check --
+    // either an async function with try/catch, or a .catch() on the promise chain
+    const usesTryCatch = /getAuthenticatorAssuranceLevel\(\)[\s\S]{0,800}\bcatch\b/.test(source)
+    const usesPromiseCatch = /getAuthenticatorAssuranceLevel\(\)[\s\S]{0,200}\.catch\(/.test(source)
+    expect(usesTryCatch || usesPromiseCatch).toBe(true)
+
+    // the error path must set a status distinct from 'checking' (not just leave it
+    // hanging), and that status must NOT be 'session OK' or 'challenge required'
+    // literals reused to mean "error" -- it must be its own state.
+    expect(source).toMatch(/setAalStatus\(\s*['"]error['"]\s*\)/)
+  })
+
+  it('FIX 1: the error state renders an actionable message and blocks the router (fails closed)', () => {
+    // an error branch must exist that returns before falling through to <PortalRouter
+    expect(source).toMatch(/aalStatus\s*===\s*['"]error['"]/)
+
+    // the error branch's return block must come before the final `<PortalRouter`
+    // fallthrough in source order, and must not itself render PortalRouter --
+    // i.e. it's a distinct block, not merged into the router-rendering branch.
+    const errorBranchIdx = source.indexOf("aalStatus === 'error'")
+    const routerIdx = source.lastIndexOf('<PortalRouter')
+    expect(errorBranchIdx).toBeGreaterThan(-1)
+    expect(routerIdx).toBeGreaterThan(errorBranchIdx)
+
+    // the block immediately following the error-branch check must not contain
+    // <PortalRouter -- i.e. the error state renders its own UI, not the app.
+    const errorBlock = source.slice(errorBranchIdx, errorBranchIdx + 400)
+    const errorBlockReturn = errorBlock.slice(0, errorBlock.indexOf('\n\n') === -1 ? errorBlock.length : errorBlock.indexOf('\n\n'))
+    expect(errorBlockReturn).not.toMatch(/<PortalRouter/)
+
+    // actionable: a visible message and a retry affordance, styled consistent with
+    // this diff's existing error UI (text-red-600, per PortalAccount/PortalMfaChallenge)
+    expect(errorBlock).toMatch(/text-red-600/)
+    expect(errorBlock).toMatch(/onClick/)
   })
 })

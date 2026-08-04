@@ -21,7 +21,12 @@ export function PortalMfaChallenge({ onVerified }: Props) {
     try {
       const { data: factorsData, error: factorsError } = await portalSupabase.auth.mfa.listFactors()
       if (factorsError) throw factorsError
-      const factor = factorsData?.totp?.[0]
+      // Only ever challenge a verified factor -- matching PortalAccount.tsx's
+      // loadFactors filter. An unfiltered [0] pick could target a stale/orphaned
+      // unverified factor (e.g. a second tab open mid-enrollment) instead of the
+      // tenant's actual authenticator, on the real security step-up screen.
+      const verifiedFactors = factorsData?.totp?.filter(f => f.status === 'verified') ?? []
+      const factor = verifiedFactors[0]
       if (!factor) throw new Error('No verified authenticator found for this account')
 
       const { data: challengeData, error: challengeError } = await portalSupabase.auth.mfa.challenge({
