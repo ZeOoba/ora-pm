@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import { getDb } from '../db/client'
-import { TenantInsertSchema, TenantUpdateSchema, PaginationSchema } from '../lib/schemas'
+import { TenantInsertSchema, TenantUpdateSchema, PaginationSchema, TenantCorrespondenceInsertSchema } from '../lib/schemas'
+import { dbError } from '../lib/api-error'
 
 type Env = { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string }
 
@@ -17,7 +18,7 @@ tenantsRouter.get('/', async (c) => {
     .select('*')
     .order('name')
     .range(offset, offset + limit - 1)
-  if (error) return c.json({ error: error.message }, 500)
+  if (error) return dbError(c, error, 'Failed to load tenants')
   return c.json({ data })
 })
 
@@ -28,7 +29,9 @@ tenantsRouter.get('/:id', async (c) => {
     .select('*, leases(*, units(*, properties(name))), insurance_certificates(*), correspondence_log(*)')
     .eq('id', c.req.param('id'))
     .single()
-  if (error) return c.json({ error: error.message }, 404)
+  // Not-found is a 404, not a 500 — dbError always returns 500, so this
+  // stays a plain generic response rather than routing through it.
+  if (error) return c.json({ error: 'Tenant not found' }, 404)
   return c.json({ data })
 })
 
@@ -38,7 +41,7 @@ tenantsRouter.post('/', async (c) => {
   const parsed = TenantInsertSchema.safeParse(raw)
   if (!parsed.success) return c.json({ error: parsed.error.flatten().fieldErrors }, 422)
   const { data, error } = await db.from('tenants').insert(parsed.data).select().single()
-  if (error) return c.json({ error: 'Failed to create tenant' }, 400)
+  if (error) return dbError(c, error, 'Failed to create tenant')
   return c.json({ data }, 201)
 })
 
@@ -53,23 +56,21 @@ tenantsRouter.put('/:id', async (c) => {
     .eq('id', c.req.param('id'))
     .select()
     .single()
-  if (error) return c.json({ error: 'Failed to update tenant' }, 400)
+  if (error) return dbError(c, error, 'Failed to update tenant')
   return c.json({ data })
 })
 
 // POST /api/tenants/:id/correspondence
 tenantsRouter.post('/:id/correspondence', async (c) => {
-  const body = await c.req.json()
-  if (!body.direction || !body.contact_date || !body.subject || !body.summary || !body.method) {
-    return c.json({ error: 'direction, contact_date, subject, summary, method required' }, 400)
-  }
-  const { direction, contact_date, subject, summary, method } = body
+  const raw = await c.req.json()
+  const parsed = TenantCorrespondenceInsertSchema.safeParse(raw)
+  if (!parsed.success) return c.json({ error: parsed.error.flatten().fieldErrors }, 422)
   const db = getDb(c.env)
   const { data, error } = await db
     .from('correspondence_log')
-    .insert({ direction, contact_date, subject, summary, method, tenant_id: c.req.param('id') })
+    .insert({ ...parsed.data, tenant_id: c.req.param('id') })
     .select()
     .single()
-  if (error) return c.json({ error: error.message }, 400)
+  if (error) return dbError(c, error, 'Failed to create correspondence entry')
   return c.json({ data }, 201)
 })

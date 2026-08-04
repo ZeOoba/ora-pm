@@ -62,6 +62,12 @@ export const ChargeInsertSchema = z.object({
   amount: nonNegativeAmount,
   description: z.string().optional(),
   source: z.enum(['auto', 'manual']).default('manual'),
+  // OI-046 gap closure: migration 0011 made this column NOT NULL with no DB
+  // default. Optional here so a client-supplied dedupe key (e.g. an admin
+  // UI resending an identical retry) passes through unchanged; charges.ts's
+  // POST handler defaults it to `manual:${crypto.randomUUID()}` when absent
+  // so every insert still satisfies the NOT NULL constraint.
+  idempotency_key: z.string().min(1).optional(),
 })
 
 // Payment
@@ -99,6 +105,103 @@ export const CamCalculateSchema = z.object({
   total_property_recoverable_expenses: positiveAmount,
   total_leased_sf: positiveAmount,
 })
+
+// ---------------------------------------------------------------------------
+// Remaining CRUD mass-assignment schemas (OI-041 remainder — Task 9).
+// All `.strict()` — an unexpected field (including `id`/`created_at`) surfaces
+// as a visible 422 rather than being silently dropped. Field lists below were
+// verified against the actual admin-UI call sites (see task-9-report.md for
+// which pages were checked), not guessed from the DB schema.
+// ---------------------------------------------------------------------------
+
+// Budget upsert — unique on (property_id, year, category). BudgetsList.tsx
+// saves one category at a time via Promise.all (never a real batch array),
+// but budgets.ts's route accepts whatever Supabase .upsert() is handed,
+// which passes an array straight through with no row-count bound. The route
+// wraps this schema in z.union([BudgetUpsertSchema, z.array(...).max(50)]) —
+// 50 is comfortably above the 10-category ceiling ALL_CATEGORIES can ever
+// produce in one save, so it's a defensive cap, not a UI-observed batch size.
+export const BudgetUpsertSchema = z.object({
+  property_id: z.string().uuid(),
+  year: z.number().int().min(2000).max(2100),
+  category: z.enum([
+    'rental_income', 'cam_income', 'other_income',
+    'taxes', 'insurance', 'maintenance', 'utilities', 'management', 'capital', 'other',
+  ]),
+  budgeted_amount: nonNegativeAmount,
+}).strict()
+
+// Insurance certificate — InsuranceForm.tsx is the sole write path (create
+// only; no admin-UI page currently issues PUT /insurance/:id). `status` is a
+// real DB column but is never client-set — insurance.ts's GET always
+// overwrites it with a computed value from expiration_date, so it's
+// deliberately excluded here rather than trusting a client-supplied value.
+export const InsuranceInsertSchema = z.object({
+  tenant_id: z.string().uuid(),
+  policy_type: z.enum(['general_liability', 'property', 'workers_comp', 'umbrella', 'other']),
+  carrier: z.string().nullish(),
+  policy_number: z.string().nullish(),
+  coverage_amount: positiveAmount.nullish(),
+  effective_date: isoDate,
+  expiration_date: isoDate,
+}).strict()
+export const InsuranceUpdateSchema = InsuranceInsertSchema.partial()
+
+// Unit — PropertyDetail.tsx's "Add Unit" form is the sole write path (create
+// only; no admin-UI page currently issues PUT /units/:id).
+export const UnitInsertSchema = z.object({
+  property_id: z.string().uuid(),
+  suite: z.string().min(1),
+  floor: z.string().nullish(),
+  sf: z.number().positive(),
+  status: z.enum(['occupied', 'vacant', 'notice', 'unavailable']).default('vacant'),
+}).strict()
+export const UnitUpdateSchema = UnitInsertSchema.partial()
+
+// Renewal update — no admin-UI page currently issues PUT /renewals/:id
+// (RenewalsPipeline.tsx is read-only), so field list follows the plan's
+// explicit scope rather than an observed call site: status enum + dates +
+// notes only. Deliberately excludes `proposed_terms` (unused by any UI),
+// and `id`/`created_at`/`lease_id`/`updated_at` (updated_at stays
+// server-stamped in the route, same as before this change).
+export const RenewalUpdateSchema = z.object({
+  status: z.enum(['tracking', 'proposal_sent', 'negotiating', 'executed', 'declined']).optional(),
+  expiration_date: isoDate.optional(),
+  target_decision_date: isoDate.nullish(),
+  notes: z.string().nullish(),
+}).strict()
+
+// Lease amendment insert (POST /leases/:id/amendments) — lease_id comes from
+// the URL param, never the body. LeaseDetail.tsx's "Add Amendment" form.
+export const LeaseAmendmentInsertSchema = z.object({
+  effective_date: isoDate,
+  description: z.string().min(1),
+  document_path: z.string().nullish(),
+  changes: z.record(z.string(), z.unknown()).default({}),
+}).strict()
+
+// Lease notice insert (POST /leases/:id/notices) — lease_id comes from the
+// URL param. LeaseDetail.tsx's NoticesSection form.
+export const LeaseNoticeInsertSchema = z.object({
+  notice_type: z.enum([
+    'late_payment', 'lease_violation', 'eviction', 'renewal_offer',
+    'move_out_confirmation', 'cam_reconciliation', 'other',
+  ]),
+  sent_date: isoDate,
+  method: z.enum(['email', 'certified_mail', 'portal', 'hand_delivered']),
+  document_path: z.string().nullish(),
+  notes: z.string().nullish(),
+}).strict()
+
+// Tenant correspondence insert (POST /tenants/:id/correspondence) — tenant_id
+// comes from the URL param. TenantDetail.tsx's CorrespondenceSection form.
+export const TenantCorrespondenceInsertSchema = z.object({
+  direction: z.enum(['inbound', 'outbound']),
+  contact_date: isoDate,
+  subject: z.string().min(1),
+  summary: z.string().min(1),
+  method: z.enum(['email', 'phone', 'letter', 'portal', 'in_person']),
+}).strict()
 
 // Pagination (shared by all list endpoints — added here for co-location)
 export const PaginationSchema = z.object({
