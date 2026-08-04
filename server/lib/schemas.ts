@@ -92,6 +92,14 @@ export const ExpenseInsertSchema = z.object({
 })
 export const ExpenseUpdateSchema = ExpenseInsertSchema.partial()
 
+// CAM reconciliation calculate/save (OI-041 slice)
+export const CamCalculateSchema = z.object({
+  lease_id: z.string().uuid(),
+  reconciliation_year: z.number().int().positive(),
+  total_property_recoverable_expenses: positiveAmount,
+  total_leased_sf: positiveAmount,
+})
+
 // Pagination (shared by all list endpoints — added here for co-location)
 export const PaginationSchema = z.object({
   limit:  z.coerce.number().int().min(1).max(200).default(50),
