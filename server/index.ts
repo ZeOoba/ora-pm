@@ -48,8 +48,6 @@ export interface Env {
   CRON_SECRET: string
   STRIPE_SECRET_KEY: string
   STRIPE_WEBHOOK_SECRET: string
-  RESEND_API_KEY?: string
-  RESEND_FROM_EMAIL?: string
   ANTHROPIC_API_KEY?: string
   CONFIDENTIAL_TERMS?: string  // comma-separated denylist; never commit real terms
   INTAKE_MODEL?: string        // optional override for the lease-intake extraction model

@@ -164,7 +164,6 @@ const env = {
   CRON_SECRET: 'test',
   STRIPE_SECRET_KEY: 'sk_test_dummy',
   STRIPE_WEBHOOK_SECRET: 'whsec_dummy',
-  RESEND_API_KEY: undefined,
 }
 
 const app = createApp()

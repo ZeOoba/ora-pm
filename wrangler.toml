@@ -8,12 +8,26 @@ pages_build_output_dir = "./dist"
 # CRON_SECRET            ← random 32-char string; ORA scheduler sends as Bearer token
 # STRIPE_SECRET_KEY      ← set via wrangler pages secret put STRIPE_SECRET_KEY
 # STRIPE_WEBHOOK_SECRET  ← set via wrangler pages secret put STRIPE_WEBHOOK_SECRET
+#
+# RESEND_API_KEY / RESEND_FROM_EMAIL are NOT used by this app (removed
+# 2026-08-04, OI-047) — this Worker no longer sends email itself. If they're
+# still provisioned as live Pages secrets, they're orphaned; safe to delete
+# (`wrangler pages secret delete RESEND_API_KEY` / `RESEND_FROM_EMAIL`) as a
+# follow-up, not required for this app to function correctly.
 
-# Scheduled HTTP crons — invoked by the ORA fleet scheduler via POST with
-# `Authorization: Bearer <CRON_SECRET>` (Cloudflare Pages has no native cron triggers):
-#   POST /api/cron/monthly-billing            — monthly, 1st of month
+# Scheduled HTTP crons — POSTed with `Authorization: Bearer <CRON_SECRET>`
+# (Cloudflare Pages has no native cron triggers, and this account has no
+# workers.dev subdomain either, so a cron Worker can't attach schedules).
+# Driven by a standalone Windows Task Scheduler task ("ORA PM Crons",
+# Interactive logon, independent of whether Claude Desktop is open) running
+# C:\Users\Owner\ora-pm-cron\ping-crons.ps1 — NOT the Claude dual-fleet
+# scheduled-task registry. Since OI-047 (2026-08-04), critical-dates-alerts
+# and delinquency-check return an `email` field instead of sending email
+# themselves; ping-crons.ps1 sends it via Outlook COM. monthly-billing is
+# not currently pinged by ping-crons.ps1 (no email path, not part of OI-047).
+#   POST /api/cron/monthly-billing            — monthly, 1st of month (not yet wired to a trigger)
 #   POST /api/cron/critical-dates-alerts      — daily ~09:00 ET
-#   POST /api/cron/delinquency-check          — daily ~09:05 ET
+#   POST /api/cron/delinquency-check          — daily ~09:00 ET
 
 # OI-038 remainder: durable, cross-isolate rate-limit counter storage (see
 # server/lib/rate-limit.ts for the eventually-consistent throttle-not-hard-
