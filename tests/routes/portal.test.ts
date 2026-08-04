@@ -10,6 +10,16 @@ vi.mock('../../server/middleware/tenant-auth', () => ({
   }),
 }))
 
+// Auto-pass the OI-045 AAL2 step-up gate in tests — this file exercises
+// /autopay's OWN logic (ownership checks, Stripe verification, error
+// hygiene), not the gate itself. The gate's behavior (including the actual
+// PoC it closes) has its own dedicated coverage: tests/middleware/aal-guard.test.ts
+// (unit) and tests/routes/portal-autopay-aal-integration.test.ts (proves the
+// real gate is really wired onto the real route in the real app).
+vi.mock('../../server/middleware/aal-guard', () => ({
+  requireAal2: vi.fn(async (_c: unknown, next: () => Promise<void>) => next()),
+}))
+
 const mockFrom = vi.hoisted(() => vi.fn())
 
 vi.mock('@supabase/supabase-js', () => ({

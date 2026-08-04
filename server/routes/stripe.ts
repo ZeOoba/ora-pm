@@ -4,6 +4,7 @@ import { getStripe } from '../lib/stripe'
 import { getDb } from '../db/client'
 import type { Env } from '../index'
 import { tenantAuthMiddleware } from '../middleware/tenant-auth'
+import { requireAal2 } from '../middleware/aal-guard'
 import { checkRateLimit } from '../lib/rate-limit'
 import { PaymentIntentClientRequestIdSchema } from '../lib/schemas'
 
@@ -57,7 +58,13 @@ stripeRouter.post('/customer', async (c) => {
 })
 
 // POST /api/stripe/setup-intent — create SetupIntent for Financial Connections bank linking
-stripeRouter.post('/setup-intent', async (c) => {
+//
+// OI-045: this is the endpoint that actually attaches a us_bank_account
+// Stripe PaymentMethod to the tenant's customer — a REFUTE pass on the
+// original /autopay-only fix found this ungated, meaning an attacker with a
+// stolen aal1 JWT (no MFA step-up) could attach an arbitrary bank account
+// here, then use it via /payment-intent below without ever needing MFA.
+stripeRouter.post('/setup-intent', requireAal2, async (c) => {
   const userId = c.get('tenantUserId')
   const { tenant_id } = await c.req.json()
   if (!tenant_id) return c.json({ error: 'tenant_id required' }, 400)
@@ -93,7 +100,13 @@ stripeRouter.post('/setup-intent', async (c) => {
 })
 
 // POST /api/stripe/payment-intent — create PaymentIntent for ACH charge
-stripeRouter.post('/payment-intent', async (c) => {
+//
+// OI-045: this endpoint CONFIRMS the PaymentIntent immediately (confirm:true
+// below) — it is the one that actually moves money, making it the single
+// most sensitive write path in this router. A stolen aal1 bearer JWT (e.g.
+// via XSS or a synced session, without the tenant's MFA device) previously
+// had no server-side barrier to initiating a real ACH debit here.
+stripeRouter.post('/payment-intent', requireAal2, async (c) => {
   const userId = c.get('tenantUserId')
   // CF-Connecting-IP is stamped by Cloudflare's edge and cannot be spoofed by
   // the client; X-Forwarded-For CAN be (OI-038, IP-handling slice), so it is
