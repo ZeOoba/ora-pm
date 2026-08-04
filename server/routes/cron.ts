@@ -101,8 +101,37 @@ cronRouter.post('/monthly-billing', async (c) => {
 
       const periodChargeTotal = (openCharges ?? []).reduce((s: number, ch: { amount: number }) => s + ch.amount, 0)
 
-      // Balance cap: a tenant who already paid manually (check/wire) must not be
-      // re-debited — cap the debit at the lease's outstanding AR balance.
+      // Period-paid: manual (check/wire/other) or succeeded ACH payments dated
+      // WITHIN this period. Autopay is only authorized to collect THIS period's
+      // rent — it must never sweep older, unrelated arrears via an automated
+      // ACH debit the tenant didn't specifically authorize for that purpose.
+      const { data: periodPayments, error: ppErr } = await db
+        .from('payments')
+        .select('amount, method, stripe_status')
+        .eq('lease_id', lease.id)
+        .gte('payment_date', periodStartStr)
+        .lte('payment_date', periodEndStr)
+
+      if (ppErr) {
+        errors++
+        errorMessages.push(`autopay lease ${lease.id}: period-payment lookup failed: ${ppErr.message}`)
+        continue
+      }
+
+      const periodPaid = (periodPayments ?? []).reduce(
+        (s: number, p: { amount: number; method: string; stripe_status?: string }) => {
+          if (p.method === 'ach_stripe' && p.stripe_status === 'succeeded') return s + p.amount
+          if (['check', 'wire', 'other'].includes(p.method)) return s + p.amount
+          return s
+        },
+        0,
+      )
+      const periodOutstanding = Math.max(0, periodChargeTotal - periodPaid)
+
+      // Lifetime cap: never debit more than the lease's true outstanding AR
+      // balance, however period-scoping above is what prevents re-debiting a
+      // tenant who already paid THIS period and what prevents sweeping arrears
+      // from an earlier period into an unrelated autopay charge.
       const { data: arRows, error: arErr } = await db
         .from('ar_ledger')
         .select('balance')
@@ -117,9 +146,9 @@ cronRouter.post('/monthly-billing', async (c) => {
       }
 
       const outstandingBalance = arRows?.[0]?.balance ?? 0
-      const debitAmount = Math.min(periodChargeTotal, outstandingBalance)
+      const debitAmount = Math.min(periodOutstanding, outstandingBalance)
       if (debitAmount <= 0) {
-        skipped++ // nothing outstanding to collect
+        skipped++ // nothing outstanding to collect for this period
         continue
       }
 
