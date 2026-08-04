@@ -38,23 +38,30 @@ type PaymentRow = {
   method: string
   stripe_status?: string
   autopay_period?: string
+  payment_date?: string
 }
 
 const state = {
   leases: [] as Record<string, unknown>[],
   periodCharges: [] as { amount: number }[],
+  // Charges outside the current period (older arrears) — contribute to the
+  // LIFETIME ar_ledger balance but must never be pulled into the current
+  // period's own charge total (that query is due_date-scoped).
+  priorCharges: [] as { amount: number }[],
   payments: [] as PaymentRow[],
   chargesInsertError: null as { code?: string; message: string } | null,
   paymentsInsertError: null as { code?: string; message: string } | null,
 }
 
+function paymentCounts(p: PaymentRow): boolean {
+  if (p.method === 'ach_stripe' && p.stripe_status === 'succeeded') return true
+  return ['check', 'wire', 'other'].includes(p.method)
+}
+
+// Mirrors migration 0011's ar_ledger view: lifetime totals, no date scoping.
 function ledgerBalance(): number {
-  const totalCharged = state.periodCharges.reduce((s, ch) => s + ch.amount, 0)
-  const totalPaid = state.payments.reduce((s, p) => {
-    if (p.method === 'ach_stripe' && p.stripe_status === 'succeeded') return s + p.amount
-    if (['check', 'wire', 'other'].includes(p.method)) return s + p.amount
-    return s
-  }, 0)
+  const totalCharged = [...state.periodCharges, ...state.priorCharges].reduce((s, ch) => s + ch.amount, 0)
+  const totalPaid = state.payments.reduce((s, p) => (paymentCounts(p) ? s + p.amount : s), 0)
   return totalCharged - totalPaid
 }
 
@@ -83,11 +90,23 @@ function installDbMock() {
       return {
         select: vi.fn().mockReturnValue({
           eq: vi.fn().mockImplementation((col1: string, val1: string) => ({
+            // Idempotency pre-check: .eq('lease_id',x).eq('autopay_period',y).limit()
             eq: vi.fn().mockImplementation((col2: string, val2: string) => ({
               limit: vi.fn().mockImplementation(async () => ({
                 data: state.payments.filter(p =>
                   col1 === 'lease_id' && p.lease_id === val1 &&
                   col2 === 'autopay_period' && p.autopay_period === val2
+                ),
+                error: null,
+              })),
+            })),
+            // Period-paid lookup: .eq('lease_id',x).gte('payment_date',y).lte('payment_date',z)
+            gte: vi.fn().mockImplementation((gteCol: string, gteVal: string) => ({
+              lte: vi.fn().mockImplementation(async (lteCol: string, lteVal: string) => ({
+                data: state.payments.filter(p =>
+                  col1 === 'lease_id' && p.lease_id === val1 &&
+                  gteCol === 'payment_date' && lteCol === 'payment_date' &&
+                  p.payment_date !== undefined && p.payment_date >= gteVal && p.payment_date <= lteVal
                 ),
                 error: null,
               })),
@@ -153,6 +172,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   state.leases = [AUTOPAY_LEASE]
   state.periodCharges = [{ amount: 5000 }]
+  state.priorCharges = []
   state.payments = []
   state.chargesInsertError = null
   state.paymentsInsertError = null
@@ -236,6 +256,51 @@ describe('POST /api/cron/monthly-billing', () => {
     expect(body.errors).toBe(0)
     expect(body.errorMessages).toEqual([])
     expect(body.skipped).toBe(1)
+  })
+
+  // RED 5 — the balance cap must be PERIOD-scoped, not lifetime (REFUTE finding,
+  // 2026-08-03): ar_ledger.balance is a lifetime total. A tenant with old,
+  // unresolved arrears who pays THIS period's rent in full manually must not
+  // be auto-debited for the old arrears — that's outside what autopay was
+  // authorized to collect for this period, and contradicts this file's own
+  // "already paid manually must not be re-debited" guarantee.
+  it('does not sweep prior-period arrears when the current period is paid in full manually', async () => {
+    state.priorCharges = [{ amount: 500 }] // unpaid arrears from a prior period
+    state.payments = [{ lease_id: 'lease_1', amount: 5000, method: 'check', payment_date: '2026-06-15' }]
+
+    const res = await postBilling()
+    expect(res.status).toBe(200)
+
+    // Lifetime balance is still $500 (arrears never collected elsewhere) —
+    // proves this is a period-scoping fix, not a "credit balance" false pass.
+    expect(ledgerBalance()).toBe(500)
+    expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
+  })
+
+  // A payment dated OUTSIDE the current period must not count as "this
+  // period paid" even though it reduces the lifetime balance — otherwise a
+  // payment for an old period would incorrectly suppress this period's debit.
+  it('does not credit an out-of-period payment against the current period', async () => {
+    state.payments = [{ lease_id: 'lease_1', amount: 5000, method: 'check', payment_date: '2026-05-15' }]
+
+    const res = await postBilling()
+    expect(res.status).toBe(200)
+
+    expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled() // lifetime balance is $0 → safety cap still applies
+  })
+
+  // Partial in-period payment: the gap must still be collected via autopay.
+  it('debits the remaining period balance when the manual payment was in-period but partial', async () => {
+    state.payments = [{ lease_id: 'lease_1', amount: 2000, method: 'check', payment_date: '2026-06-10' }]
+
+    const res = await postBilling()
+    expect(res.status).toBe(200)
+
+    expect(mockStripe.paymentIntents.create).toHaveBeenCalledTimes(1)
+    expect(mockStripe.paymentIntents.create).toHaveBeenCalledWith(
+      expect.objectContaining({ amount: 300000 }), // $3,000 remaining on this period
+      expect.anything(),
+    )
   })
 
   // Edge: lease with no charges in the period → no $0 PaymentIntent
