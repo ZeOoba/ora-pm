@@ -82,9 +82,11 @@ describe('POST /api/cron/critical-dates-alerts', () => {
     const body = await res.json() as { new_alerts: number; skipped: number; email: { subject: string; body: string } | null }
     expect(body.new_alerts).toBe(1)
     expect(body.skipped).toBe(0)
-    // Dedup rows were captured by the mock (and therefore committed) before
-    // this response — the mock only records them when `insert` is awaited,
-    // which happens before the handler builds/returns the email digest.
+    // Proves the handler called insert with the right dedup rows before
+    // returning this response — it does NOT by itself prove the insert
+    // resolved before the digest was built (that ordering is proven by the
+    // separate "never returns email content when the dedup write fails"
+    // test below, which shows no digest is returned when the insert fails).
     expect(insertedBefore).toEqual([
       { notification_type: 'critical_date_alert', reference_id: 'lease_1', recipient: 'ggoldberg@oxfordra.net' },
     ])

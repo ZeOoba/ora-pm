@@ -18,8 +18,10 @@ export const cronRouter = new Hono<{ Bindings: Env }>()
 cronRouter.use('/*', cronAuthMiddleware)
 
 // OI-038 remainder: 10/hour per cron endpoint path (not per caller — the
-// only expected caller is the ORA fleet scheduler, authenticated via
-// CRON_SECRET; runs AFTER cronAuthMiddleware so an invalid-secret guess
+// only expected callers are the standalone Windows Task Scheduler triggers
+// (scripts/trigger-billing.ps1; C:\Users\Owner\ora-pm-cron\ping-crons.ps1 —
+// neither is the Claude fleet's own create_scheduled_task registry),
+// authenticated via CRON_SECRET; runs AFTER cronAuthMiddleware so an invalid-secret guess
 // never consumes budget). Sized generous specifically to absorb a
 // legitimate catch-up burst — if the scheduler misses a run (e.g. an
 // outage) it re-triggers the missed cron(s) close together on recovery.
@@ -223,6 +225,12 @@ cronRouter.post('/monthly-billing', async (c) => {
 
 cronRouter.post('/critical-dates-alerts', async (c) => {
   const db = getDb(c.env)
+  // OI-047: RECIPIENTS only scopes the sent_notifications dedup-key set
+  // (`${reference_id}:${recipient}`) now — it no longer controls who
+  // actually receives mail. The actual send recipient is $script:EmailTo in
+  // C:\Users\Owner\ora-pm-cron\ping-crons-lib.ps1 (separately maintained).
+  // Changing one without the other either has no effect on delivery, or
+  // writes dedup rows for an address that never gets mail.
   const RECIPIENTS = ['ggoldberg@oxfordra.net']
   const HORIZON_DAYS = 90
 
