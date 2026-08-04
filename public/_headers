@@ -1,0 +1,32 @@
+# OI-037: transport-hardening security headers for Cloudflare Pages.
+#
+# This file lives in `public/` (Vite's default publicDir — unset in vite.config.ts,
+# so it defaults to `public/`), which Vite copies verbatim to `dist/` on build.
+# `wrangler.toml` sets `pages_build_output_dir = "./dist"`, and Cloudflare Pages
+# reads a `_headers` file from the root of that build output — so this becomes
+# `dist/_headers` at deploy time. See https://developers.cloudflare.com/pages/configuration/headers/
+#
+# CSP is shipped as Content-Security-Policy-REPORT-ONLY for this PR, not enforcing.
+# Rationale: this environment cannot open a real browser to click through the live
+# Pay Now flow (Stripe Elements iframe + redirect, Supabase auth) to confirm the
+# policy doesn't break it. Report-Only ships the identical policy, reports would-be
+# violations to the browser console (no report-to/report-uri configured — console
+# only), and is inert to real traffic. Follow-up: after a manual browser
+# verification pass against a deployed preview, flip the header name below to
+# `Content-Security-Policy` (drop `-Report-Only`) to enforce.
+#
+# style-src: left under the default-src 'self' fallback (no 'unsafe-inline' added).
+# Checked for inline <style> tags/attributes that would need it — none found;
+# React's style={{...}} prop (used in PortalPayNow.tsx and others) sets style
+# properties via the CSSOM (node.style.prop = value), which CSP does not treat as
+# an inline-style violation, and Tailwind v4 (@tailwindcss/vite) + @fontsource
+# packages compile to a same-origin stylesheet, not inline. Report-Only mode will
+# surface it in the console if this turns out to be wrong.
+
+/*
+  X-Frame-Options: DENY
+  Content-Security-Policy-Report-Only: default-src 'self'; script-src 'self' https://js.stripe.com; connect-src 'self' https://api.stripe.com https://*.supabase.co; frame-src https://js.stripe.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  Strict-Transport-Security: max-age=31536000; includeSubDomains
+  Permissions-Policy: camera=(), microphone=(), geolocation=()
