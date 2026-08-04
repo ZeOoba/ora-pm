@@ -86,8 +86,9 @@ describe('POST /intake/lease', () => {
       ok: true,
       json: async () => ({ content: [{ type: 'tool_use', name: 'extract_lease', input: { base_rent_monthly: 4500, _confidence: { base_rent_monthly: 0.97 } } }] }),
     }))
+    const pdfBytes = await buildTextPdf('Ordinary lease terms, nothing sensitive here')
     const res = await app().request('/intake/lease',
-      body({ filename: 'acme.pdf', pdfBase64: 'JVBERi0xLjcK', tenant_id: 't', unit_id: 'u' }), env)
+      body({ filename: 'acme.pdf', pdfBase64: toBase64(pdfBytes), tenant_id: 't', unit_id: 'u' }), env)
     expect(res.status).toBe(200)
     const json = await res.json() as { fields: { base_rent_monthly: number } }
     expect(json.fields.base_rent_monthly).toBe(4500)
@@ -98,8 +99,9 @@ describe('POST /intake/lease', () => {
       ok: true,
       json: async () => ({ content: [{ type: 'tool_use', name: 'extract_lease', input: { notes: 'Tenant of the Zeta portfolio', base_rent_monthly: 4500, _confidence: {} } }] }),
     }))
+    const pdfBytes = await buildTextPdf('Ordinary lease terms, nothing sensitive here')
     const res = await app().request('/intake/lease',
-      body({ filename: 'acme.pdf', pdfBase64: 'JVBERi0xLjcK', tenant_id: 't', unit_id: 'u' }), env)
+      body({ filename: 'acme.pdf', pdfBase64: toBase64(pdfBytes), tenant_id: 't', unit_id: 'u' }), env)
     expect(res.status).toBe(200)
     const json = await res.json() as { fields: Record<string, unknown>; warnings: string[] }
     expect(json.fields.notes).toBeUndefined()
@@ -146,8 +148,9 @@ describe('INTAKE_MODEL allowlist', () => {
   it('silently falls back to the default model when INTAKE_MODEL is not on the allowlist (does not reject the request)', async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ content: [] }) })
     vi.stubGlobal('fetch', fetchMock)
+    const pdfBytes = await buildTextPdf('Ordinary lease terms, nothing sensitive here')
     const res = await app().request('/intake/lease',
-      body({ filename: 'acme.pdf', pdfBase64: 'JVBERi0xLjcK', tenant_id: 't', unit_id: 'u' }),
+      body({ filename: 'acme.pdf', pdfBase64: toBase64(pdfBytes), tenant_id: 't', unit_id: 'u' }),
       { ...env, INTAKE_MODEL: 'some-untrusted-model-id' })
     expect(res.status).toBe(200)
     expect(fetchMock).toHaveBeenCalledOnce()
@@ -159,8 +162,9 @@ describe('INTAKE_MODEL allowlist', () => {
   it('honors INTAKE_MODEL when it IS on the allowlist', async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ content: [] }) })
     vi.stubGlobal('fetch', fetchMock)
+    const pdfBytes = await buildTextPdf('Ordinary lease terms, nothing sensitive here')
     await app().request('/intake/lease',
-      body({ filename: 'acme.pdf', pdfBase64: 'JVBERi0xLjcK', tenant_id: 't', unit_id: 'u' }),
+      body({ filename: 'acme.pdf', pdfBase64: toBase64(pdfBytes), tenant_id: 't', unit_id: 'u' }),
       { ...env, INTAKE_MODEL: 'claude-sonnet-5' })
     const sentBody = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string) as { model: string }
     expect(sentBody.model).toBe('claude-sonnet-5')
@@ -205,18 +209,28 @@ describe('PDF content confidentiality scan (OI-044)', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('RED 4: an image-only PDF (no extractable text) proceeds, with a warning attached', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ content: [{ type: 'tool_use', name: 'extract_lease', input: { base_rent_monthly: 4500, _confidence: {} } }] }),
-    }))
+  it('RED 4: an image-only PDF (no extractable text) is BLOCKED, not fail-open — the content scan cannot run, so the request never egresses', async () => {
+    // REFUTE-pass correction (2026-08-03): the prior version of this test
+    // asserted 200/fail-open, on the premise that four "compensating
+    // controls" made proceeding safe. They don't: admin-gating and the
+    // tenant/unit existence check are orthogonal to confidentiality (a real
+    // confidential deal's tenant/unit legitimately exist), and the upload-UI
+    // attestation was never actually enforced server-side (grep confirms it
+    // exists only in comments). Extraction ran BEFORE the warning was ever
+    // surfaced, so "fail open with a warning" was functionally "no check at
+    // all" for this document class, for an admin-authenticated confidential
+    // deal document. Blocking here mirrors the existing manual-entry fallback
+    // UX this route already uses for extraction failures (502 below).
+    const fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock)
     const pdfBytes = await buildImageOnlyPdf()
     const res = await app().request('/intake/lease',
       body({ filename: 'scanned-lease.pdf', pdfBase64: toBase64(pdfBytes), tenant_id: 't', unit_id: 'u' }), env)
-    expect(res.status).toBe(200) // fail-open, not fail-closed — see task-6-report.md
-    const json = await res.json() as { warnings: string[]; fields: { base_rent_monthly: number } }
-    expect(json.warnings).toContain('Content scan unavailable (image-based PDF) — filename-only screening applied')
-    expect(json.fields.base_rent_monthly).toBe(4500) // extraction still ran — this is fail-OPEN
+    expect(res.status).toBe(422)
+    const json = await res.json() as { error: string }
+    expect(json.error).toMatch(/content scan unavailable/i)
+    // Load-bearing assertion, same as RED 3: no egress for a document the
+    // scan couldn't clear.
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('a clean, real PDF with extractable text and no denylist hit proceeds with NO content-scan warning', async () => {

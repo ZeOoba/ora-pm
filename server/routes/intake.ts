@@ -95,21 +95,28 @@ intakeRouter.post('/lease', async (c) => {
   // Extract the text and run it through the same denylist. On a match, block with the same 422 the
   // filename check uses, and — this is the load-bearing property — WITHOUT ever calling extractLease
   // (no egress to api.anthropic.com happens for a blocked document).
-  let contentScanWarning: string | undefined
   const extractedText = await safeDecodeAndExtract(pdfBase64)
   if (extractedText) {
     if (containsConfidentialTerm(extractedText, terms)) {
       return c.json({ error: 'Blocked: document appears to reference a confidential matter.' }, 422)
     }
   } else {
-    // JUDGMENT CALL (flagged explicitly for the branch's final REFUTE pass — see task-6-report.md):
-    // an image-only/scanned PDF has no text layer for pdf.js to find, so the content scan cannot run.
-    // We deliberately FAIL OPEN here — proceed with the request — rather than fail closed and block
-    // every scanned lease outright. This is acceptable because the four compensating controls above
-    // (fail-closed empty denylist, admin gating, existence-checked tenant/unit binding, upload-UI
-    // attestation) all still apply; a hard fail-closed here would make lease intake unusable for any
-    // lease that was ever scanned rather than saved as a native PDF, which is common in practice.
-    contentScanWarning = 'Content scan unavailable (image-based PDF) — filename-only screening applied'
+    // REFUTE-pass correction (2026-08-03): an image-only/scanned PDF has no text
+    // layer for pdf.js to find, so the content scan cannot run. This used to fail
+    // OPEN (proceed with a warning attached to the response) — but extraction ran,
+    // and the document egressed to api.anthropic.com, BEFORE that warning was ever
+    // surfaced, for an admin-authenticated request that may be a real confidential
+    // deal's scanned lease. None of the other controls on this route substitute for
+    // a content check that didn't run: admin-gating and the tenant/unit existence
+    // check are orthogonal to confidentiality (a real confidential deal's tenant/
+    // unit legitimately exist), and the upload-UI attestation is not enforced
+    // server-side. Block instead, matching the manual-entry fallback this route
+    // already uses for extraction failures below — never egress a document this
+    // scan couldn't clear.
+    return c.json({
+      error: 'Content scan unavailable for this document (image-based/scanned PDF, no extractable text). '
+        + 'Enter this lease manually, or convert it to a text-based PDF and re-upload.',
+    }, 422)
   }
 
   let result
@@ -122,7 +129,6 @@ intakeRouter.post('/lease', async (c) => {
 
   // Post-egress defense: scrub any field whose text hits the denylist.
   const warnings = [...result.warnings]
-  if (contentScanWarning) warnings.push(contentScanWarning)
   const fields: Record<string, unknown> = {}
   for (const [k, v] of Object.entries(result.fields)) {
     if (typeof v === 'string' && containsConfidentialTerm(v, terms)) {
