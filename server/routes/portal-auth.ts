@@ -3,6 +3,7 @@ import { createClient } from '@supabase/supabase-js'
 import { getDb } from '../db/client'
 import { adminAuthMiddleware } from '../middleware/admin-auth'
 import type { Env } from '../index'
+import { dbError } from '../lib/api-error'
 
 export const portalAuthRouter = new Hono<{ Bindings: Env }>()
 
@@ -39,7 +40,7 @@ portalAuthRouter.post('/tenants/:id/invite', async (c) => {
     { redirectTo: `${c.req.header('origin') ?? 'https://ora-pm.pages.dev'}/portal` }
   )
 
-  if (inviteErr) return c.json({ error: inviteErr.message }, 500)
+  if (inviteErr) return dbError(c, inviteErr, 'Failed to invite tenant')
   if (!data?.user?.id) return c.json({ error: 'Invite returned no user' }, 500)
 
   const authUserId = data.user.id
@@ -65,7 +66,7 @@ portalAuthRouter.delete('/tenants/:id/revoke-access', async (c) => {
 
   const admin = adminClient(c.env)
   const { error: deleteErr } = await admin.auth.admin.deleteUser(tenant.auth_user_id)
-  if (deleteErr) return c.json({ error: deleteErr.message }, 500)
+  if (deleteErr) return dbError(c, deleteErr, 'Failed to revoke portal access')
 
   const { error: updateErr } = await db.from('tenants').update({ auth_user_id: null }).eq('id', tenantId)
   if (updateErr) return c.json({ error: 'Failed to clear auth_user_id' }, 500)

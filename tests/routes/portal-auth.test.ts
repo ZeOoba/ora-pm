@@ -130,6 +130,30 @@ describe('POST /api/admin/tenants/:id/invite', () => {
     }, env)
     expect(res.status).toBe(400)
   })
+
+  // OI-063 (OI-042's self-flagged 5-file gap): the invite call's error was
+  // returned raw (inviteErr.message) to the client — a Supabase Auth Admin
+  // API error, same disclosure risk class as a raw Postgres error. Fixed via
+  // the dbError() helper.
+  it('returns a generic 500 message, never the raw Supabase Auth error, if invite fails', async () => {
+    mockFrom.mockReturnValue(mockTenantsTable({
+      data: { id: 'tenant_1', contact_email: 'tenant@example.com', auth_user_id: null },
+      error: null,
+    }))
+    mockInviteUserByEmail.mockResolvedValue({
+      data: null,
+      error: { message: 'GoTrue instance misconfigured: SMTP relay rejected by internal-mail-01.oxfordra.net' },
+    })
+
+    const res = await app.request('/api/admin/tenants/tenant_1/invite', {
+      method: 'POST',
+      headers: AUTH,
+    }, env)
+    expect(res.status).toBe(500)
+    const json = await res.json() as { error: string }
+    expect(json.error).not.toMatch(/GoTrue|SMTP|internal-mail-01/)
+    expect(json.error).toBe('Failed to invite tenant')
+  })
 })
 
 describe('DELETE /api/admin/tenants/:id/revoke-access', () => {
@@ -158,6 +182,25 @@ describe('DELETE /api/admin/tenants/:id/revoke-access', () => {
       headers: AUTH,
     }, env)
     expect(res.status).toBe(404)
+  })
+
+  // OI-063 (OI-042's self-flagged 5-file gap): the delete call's error was
+  // returned raw (deleteErr.message) to the client. Fixed via dbError().
+  it('returns a generic 500 message, never the raw Supabase Auth error, if deleteUser fails', async () => {
+    mockFrom.mockReturnValue(mockTenantsTable({ data: { auth_user_id: 'existing_auth_id' }, error: null }))
+    mockDeleteUser.mockResolvedValue({
+      data: null,
+      error: { message: 'auth.users row locked by concurrent admin session admin_7f3a' },
+    })
+
+    const res = await app.request('/api/admin/tenants/tenant_1/revoke-access', {
+      method: 'DELETE',
+      headers: AUTH,
+    }, env)
+    expect(res.status).toBe(500)
+    const json = await res.json() as { error: string }
+    expect(json.error).not.toMatch(/auth\.users|admin_7f3a/)
+    expect(json.error).toBe('Failed to revoke portal access')
   })
 })
 

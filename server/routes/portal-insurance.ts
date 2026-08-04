@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import { getDb } from '../db/client'
 import { tenantAuthMiddleware } from '../middleware/tenant-auth'
 import type { Env } from '../index'
+import { dbError } from '../lib/api-error'
 
 export const portalInsuranceRouter = new Hono<{ Bindings: Env }>()
 portalInsuranceRouter.use('/*', tenantAuthMiddleware)
@@ -35,6 +36,6 @@ portalInsuranceRouter.post('/', async (c) => {
     status,
   }).select().single()
 
-  if (error) return c.json({ error: error.message }, 500)
+  if (error) return dbError(c, error, 'Failed to save insurance certificate')
   return c.json({ data }, 201)
 })
