@@ -1,6 +1,10 @@
 import { Hono } from 'hono'
 import { getDb } from '../db/client'
-import { LeaseInsertSchema, LeaseUpdateSchema, PaginationSchema } from '../lib/schemas'
+import {
+  LeaseInsertSchema, LeaseUpdateSchema, PaginationSchema,
+  LeaseAmendmentInsertSchema, LeaseNoticeInsertSchema,
+} from '../lib/schemas'
+import { dbError } from '../lib/api-error'
 
 type Env = { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string }
 
@@ -19,7 +23,7 @@ leasesRouter.get('/', async (c) => {
     .eq('status', status)
     .order('end_date')
     .range(offset, offset + limit - 1)
-  if (error) return c.json({ error: error.message }, 500)
+  if (error) return dbError(c, error, 'Failed to load leases')
   return c.json({ data })
 })
 
@@ -30,7 +34,9 @@ leasesRouter.get('/:id', async (c) => {
     .select('*, tenants(*), units(*, properties(*)), lease_amendments(*), lease_documents(*), broker_commissions(*), tenant_notices(*)')
     .eq('id', c.req.param('id'))
     .single()
-  if (error) return c.json({ error: error.message }, 404)
+  // Not-found is a 404, not a 500 — dbError always returns 500, so this
+  // stays a plain generic response rather than routing through it.
+  if (error) return c.json({ error: 'Lease not found' }, 404)
   return c.json({ data })
 })
 
@@ -40,7 +46,7 @@ leasesRouter.post('/', async (c) => {
   const parsed = LeaseInsertSchema.safeParse(raw)
   if (!parsed.success) return c.json({ error: parsed.error.flatten().fieldErrors }, 422)
   const { data, error } = await db.from('leases').insert(parsed.data).select().single()
-  if (error) return c.json({ error: error.message }, 400)
+  if (error) return dbError(c, error, 'Failed to create lease')
   // Auto-create renewal tracking record — swallow error if renewals table not ready
   if (data) {
     const lease = data as { id: string; end_date: string }
@@ -64,20 +70,22 @@ leasesRouter.put('/:id', async (c) => {
     .eq('id', c.req.param('id'))
     .select()
     .single()
-  if (error) return c.json({ error: 'Failed to update lease' }, 400)
+  if (error) return dbError(c, error, 'Failed to update lease')
   return c.json({ data })
 })
 
 // POST /api/leases/:id/amendments
 leasesRouter.post('/:id/amendments', async (c) => {
   const db = getDb(c.env)
-  const body = await c.req.json()
+  const raw = await c.req.json()
+  const parsed = LeaseAmendmentInsertSchema.safeParse(raw)
+  if (!parsed.success) return c.json({ error: parsed.error.flatten().fieldErrors }, 422)
   const { data, error } = await db
     .from('lease_amendments')
-    .insert({ ...body, lease_id: c.req.param('id') })
+    .insert({ ...parsed.data, lease_id: c.req.param('id') })
     .select()
     .single()
-  if (error) return c.json({ error: error.message }, 400)
+  if (error) return dbError(c, error, 'Failed to create amendment')
   return c.json({ data }, 201)
 })
 
@@ -89,23 +97,21 @@ leasesRouter.get('/:id/notices', async (c) => {
     .select('*')
     .eq('lease_id', c.req.param('id'))
     .order('sent_date', { ascending: false })
-  if (error) return c.json({ error: error.message }, 500)
+  if (error) return dbError(c, error, 'Failed to load notices')
   return c.json({ data })
 })
 
 // POST /api/leases/:id/notices
 leasesRouter.post('/:id/notices', async (c) => {
-  const body = await c.req.json()
-  if (!body.notice_type || !body.sent_date || !body.method) {
-    return c.json({ error: 'notice_type, sent_date, method required' }, 400)
-  }
-  const { notice_type, sent_date, method, document_path, notes } = body
+  const raw = await c.req.json()
+  const parsed = LeaseNoticeInsertSchema.safeParse(raw)
+  if (!parsed.success) return c.json({ error: parsed.error.flatten().fieldErrors }, 422)
   const db = getDb(c.env)
   const { data, error } = await db
     .from('tenant_notices')
-    .insert({ notice_type, sent_date, method, document_path, notes, lease_id: c.req.param('id') })
+    .insert({ ...parsed.data, lease_id: c.req.param('id') })
     .select()
     .single()
-  if (error) return c.json({ error: error.message }, 400)
+  if (error) return dbError(c, error, 'Failed to create notice')
   return c.json({ data }, 201)
 })

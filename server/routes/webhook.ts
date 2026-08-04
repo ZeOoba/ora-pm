@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import { getStripe } from '../lib/stripe'
 import { getDb } from '../db/client'
 import { handleStripeEvent } from '../lib/stripe-events'
+import { dbError } from '../lib/api-error'
 import type { Env } from '../index'
 
 export const webhookRouter = new Hono<{ Bindings: Env }>()
@@ -17,7 +18,9 @@ webhookRouter.post('/stripe', async (c) => {
   try {
     event = await stripe.webhooks.constructEventAsync(rawBody, sig, c.env.STRIPE_WEBHOOK_SECRET)
   } catch (err) {
-    return c.json({ error: `Webhook signature verification failed: ${(err as Error).message}` }, 400)
+    // Signature-mismatch detail (algorithm, timestamp skew, raw-body hints)
+    // is internal — the client only ever needs to know verification failed.
+    return dbError(c, err as Error, 'Webhook signature verification failed')
   }
 
   const db = getDb(c.env)
@@ -30,14 +33,14 @@ webhookRouter.post('/stripe', async (c) => {
 
   if (insertError) {
     if (insertError.code === '23505') return c.json({ received: true, skipped: true })
-    return c.json({ error: 'Failed to record event' }, 500)
+    return dbError(c, insertError, 'Failed to record event')
   }
 
   try {
     await handleStripeEvent(event, db)
   } catch (err) {
     await db.from('stripe_webhook_events').update({ status: 'failed' }).eq('id', event.id)
-    return c.json({ error: `Event handling failed: ${(err as Error).message}` }, 500)
+    return dbError(c, err as Error, 'Event handling failed')
   }
 
   await db.from('stripe_webhook_events').update({ status: 'processed' }).eq('id', event.id)
