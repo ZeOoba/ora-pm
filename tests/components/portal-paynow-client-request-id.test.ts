@@ -38,7 +38,13 @@ describe('PortalPayNow — client_request_id generation (OI-035)', () => {
   })
 
   it('resets the ref after a successful payment, so the next payment gets its own fresh id', () => {
-    expect(source).toMatch(/clientRequestIdRef\.current = null[\s\S]*setStep\('done'\)/)
+    // Anchored tightly: the reset must be immediately (only whitespace/an
+    // inline comment between) followed by setStep('done') — not just
+    // satisfied by the earlier, unrelated useEffect(() => { ... }, [selected])
+    // reset (which resets on charge-selection change, not payment success)
+    // followed ANYWHERE later by the file's one setStep('done') call. This
+    // would fail if the post-success reset line were deleted.
+    expect(source).toMatch(/clientRequestIdRef\.current = null(?:[ \t]*\/\/[^\n]*)?\n\s*setStep\('done'\)/)
   })
 
   it('sends client_request_id on the createPaymentIntent call', () => {
