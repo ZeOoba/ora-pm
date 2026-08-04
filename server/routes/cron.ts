@@ -69,6 +69,29 @@ cronRouter.post('/monthly-billing', async (c) => {
     // Auto-pay: create a PaymentIntent if autopay is enabled and bank account is saved
     const tenant = Array.isArray(lease.tenants) ? lease.tenants[0] : lease.tenants
     if (lease.autopay_enabled && lease.autopay_payment_method_id && tenant?.stripe_customer_id) {
+      // Idempotency guard: one autopay collection per lease per billing period.
+      // autopay_period is stamped with the canonical period start (periodStartStr,
+      // always the first of the billing month), so a catch-up-burst re-run or a
+      // manual re-trigger days later produces the same value and is caught here —
+      // and, in a concurrent race, by the payments_autopay_period_uniq index below.
+      const { data: priorAutopay, error: priorErr } = await db
+        .from('payments')
+        .select('id')
+        .eq('lease_id', lease.id)
+        .eq('autopay_period', periodStartStr)
+        .limit(1)
+
+      if (priorErr) {
+        // Unknown whether this period was already collected — never debit blind.
+        errors++
+        errorMessages.push(`autopay lease ${lease.id}: period pre-check failed: ${priorErr.message}`)
+        continue
+      }
+      if (priorAutopay && priorAutopay.length > 0) {
+        skipped++ // this period already collected (idempotent)
+        continue
+      }
+
       const { data: openCharges } = await db
         .from('charges')
         .select('amount')
@@ -76,34 +99,98 @@ cronRouter.post('/monthly-billing', async (c) => {
         .gte('due_date', periodStartStr)
         .lte('due_date', periodEndStr)
 
-      const totalAmount = (openCharges ?? []).reduce((s: number, ch: { amount: number }) => s + ch.amount, 0)
-      if (totalAmount > 0) {
-        try {
-          const stripe = getStripe(c.env.STRIPE_SECRET_KEY)
-          const pi = await stripe.paymentIntents.create({
-            amount: Math.round(totalAmount * 100),
-            currency: 'usd',
-            customer: tenant.stripe_customer_id,
-            payment_method: lease.autopay_payment_method_id,
-            payment_method_types: ['us_bank_account'],
-            confirm: true,
-            off_session: true,
-            description: `Autopay — ${periodStartStr}`,
-            metadata: { lease_id: lease.id, tenant_id: tenant.id },
-          })
-          await db.from('payments').insert({
-            lease_id: lease.id,
-            payment_date: new Date().toISOString().slice(0, 10),
-            amount: totalAmount,
-            method: 'ach_stripe',
-            stripe_payment_intent_id: pi.id,
-            stripe_status: pi.status,
-            notes: `Autopay — ${periodStartStr}`,
-          })
-        } catch (err) {
-          errors++
-          errorMessages.push(`autopay lease ${lease.id}: ${(err as Error).message}`)
+      const periodChargeTotal = (openCharges ?? []).reduce((s: number, ch: { amount: number }) => s + ch.amount, 0)
+
+      // Period-paid: manual (check/wire/other) or succeeded ACH payments dated
+      // WITHIN this period. Autopay is only authorized to collect THIS period's
+      // rent — it must never sweep older, unrelated arrears via an automated
+      // ACH debit the tenant didn't specifically authorize for that purpose.
+      const { data: periodPayments, error: ppErr } = await db
+        .from('payments')
+        .select('amount, method, stripe_status')
+        .eq('lease_id', lease.id)
+        .gte('payment_date', periodStartStr)
+        .lte('payment_date', periodEndStr)
+
+      if (ppErr) {
+        errors++
+        errorMessages.push(`autopay lease ${lease.id}: period-payment lookup failed: ${ppErr.message}`)
+        continue
+      }
+
+      const periodPaid = (periodPayments ?? []).reduce(
+        (s: number, p: { amount: number; method: string; stripe_status?: string }) => {
+          if (p.method === 'ach_stripe' && p.stripe_status === 'succeeded') return s + p.amount
+          if (['check', 'wire', 'other'].includes(p.method)) return s + p.amount
+          return s
+        },
+        0,
+      )
+      const periodOutstanding = Math.max(0, periodChargeTotal - periodPaid)
+
+      // Lifetime cap: never debit more than the lease's true outstanding AR
+      // balance, however period-scoping above is what prevents re-debiting a
+      // tenant who already paid THIS period and what prevents sweeping arrears
+      // from an earlier period into an unrelated autopay charge.
+      const { data: arRows, error: arErr } = await db
+        .from('ar_ledger')
+        .select('balance')
+        .eq('lease_id', lease.id)
+        .limit(1)
+
+      if (arErr) {
+        // Unknown balance — never debit blind.
+        errors++
+        errorMessages.push(`autopay lease ${lease.id}: balance lookup failed: ${arErr.message}`)
+        continue
+      }
+
+      const outstandingBalance = arRows?.[0]?.balance ?? 0
+      const debitAmount = Math.min(periodOutstanding, outstandingBalance)
+      if (debitAmount <= 0) {
+        skipped++ // nothing outstanding to collect for this period
+        continue
+      }
+
+      try {
+        const stripe = getStripe(c.env.STRIPE_SECRET_KEY)
+        const pi = await stripe.paymentIntents.create({
+          amount: Math.round(debitAmount * 100),
+          currency: 'usd',
+          customer: tenant.stripe_customer_id,
+          payment_method: lease.autopay_payment_method_id,
+          payment_method_types: ['us_bank_account'],
+          confirm: true,
+          off_session: true,
+          description: `Autopay — ${periodStartStr}`,
+          metadata: { lease_id: lease.id, tenant_id: tenant.id },
+        }, {
+          // Deterministic per lease+period: a re-run inside Stripe's idempotency
+          // window returns the original PaymentIntent instead of debiting again.
+          idempotencyKey: `autopay:${lease.id}:${periodStartStr}`,
+        })
+        const { error: payErr } = await db.from('payments').insert({
+          lease_id: lease.id,
+          payment_date: new Date().toISOString().slice(0, 10),
+          amount: debitAmount,
+          method: 'ach_stripe',
+          stripe_payment_intent_id: pi.id,
+          stripe_status: pi.status,
+          notes: `Autopay — ${periodStartStr}`,
+          autopay_period: periodStartStr,
+        })
+        if (payErr) {
+          if (payErr.code === '23505') {
+            skipped++ // concurrent run recorded this period first (idempotent)
+          } else {
+            // Real insert failure — the debit happened but wasn't recorded; surface loudly.
+            errors++
+            errorMessages.push(`autopay lease ${lease.id}: payment ${pi.id} created but not recorded: ${payErr.message}`)
+          }
         }
+      } catch (err) {
+        errors++
+        errorMessages.push(`autopay lease ${lease.id}: ${(err as Error).message}`)
       }
     }
   }
