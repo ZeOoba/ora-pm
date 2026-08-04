@@ -1,0 +1,78 @@
+# Migrations — read this before trusting the RLS policies you see here
+
+## The RLS policies in `0004_views_and_rls.sql` and `0008_storage_rls.sql` do not protect this API
+
+`0004_views_and_rls.sql` and `0008_storage_rls.sql` enable Row Level Security
+and define `auth.uid()`-scoped policies on the tenant-facing tables and the
+`storage.objects` bucket. Reading those files in isolation, it looks like
+RLS is the tenant-isolation mechanism for this app. **It isn't, for any
+request that goes through the API in `server/`.**
+
+`server/db/client.ts` creates its Supabase client with the
+**service-role key** (`SUPABASE_SERVICE_ROLE_KEY`), and the service role
+bypasses RLS entirely by design — every table is fully readable/writable
+through it, regardless of any policy defined here. Every route in
+`server/routes/**` uses that client. So the `auth.uid() = t.auth_user_id`
+checks in these policies never evaluate against a real session claim for API
+traffic; there is no session claim to check against, because the API
+connection isn't authenticated as any particular Supabase Auth user.
+
+**What these policies ARE for:** defense-in-depth for *direct* client access
+to Postgres/PostgREST/Storage that bypasses this API entirely.
+
+- The **table policies** in `0004_views_and_rls.sql` currently protect a code
+  path that doesn't exist yet: no `supabase-js` client in `src/**` calls
+  `.from(<table>)` directly (verified by grep — the admin and portal
+  frontends only use `supabase.auth.*`, plus one `supabase.storage.*` call,
+  see below). Keep them anyway — they're what would stop cross-tenant reads
+  the day a direct PostgREST client is added, and removing them would be a
+  regression against that future, not a cleanup.
+- The **storage policies** in `0008_storage_rls.sql` are NOT hypothetical:
+  `src/portal/pages/PortalInsurance.tsx` uploads COI files with
+  `portalSupabase.storage.from('insurance-certs').upload(...)` — a direct
+  Supabase Storage call using the anon key + the tenant's own JWT, bypassing
+  this API. RLS is the only thing that can scope that upload to the caller's
+  own folder.
+  **Open finding, not fixed by this task:** that upload path builds the
+  storage folder from `session.user.id` (`auth.users.id`, i.e.
+  `tenants.auth_user_id`), but `tenant_upload_insurance`'s `WITH CHECK`
+  matches the folder against `t.id` — the `tenants` table's own primary key,
+  a *different* UUID (`tenants.id` is its own `gen_random_uuid()`, not a copy
+  of `auth_user_id` — see `0001_core_entities.sql`). Whether this means every
+  real upload through that path currently fails RLS, or the policy was never
+  applied to prod at all (see below) and so isn't being checked, can't be
+  determined from the repo alone. This needs a human to check — either via
+  `scripts/verify-rls.sql` (policy exists?) plus a real upload attempt
+  (folder-check passes?), not by guessing from the SQL text.
+
+**What actually enforces tenant isolation today:** the per-route guard
+pattern in `server/routes/portal.ts` and `server/routes/stripe.ts`. Every
+handler resolves the caller's own tenant row via
+`.eq('auth_user_id', <jwt-derived userId>)` before issuing any other query,
+and scopes every subsequent query off that resolved id — never off a
+client-supplied `tenant_id`/`lease_id` without first checking it belongs to
+the resolved tenant. That pattern is what a security review of this app
+should look at; the RLS policies below it are not the control in effect.
+
+Full explanation with code references: the comment block at the top of
+`server/db/client.ts`.
+
+## Keeping this claim honest as migrations change
+
+- `tests/db/rls-inventory.test.ts` parses this directory's SQL and asserts
+  the extracted `ENABLE ROW LEVEL SECURITY` table list and `CREATE POLICY`
+  list match a checked-in manifest. If you add, rename, or drop a policy or
+  an RLS-enabled table, update that manifest in the same PR — the test is a
+  tripwire against a migration silently changing the claim set this README
+  and `scripts/verify-rls.sql` are built on, not busywork to route around.
+- `tests/routes/portal-scoping.test.ts` is the companion tripwire on the
+  side that actually matters: it source-scans `portal.ts`/`stripe.ts` and
+  fails if any handler is added that queries another table before resolving
+  `auth_user_id`.
+- `scripts/verify-rls.sql` is a manual, read-only script for a human to run
+  against the live database (there is no prod DB in the test suite) to
+  confirm the policies these migrations claim to create actually exist —
+  this matters especially for `0008_storage_rls.sql`, which self-documents
+  as applied out-of-band via a one-off Node script rather than the normal
+  migration runner, so whether it ever actually ran against a given
+  environment is not otherwise verifiable from the repo.
