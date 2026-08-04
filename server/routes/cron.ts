@@ -10,8 +10,6 @@ type Env = {
   SUPABASE_SERVICE_ROLE_KEY: string
   CRON_SECRET: string
   STRIPE_SECRET_KEY: string
-  RESEND_API_KEY?: string
-  RESEND_FROM_EMAIL?: string
   RATE_LIMIT_KV?: KVNamespace
 }
 
@@ -223,11 +221,9 @@ cronRouter.post('/monthly-billing', async (c) => {
   return c.json({ posted, skipped, errors, errorMessages, year, month })
 })
 
-// POST /api/cron/critical-dates-alerts
-// Daily: query critical_dates view, dedup via sent_notifications, send email digest
 cronRouter.post('/critical-dates-alerts', async (c) => {
   const db = getDb(c.env)
-  const RECIPIENTS = ['ggoldberg@oxfordra.net', 'egoldberg@oxfordra.net']
+  const RECIPIENTS = ['ggoldberg@oxfordra.net']
   const HORIZON_DAYS = 90
 
   // Query critical dates within horizon
@@ -242,7 +238,7 @@ cronRouter.post('/critical-dates-alerts', async (c) => {
 
   if (cdErr) return c.json({ error: cdErr.message }, 500)
   if (!criticalDates || criticalDates.length === 0) {
-    return c.json({ new_alerts: 0, skipped: 0, emailed: false })
+    return c.json({ new_alerts: 0, skipped: 0, email: null })
   }
 
   // Dedup: check which reference_ids already notified this recipient
@@ -261,7 +257,7 @@ cronRouter.post('/critical-dates-alerts', async (c) => {
   )
 
   if (newAlerts.length === 0) {
-    return c.json({ new_alerts: 0, skipped: criticalDates.length, emailed: false })
+    return c.json({ new_alerts: 0, skipped: criticalDates.length, email: null })
   }
 
   // Record in sent_notifications (upsert / ignore duplicates)
@@ -273,8 +269,10 @@ cronRouter.post('/critical-dates-alerts', async (c) => {
     }))
   )
 
-  // Record dedup rows BEFORE emailing — if this fails, skip the email so the
-  // next run retries cleanly rather than re-sending alerts the principals already got.
+  // Record dedup rows BEFORE building the email digest — if this fails, return
+  // without one so the next run retries cleanly rather than re-reporting
+  // alerts the principal already received (OI-047: dedup-before-send is
+  // preserved unchanged; only the actual send moved out of this Worker).
   const { error: insErr } = await db.from('sent_notifications').insert(notifications)
   if (insErr) return c.json({ error: `Failed to record notifications: ${insErr.message}` }, 500)
 
@@ -291,36 +289,19 @@ cronRouter.post('/critical-dates-alerts', async (c) => {
 
   const bodyText = `ORA PM — Critical Dates Alert\n${new Date().toISOString().slice(0,10)}\n\n${lines.join('\n')}\n\nTotal: ${newAlerts.length} item(s)\nhttps://ora-pm.pages.dev/critical-dates`
 
-  // Send email if Resend is configured
-  let emailed = false
-  if (c.env.RESEND_API_KEY) {
-    const fromEmail = c.env.RESEND_FROM_EMAIL ?? 'pm@oxfordra.net'
-    try {
-      const emailRes = await fetch('https://api.resend.com/emails', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${c.env.RESEND_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          from: `ORA Property Manager <${fromEmail}>`,
-          to: RECIPIENTS,
-          subject: `[ORA PM] ${newAlerts.length} Critical Date${newAlerts.length > 1 ? 's' : ''} — ${new Date().toISOString().slice(0,10)}`,
-          text: bodyText,
-        }),
-      })
-      emailed = emailRes.ok
-    } catch (err) {
-      // Network failure — dedup rows already recorded; report not-emailed, don't 500 the cron.
-      console.error('Resend fetch failed:', err)
-    }
-  }
+  // OI-047 (2026-08-04): this Worker no longer emails anyone directly (that
+  // was a second, independently-credentialed egress path outside the ORA
+  // send-path canon). It hands the digest back in the response; the ORA
+  // scheduler (ping-crons.ps1) sends it via Outlook COM.
+  const subject = `[ORA PM] ${newAlerts.length} Critical Date${newAlerts.length > 1 ? 's' : ''} — ${new Date().toISOString().slice(0,10)}`
 
-  return c.json({ new_alerts: newAlerts.length, skipped: criticalDates.length - newAlerts.length, emailed })
+  return c.json({
+    new_alerts: newAlerts.length,
+    skipped: criticalDates.length - newAlerts.length,
+    email: { subject, body: bodyText },
+  })
 })
 
-// POST /api/cron/delinquency-check
-// Daily: check AR for overdue balances, post late_fee if none this month
 cronRouter.post('/delinquency-check', async (c) => {
   const db = getDb(c.env)
   const today = new Date().toISOString().slice(0, 10)
@@ -328,7 +309,6 @@ cronRouter.post('/delinquency-check', async (c) => {
   const periodStart = `${year}-${month}-01`
   const GRACE_DAYS = 30
   const LATE_FEE_AMOUNT = 50 // $50 flat late fee — adjust as needed
-  const RECIPIENTS = ['ggoldberg@oxfordra.net', 'egoldberg@oxfordra.net']
 
   // Fetch AR ledger rows with a positive balance
   const { data: arRows, error: arErr } = await db
@@ -337,7 +317,7 @@ cronRouter.post('/delinquency-check', async (c) => {
     .gt('balance', 0)
 
   if (arErr) return c.json({ error: arErr.message }, 500)
-  if (!arRows || arRows.length === 0) return c.json({ late_fees_posted: 0, delinquent_count: 0, emailed: false })
+  if (!arRows || arRows.length === 0) return c.json({ late_fees_posted: 0, delinquent_count: 0, email: null })
 
   type ARRow = { lease_id: string; tenant_id: string; tenant_name: string; property_name: string | null; suite: string | null; balance: number }
 
@@ -404,29 +384,17 @@ cronRouter.post('/delinquency-check', async (c) => {
     }
   }
 
-  // Send delinquency digest email if Resend configured and there are delinquent leases
-  let emailed = false
-  if (delinquentLeases.length > 0 && c.env.RESEND_API_KEY) {
+  // Build the delinquency digest — OI-047 (2026-08-04): return it instead of
+  // emailing via Resend; ping-crons.ps1 sends it via Outlook COM. Late fees
+  // above are already posted (or not) by this point regardless of what
+  // happens to the digest — unchanged from today's behavior.
+  let email: { subject: string; body: string } | null = null
+  if (delinquentLeases.length > 0) {
     const lines = delinquentLeases.map(d => `  • ${d.tenant_name} | ${d.property} | Balance: $${d.balance.toFixed(2)}`)
     const bodyText = `ORA PM — Delinquency Report\n${today}\n\n${lines.join('\n')}\n\nLate fees posted: ${lateFeesPosted}\nhttps://ora-pm.pages.dev/ar`
-    const fromEmail = c.env.RESEND_FROM_EMAIL ?? 'pm@oxfordra.net'
-    try {
-      const emailRes = await fetch('https://api.resend.com/emails', {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${c.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          from: `ORA Property Manager <${fromEmail}>`,
-          to: RECIPIENTS,
-          subject: `[ORA PM] ${delinquentLeases.length} Delinquent Tenant${delinquentLeases.length > 1 ? 's' : ''} — ${today}`,
-          text: bodyText,
-        }),
-      })
-      emailed = emailRes.ok
-    } catch (err) {
-      // Network failure — late fees already posted; report not-emailed, don't 500 the cron.
-      console.error('Resend fetch failed:', err)
-    }
+    const subject = `[ORA PM] ${delinquentLeases.length} Delinquent Tenant${delinquentLeases.length > 1 ? 's' : ''} — ${today}`
+    email = { subject, body: bodyText }
   }
 
-  return c.json({ late_fees_posted: lateFeesPosted, delinquent_count: delinquentLeases.length, emailed })
+  return c.json({ late_fees_posted: lateFeesPosted, delinquent_count: delinquentLeases.length, email })
 })
