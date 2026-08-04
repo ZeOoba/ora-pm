@@ -1,0 +1,130 @@
+#!/usr/bin/env node
+// This Code sandbox has no SUPABASE_ACCESS_TOKEN configured, so `supabase db
+// push`/`migration up` — the only commands that auto-write a row into
+// supabase_migrations.schema_migrations — can't run here. Migrations have
+// instead been applied out-of-band (pasted into the Supabase Dashboard SQL
+// editor, or via an ad-hoc Node script against the service-role key), and
+// neither path touches the tracking table. That's the root cause behind
+// OI-048/OI-073/OI-074: three of the last four migrations (0008, 0009, 0010)
+// landed in production with no tracking row, discovered only when 0011's
+// apply hit a 42P16 conflict against schema the tracker didn't know about.
+//
+// This script makes "apply" and "record" the same paste instead of two steps
+// a human can forget between. It wraps the migration's own SQL together with
+// an idempotent tracking INSERT in a single transaction, so the intent is
+// that a failed migration can never leave a false tracking row behind, and a
+// successful one can never land without one.
+//
+// CAVEAT (REFUTE pass, 2026-08-04): that atomicity guarantee assumes the
+// Supabase Dashboard SQL editor executes a pasted BEGIN/COMMIT block as one
+// real transaction the way `psql -f` would. That has NOT been empirically
+// verified against the live editor. Before relying on this for anything
+// touching money tables (charges/payments/ar_ledger), paste a deliberately
+// failing probe first — `BEGIN; CREATE TABLE probe_atomicity_test(x int);
+// SELECT 1/0; COMMIT;` — and confirm the table does NOT exist afterward. If
+// it does, the editor doesn't honor explicit transaction control the way
+// this tool assumes, and prefer the GitHub Actions path
+// (.github/workflows/db-migrate.yml) instead.
+//
+// Usage:
+//   node scripts/prepare-migration-for-dashboard.mjs supabase/migrations/0012_foo.sql
+//   → prints SQL to stdout. Paste the ENTIRE output as one execution into the
+//     Supabase Dashboard SQL editor — not just the migration body.
+
+import { readFileSync } from 'node:fs'
+import { basename } from 'node:path'
+import { pathToFileURL } from 'node:url'
+
+const VERSION_NAME_RE = /^(\d+)_(.+)\.sql$/
+
+// Statements that error inside a BEGIN/COMMIT block (Postgres 25001 for
+// CONCURRENTLY; VACUUM/ALTER SYSTEM/CREATE DATABASE all require running
+// outside a transaction entirely). None of 0001-0011 use any of these
+// (verified), but a future migration plausibly could.
+const TRANSACTION_UNSAFE_RE = /\b(CONCURRENTLY|VACUUM|ALTER\s+SYSTEM|CREATE\s+DATABASE)\b/i
+
+export function assertTransactionSafe(sqlContent) {
+  const match = TRANSACTION_UNSAFE_RE.exec(sqlContent)
+  if (match) {
+    throw new Error(
+      `migration contains "${match[0]}", which cannot run inside a BEGIN/COMMIT block. ` +
+      'Wrapping it here would fail loudly at apply time — use .github/workflows/db-migrate.yml ' +
+      "(supabase db push) instead, or apply this statement manually outside a transaction."
+    )
+  }
+}
+
+// Best-effort heuristic, not a full SQL parser: counts /* */ delimiters. An
+// unterminated block comment at EOF would swallow the appended tracking
+// INSERT/COMMIT into the comment, so the DDL runs but no explicit COMMIT
+// ever executes. Doesn't handle Postgres's nested block comments, but a
+// simple count mismatch is still a reliable unterminated-comment signal.
+export function assertBalancedComments(sqlContent) {
+  const opens = (sqlContent.match(/\/\*/g) || []).length
+  const closes = (sqlContent.match(/\*\//g) || []).length
+  if (opens !== closes) {
+    throw new Error(
+      `migration has ${opens} "/*" but ${closes} "*/" — looks like an unterminated block comment, ` +
+      'which would swallow the appended tracking INSERT/COMMIT. Fix the comment before wrapping.'
+    )
+  }
+}
+
+export function deriveVersionAndName(filename) {
+  const match = VERSION_NAME_RE.exec(basename(filename))
+  if (!match) {
+    throw new Error(
+      `filename "${filename}" doesn't match "<version>_<name>.sql" (e.g. 0012_foo.sql) — ` +
+      'this is how the version/name columns in supabase_migrations.schema_migrations are derived.'
+    )
+  }
+  return { version: match[1], name: match[2] }
+}
+
+export function buildTrackingInsert(version, name) {
+  // ON CONFLICT DO NOTHING: safe to run even if this migration was already
+  // tracked some other way (e.g. a later `supabase db push` catches up, or
+  // this same block gets pasted twice by mistake).
+  const escapedVersion = version.replace(/'/g, "''")
+  const escapedName = name.replace(/'/g, "''")
+  return (
+    'INSERT INTO supabase_migrations.schema_migrations (version, name)\n' +
+    `VALUES ('${escapedVersion}', '${escapedName}')\n` +
+    'ON CONFLICT (version) DO NOTHING;'
+  )
+}
+
+export function prepareForDashboard(sqlContent, filename) {
+  const { version, name } = deriveVersionAndName(filename)
+  assertTransactionSafe(sqlContent)
+  assertBalancedComments(sqlContent)
+  const tracking = buildTrackingInsert(version, name)
+  return (
+    '-- ── Generated by scripts/prepare-migration-for-dashboard.mjs — paste this WHOLE block ──\n' +
+    '-- Wrapped in a transaction so a failed migration can never leave a false tracking row,\n' +
+    '-- and a successful one can never land without one.\n' +
+    'BEGIN;\n\n' +
+    `${sqlContent.trim()}\n\n` +
+    '-- Records this migration in supabase_migrations.schema_migrations (see header comment above).\n' +
+    `${tracking}\n\n` +
+    'COMMIT;\n'
+  )
+}
+
+function main() {
+  const file = process.argv[2]
+  if (!file) {
+    console.error('Usage: node scripts/prepare-migration-for-dashboard.mjs <path-to-migration.sql>')
+    process.exit(2)
+  }
+  const sqlContent = readFileSync(file, 'utf8')
+  process.stdout.write(prepareForDashboard(sqlContent, file))
+}
+
+// Compare via pathToFileURL rather than string-building `file://${argv[1]}` —
+// on Windows the latter never matches import.meta.url (drive-letter slash and
+// backslash-vs-forward-slash differences), which made this guard silently
+// no-op instead of running main().
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main()
+}

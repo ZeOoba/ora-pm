@@ -57,6 +57,45 @@ should look at; the RLS policies below it are not the control in effect.
 Full explanation with code references: the comment block at the top of
 `server/db/client.ts`.
 
+## How migrations actually get applied to production
+
+**Preferred: the "DB Migrate (manual)" GitHub Actions workflow**
+(`.github/workflows/db-migrate.yml`), triggered by hand from the Actions tab.
+It runs `supabase db push` for real, which is the only mechanism that writes
+a row into `supabase_migrations.schema_migrations` as a side effect of
+applying a migration — so using it is what keeps the tracker honest.
+Requires two repo secrets (`SUPABASE_ACCESS_TOKEN`, `SUPABASE_DB_PASSWORD`);
+until both are set the workflow fails cleanly at the link step rather than
+doing anything partial.
+
+**Fallback: `scripts/prepare-migration-for-dashboard.mjs`.** The Code
+sandbox this repo is normally worked from has no `SUPABASE_ACCESS_TOKEN`
+configured, so the CLI can't run there — which is exactly why 0008-0010
+(below) were applied by pasting raw SQL into the Supabase Dashboard SQL
+editor and never got tracked. If the GitHub Actions workflow can't be used
+for some reason, run:
+
+    node scripts/prepare-migration-for-dashboard.mjs supabase/migrations/00NN_name.sql
+
+and paste the ENTIRE output — not just the migration body — into the
+Dashboard SQL editor as one execution. It wraps the migration and an
+idempotent tracking `INSERT` in a single transaction, so applying and
+recording happen atomically instead of as two steps a human can forget
+between (which is how OI-048/OI-073 happened three times).
+
+**Never** paste a bare migration file into the dashboard directly, and never
+hand-write a row into `schema_migrations` except as a one-time backfill
+(documented precedent: OI-073, 2026-08-04) — both defeat the point of having
+a tracked history at all.
+
+**History:** `0008_storage_rls.sql` (2026-06-05) and `0009`/`0010`
+(discovered 2026-08-04, exact application date unknown) were all applied
+out-of-band this way, with no tracking row. The gap was invisible until
+0011's apply hit a `42P16` conflict against schema the tracker didn't know
+about — see OI-048/OI-073/OI-074 in `~/.claude` memory
+(`open-items-tracker.md`) for the full incident history and root-cause
+writeup.
+
 ## Keeping this claim honest as migrations change
 
 - `tests/db/rls-inventory.test.ts` parses this directory's SQL and asserts

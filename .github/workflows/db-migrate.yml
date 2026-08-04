@@ -1,0 +1,99 @@
+# Manually-triggered path for applying supabase/migrations/*.sql to production
+# THROUGH THE SUPABASE CLI, which is the only mechanism that writes a tracking
+# row into supabase_migrations.schema_migrations as part of applying a
+# migration. Exists because the Code sandbox this repo is usually worked from
+# has no SUPABASE_ACCESS_TOKEN configured and can't run `supabase db push`
+# itself — migrations have instead been applied out-of-band (Supabase
+# Dashboard SQL editor, or an ad-hoc Node script), and none of those paths
+# write the tracking row. Three of the last four migrations (0008, 0009,
+# 0010) landed in prod untracked this way — see OI-048/OI-073/OI-074 in
+# ~/.claude memory (open-items-tracker.md) for the full history.
+#
+# workflow_dispatch ONLY, deliberately — this pushes schema changes straight
+# to the production database, so it stays a manual, reviewed action (someone
+# clicks "Run workflow") rather than firing automatically on every push to
+# main. See supabase/migrations/README.md for the full process this fits
+# into, including the dashboard-paste fallback for when this workflow can't
+# be used.
+#
+# PREREQUISITE (not yet done as of authoring this file): two repo secrets
+# must exist before this workflow can succeed —
+#   SUPABASE_ACCESS_TOKEN  — a personal or scoped access token (supabase.com/dashboard/account/tokens)
+#   SUPABASE_DB_PASSWORD   — the production project's Postgres password
+# Until both are set, this workflow fails cleanly at the link/push step with
+# an auth error — it does not silently no-op or apply anything partial.
+#
+# NOT YET LIVE-TESTED: built and YAML-validated from a Code sandbox with no
+# production DB credentials, so the actual `supabase link`/`db push` calls
+# have never run against the real project. Known open question worth
+# checking on the FIRST real run (with dry_run: true): the OI-073 backfill
+# inserted schema_migrations rows for 0008-0011 with `statements` left NULL
+# (there was nothing authentic to populate it with — see open-items-tracker.md
+# OI-073). If the CLI's "already applied" check for `db push` relies on
+# anything beyond the bare version number being present (e.g. a statements/
+# checksum comparison), those 4 backfilled rows could read as drifted rather
+# than applied. `supabase migration list --linked` (this workflow's own
+# "Show pending migrations" step) surfaces that before any push runs — read
+# its output before trusting a dry run or a real push.
+#
+# REFUTE pass (2026-08-04, security-auditor agent) caught two real gaps,
+# fixed in this version: (1) `dry_run` now defaults to true, so the default
+# action of clicking "Run workflow" is always a no-op preview — a real push
+# requires deliberately unchecking the box; (2) the job now only runs off
+# `main`, so workflow_dispatch can't be pointed at an unreviewed branch to
+# push an unmerged migration straight to production.
+name: DB Migrate (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run only (supabase db push --dry-run) — prints what would apply without touching the database. Uncheck ONLY when you mean to push for real.'
+        type: boolean
+        default: true
+
+jobs:
+  db-push:
+    # Only ever runs off main — workflow_dispatch lets the UI pick any branch,
+    # and without this guard that would let an unmerged, unreviewed migration
+    # file be pushed straight to production.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Link to production project
+        # --password passed explicitly (not just as an env var) — `link` needs
+        # it to fetch remote migration history, and without it the CLI would
+        # otherwise prompt interactively and hang the runner (no TTY in CI).
+        run: supabase link --project-ref tvfarkddtbtdrpvvehth --password "$SUPABASE_DB_PASSWORD"
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+
+      - name: Show pending migrations
+        run: supabase migration list --linked --password "$SUPABASE_DB_PASSWORD"
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+
+      - name: Push migrations (dry run)
+        if: ${{ inputs.dry_run }}
+        run: supabase db push --linked --dry-run --yes --password "$SUPABASE_DB_PASSWORD"
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+
+      - name: Push migrations
+        if: ${{ !inputs.dry_run }}
+        run: supabase db push --linked --yes --password "$SUPABASE_DB_PASSWORD"
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
