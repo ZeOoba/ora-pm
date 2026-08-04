@@ -22,6 +22,7 @@ import { portalRouter } from './routes/portal'
 import { portalInsuranceRouter } from './routes/portal-insurance'
 import { intakeRouter } from './routes/intake'
 import { errorHandlerMiddleware } from './middleware/error-handler'
+import { checkRateLimit } from './lib/rate-limit'
 
 // OI-037: explicit CORS allowlist — the app was previously mounting Hono's bare
 // cors(), whose default `origin: '*'` echoes Access-Control-Allow-Origin: * to
@@ -53,6 +54,12 @@ export interface Env {
   CONFIDENTIAL_TERMS?: string  // comma-separated denylist; never commit real terms
   INTAKE_MODEL?: string        // optional override for the lease-intake extraction model
   ADMIN_EMAILS?: string        // comma-separated exact-match admin allowlist (OI-036); see admin-auth.ts
+  // OI-038 remainder: durable, cross-isolate rate-limit counter storage. See
+  // server/lib/rate-limit.ts for the KV-backed limiter and wrangler.toml for
+  // the binding (and the manual provisioning step still needed before this
+  // is live in production — checkRateLimit degrades gracefully to
+  // memory-only when unbound, so its absence is safe, not silent-broken).
+  RATE_LIMIT_KV?: KVNamespace
 }
 
 export function createApp() {
@@ -88,6 +95,32 @@ export function createApp() {
     const path = new URL(c.req.url).pathname
     if (ADMIN_EXEMPT.some(prefix => path.startsWith(prefix))) return next()
     return adminAuthMiddleware(c as unknown as Parameters<typeof adminAuthMiddleware>[0], next)
+  })
+
+  // OI-038 remainder: generic abuse-protection cap on every admin-gated
+  // MUTATION route (properties/units/tenants/leases/charges/... CRUD +
+  // intake — see rate-limit.ts's file header for the KV-durability and
+  // eventually-consistent trade-off). Generous (120/min) — this guards
+  // against abuse/compromised-credential hammering, not normal admin UX; a
+  // legitimate admin session never comes close. Read-only (GET) admin
+  // traffic is intentionally NOT limited here. /api/intake/lease additionally
+  // carries its own tighter, LLM-spend-specific limit (see intake.ts) — the
+  // two buckets are independent and both apply on that route.
+  const MUTATION_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
+  app.use('/api/*', async (c, next) => {
+    const path = new URL(c.req.url).pathname
+    if (ADMIN_EXEMPT.some(prefix => path.startsWith(prefix))) return next()
+    if (!MUTATION_METHODS.has(c.req.method)) return next()
+    const adminUserId = c.get('adminUserId') ?? 'unknown-admin'
+    const { allowed, retryAfterMs } = await checkRateLimit(c.env.RATE_LIMIT_KV, adminUserId, {
+      scope: 'admin-mutation',
+      maxCalls: 120,
+      windowMs: 60_000,
+    })
+    if (!allowed) {
+      return c.json({ error: `Too many requests — retry in ${Math.ceil(retryAfterMs / 1000)}s` }, 429)
+    }
+    return next()
   })
 
   app.route('/api/properties', propertiesRouter)

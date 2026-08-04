@@ -14,3 +14,26 @@ pages_build_output_dir = "./dist"
 #   POST /api/cron/monthly-billing            — monthly, 1st of month
 #   POST /api/cron/critical-dates-alerts      — daily ~09:00 ET
 #   POST /api/cron/delinquency-check          — daily ~09:05 ET
+
+# OI-038 remainder: durable, cross-isolate rate-limit counter storage (see
+# server/lib/rate-limit.ts for the eventually-consistent throttle-not-hard-
+# gate design). checkRateLimit() degrades gracefully to memory-only when this
+# binding is absent, so leaving it unprovisioned is SAFE (weaker rate
+# limiting, not a crash) — but it must be provisioned before this is a real
+# fix in production. Manual one-time step (not run as part of this change —
+# provisioning a live KV namespace against a real Cloudflare account is an
+# infra action outside this code change's scope):
+#   1. wrangler kv namespace create RATE_LIMIT_KV
+#   2. paste the returned id below in place of the placeholder
+#   3. uncomment the [[kv_namespaces]] block below
+#
+# REFUTE-pass correction (2026-08-03): left UNCOMMENTED with a placeholder id,
+# this block would likely fail `wrangler pages deploy` outright (an invalid
+# namespace id is a deploy-time error, not a runtime no-op) — blocking this
+# entire deploy, not "safely degrading" as the code comments above describe.
+# Commented out until a real id is provisioned, so the code's own documented
+# graceful-degradation path (kv undefined -> memory-only) is what actually
+# runs, matching the claim.
+# [[kv_namespaces]]
+# binding = "RATE_LIMIT_KV"
+# id = "REPLACE_WITH_REAL_NAMESPACE_ID"

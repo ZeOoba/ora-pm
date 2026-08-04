@@ -9,6 +9,11 @@ import { PaymentIntentClientRequestIdSchema } from '../lib/schemas'
 
 export const stripeRouter = new Hono<{ Bindings: Env }>()
 
+// Existing payment-intent limit, unchanged by Task 6 — only checkRateLimit's
+// internals (KV durability) and call signature (now async + config object)
+// changed. See server/lib/rate-limit.ts.
+const PAYMENT_INTENT_RATE_LIMIT = { scope: 'payment-intent', maxCalls: 5, windowMs: 60_000 }
+
 // $50,000 — hard ceiling on a single ACH payment-intent request (OI-040).
 // Independent of the outstanding-balance cap below; this bounds the blast
 // radius of a single request regardless of what the lease happens to owe.
@@ -94,10 +99,12 @@ stripeRouter.post('/payment-intent', async (c) => {
   // the client; X-Forwarded-For CAN be (OI-038, IP-handling slice), so it is
   // never used as a rate-limit key. Fall back to the authenticated tenant's
   // user id — not an absent-IP sentinel like 'unknown', which would let every
-  // client missing the header share a single rate-limit bucket. checkRateLimit's
-  // internals are unchanged here — that's Task 6's scope.
+  // client missing the header share a single rate-limit bucket. This IP-vs-
+  // fallback KEY DERIVATION is unchanged by Task 6 (KV-backed checkRateLimit
+  // internals — see server/lib/rate-limit.ts); only the call below changed,
+  // to the new async/KV-backed signature.
   const ip = c.req.header('CF-Connecting-IP') ?? userId
-  const { allowed, retryAfterMs } = checkRateLimit(ip)
+  const { allowed, retryAfterMs } = await checkRateLimit(c.env.RATE_LIMIT_KV, ip, PAYMENT_INTENT_RATE_LIMIT)
   if (!allowed) {
     return c.json(
       { error: `Too many payment requests — retry in ${Math.ceil(retryAfterMs / 1000)}s` },

@@ -14,6 +14,14 @@ vi.mock('../../server/lib/stripe', () => ({
   getStripe: vi.fn(() => mockStripe),
 }))
 
+// checkRateLimit is now applied to /api/cron/* (OI-038 remainder) — mocked to
+// always allow, same pattern as tests/routes/stripe.test.ts, so this file's
+// many sequential postBilling() calls across its 12 test cases don't trip the
+// module-scope in-memory fallback's fixed window (no RATE_LIMIT_KV in test env).
+vi.mock('../../server/lib/rate-limit', () => ({
+  checkRateLimit: vi.fn(async () => ({ allowed: true, retryAfterMs: 0 })),
+}))
+
 // ---------------------------------------------------------------------------
 // Mock @supabase/supabase-js — stateful, arg-aware mock.
 //
