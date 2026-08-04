@@ -12,16 +12,16 @@
 // `error:` key on that line).
 //
 // This does NOT prove every route is fully hardened — see the allowlist
-// below, which is intentionally NOT small: Task 9's named scope (the mass-
-// assignment sweep files, reports.ts, webhook.ts) is fully clean, but five
-// files never named in any of the 11-task plan's briefs (properties.ts,
-// expenses.ts, payments.ts, portal-auth.ts, portal-insurance.ts) still leak
-// raw Postgres error text to the client. Verified against
-// .superpowers/sdd/progress.md's Task 1-8 completion notes and Task
-// 10/11 brief titles (MFA flow; RLS docs + tripwire) before concluding this
-// is a genuine plan gap, not something already covered elsewhere — flagged
-// in task-9-report.md for the final whole-branch review, not silently swept
-// into a "small" allowlist as if it were an intentional exception.
+// below for the deliberate exceptions (Stripe SDK errors, a controlled
+// validation throw, and the operator-only /api/cron/* surface).
+//
+// OI-063 (closed 2026-08-04): five files never named in any of the 11-task
+// appsec plan's briefs (properties.ts, expenses.ts, payments.ts,
+// portal-auth.ts, portal-insurance.ts) were confirmed still leaking raw
+// Postgres/Supabase-Auth error text to the client — a genuine plan gap, not
+// something already covered elsewhere, self-flagged by the implementer and
+// independently confirmed by a REFUTE pass rather than assumed fixed by a
+// same-titled later commit. All 5 now route through dbError().
 
 import { describe, it, expect } from 'vitest'
 import { readdirSync, readFileSync } from 'node:fs'
@@ -55,14 +55,8 @@ const ALLOWLIST: Record<string, string[]> = {
   // excluded per the brief).
   'cron.ts': ["leaseErr.message", "cdErr.message", "insErr.message", "arErr.message"],
 
-  // --- NOT covered by any task in the 11-task plan — genuine gap, flagged
-  //     to the final whole-branch review in task-9-report.md, not fixed
-  //     here (would be scope creep beyond Task 9's named file list). ---
-  'properties.ts': ["error.message"],
-  'expenses.ts': ["error.message"],
-  'payments.ts': ["error.message"],
-  'portal-auth.ts': ["inviteErr.message", "deleteErr.message"],
-  'portal-insurance.ts': ["error.message"],
+  // OI-063 closed 2026-08-04: all 5 files now route through dbError(); no
+  // allowlist entries remain (see the "OI-063 scope files" assertion below).
 }
 
 describe('no-raw-db-errors tripwire (OI-042)', () => {
@@ -90,16 +84,17 @@ describe('no-raw-db-errors tripwire (OI-042)', () => {
     })
   }
 
-  // Task 9's own named scope, asserted explicitly rather than only
-  // implicitly by the loop above — if one of these files is ever removed
-  // from ALLOWLIST-exemption by accident, this pins the expectation that
-  // they are FULLY clean (no allowlist entries at all).
-  it('Task 9 scope files carry zero allowlist entries (fully swept, not partially excused)', () => {
-    const task9Scope = [
+  // Task 9's own named scope, plus OI-063's 5-file gap closure, asserted
+  // explicitly rather than only implicitly by the loop above — if one of
+  // these files is ever removed from ALLOWLIST-exemption by accident, this
+  // pins the expectation that they are FULLY clean (no allowlist entries).
+  it('Task 9 + OI-063 scope files carry zero allowlist entries (fully swept, not partially excused)', () => {
+    const fullyCleanScope = [
       'budgets.ts', 'insurance.ts', 'units.ts', 'renewals.ts',
       'charges.ts', 'leases.ts', 'tenants.ts', 'reports.ts', 'webhook.ts',
+      'properties.ts', 'expenses.ts', 'payments.ts', 'portal-auth.ts', 'portal-insurance.ts',
     ]
-    for (const file of task9Scope) {
+    for (const file of fullyCleanScope) {
       expect(ALLOWLIST[file] ?? [], `${file} should have no allowlist entries`).toEqual([])
     }
   })
