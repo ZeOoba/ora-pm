@@ -3,6 +3,7 @@ import { getDb } from '../db/client'
 import { getStripe } from '../lib/stripe'
 import { buildMonthlyCharges } from '../lib/billing'
 import { cronAuthMiddleware } from '../middleware/auth'
+import { checkRateLimit } from '../lib/rate-limit'
 
 type Env = {
   SUPABASE_URL: string
@@ -11,11 +12,35 @@ type Env = {
   STRIPE_SECRET_KEY: string
   RESEND_API_KEY?: string
   RESEND_FROM_EMAIL?: string
+  RATE_LIMIT_KV?: KVNamespace
 }
 
 export const cronRouter = new Hono<{ Bindings: Env }>()
 
 cronRouter.use('/*', cronAuthMiddleware)
+
+// OI-038 remainder: 10/hour per cron endpoint path (not per caller — the
+// only expected caller is the ORA fleet scheduler, authenticated via
+// CRON_SECRET; runs AFTER cronAuthMiddleware so an invalid-secret guess
+// never consumes budget). Sized generous specifically to absorb a
+// legitimate catch-up burst — if the scheduler misses a run (e.g. an
+// outage) it re-triggers the missed cron(s) close together on recovery.
+// This repo has no separate catch-up-burst doc to size precisely against
+// (checked: no match for "catch-up"/"catchup" in any tracked file), so this
+// errs generous per task-6-brief.md's explicit instruction rather than risk
+// breaking legitimate ops; each endpoint's own documented cadence (monthly,
+// or once daily) is nowhere near 10/hour in normal operation.
+cronRouter.use('/*', async (c, next) => {
+  const { allowed, retryAfterMs } = await checkRateLimit(c.env.RATE_LIMIT_KV, c.req.path, {
+    scope: 'cron',
+    maxCalls: 10,
+    windowMs: 60 * 60 * 1000,
+  })
+  if (!allowed) {
+    return c.json({ error: `Too many cron requests — retry in ${Math.ceil(retryAfterMs / 1000)}s` }, 429)
+  }
+  return next()
+})
 
 // POST /api/cron/monthly-billing?year=2026&month=6
 cronRouter.post('/monthly-billing', async (c) => {
