@@ -63,7 +63,7 @@ server/                      API layer (Hono), deployed inside the Functions run
   routes/                      One router per resource (properties, units, tenants, leases, charges, payments,
                                 cam, expenses, budgets, renewals, insurance, exports, intake, stripe, webhook,
                                 cron, portal, portal-auth, portal-insurance, reports)
-  middleware/                  admin-auth (staff JWT + @oxfordra.net check), tenant-auth (portal JWT),
+  middleware/                  admin-auth (staff JWT + ADMIN_EMAILS allowlist + tenant-exclusion check), tenant-auth (portal JWT),
                                 error-handler, and the Bearer-secret cron gate (in auth.ts)
   lib/                          Business logic: billing.ts (monthly charge generation), ar-aging.ts (AR buckets),
                                 cam.ts (CAM true-up math), iif-export.ts (QuickBooks IIF file), lease-extract.ts
@@ -116,9 +116,11 @@ Deployment is Cloudflare Pages, driven by `wrangler.toml` (`name = "ora-pm"`, bu
 
 1. Create a Supabase project; run `supabase db push` to apply `supabase/migrations/`.
 2. Connect the GitHub repo to Cloudflare Pages — build command `npm run build`, output directory `dist`.
-   Plaintext env vars: `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`. Encrypted secrets (`wrangler pages secret put <NAME>`): `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `CRON_SECRET`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `ANTHROPIC_API_KEY`, `CONFIDENTIAL_TERMS`.
+   Plaintext env vars: `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`. Encrypted secrets (`wrangler pages secret put <NAME>`): `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `CRON_SECRET`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `ANTHROPIC_API_KEY`, `CONFIDENTIAL_TERMS`, `ADMIN_EMAILS`.
 3. Configure Cloudflare Access (Zero Trust) on the Pages deployment — allow `ggoldberg@oxfordra.net`, `egoldberg@oxfordra.net`.
 4. DNS (`pm.oxfordra.net`, `tenant.oxfordra.net` CNAME to `ora-pm.pages.dev`) — **requires Gabriel's explicit go-ahead before changing.**
+
+**Adding a new admin (OI-036):** admin accounts do not self-provision. In the Supabase dashboard, create the auth user for the new admin's `@oxfordra.net` address (Authentication → Users → Add user; no password needed, they'll sign in via magic link). Then add that exact email to the `ADMIN_EMAILS` secret — a comma-separated exact-match allowlist, case-insensitive — via `wrangler pages secret put ADMIN_EMAILS` (re-enter the full list; this overwrites, it does not append). `adminAuthMiddleware` (`server/middleware/admin-auth.ts`) fails closed with a 503 if `ADMIN_EMAILS` is unset or empty, and separately rejects with 403 any allowlisted email that also resolves to a `tenants` row — an admin cannot also be a tenant contact.
 
 Cron jobs have no native Cloudflare Pages trigger — the ORA fleet scheduler (or, as a fallback, Windows Task Scheduler running `scripts/trigger-billing.ps1` on the 1st of the month) POSTs to `/api/cron/monthly-billing`, `/api/cron/critical-dates-alerts`, and `/api/cron/delinquency-check` with `Authorization: Bearer <CRON_SECRET>`.
 
@@ -147,5 +149,5 @@ Cron jobs have no native Cloudflare Pages trigger — the ORA fleet scheduler (o
 
 - **Admin gating is prefix-based, not path-exact.** `/api/admin` (tenant invite/revoke, in `portal-auth.ts`) is *intentionally excluded* from `server/index.ts`'s `ADMIN_EXEMPT` list — a code comment flags this deliberately, since those are privileged actions even though the route lives conceptually next to the exempt `/api/portal` prefix. Read `ADMIN_EXEMPT` in `server/index.ts` before adding a new route under `/api/portal*` or `/api/admin*`.
 - **Lease-intake confidentiality guard only scans the filename, not PDF content** (Phase 2a scope — full server-side PDF text extraction is deferred; the Cloudflare Worker runtime has no clean PDF parser). It fails closed if `CONFIDENTIAL_TERMS` is unset, and re-scans extracted field text post-extraction as defense-in-depth. See the in-code comment in `server/routes/intake.ts`.
-- **Two separate Supabase Auth contexts by design**: the admin console's client (`src/lib/supabase.ts`) and the tenant portal's client (`src/portal/lib/supabase-portal.ts`) both use the anon key from the browser — the service-role key never leaves `server/db/client.ts`. Admin access additionally requires an `@oxfordra.net` email (`admin-auth.ts`).
+- **Two separate Supabase Auth contexts by design**: the admin console's client (`src/lib/supabase.ts`) and the tenant portal's client (`src/portal/lib/supabase-portal.ts`) both use the anon key from the browser — the service-role key never leaves `server/db/client.ts`. Admin access additionally requires the authenticated email to be on the `ADMIN_EMAILS` exact-match allowlist and to not resolve to any `tenants` row (`admin-auth.ts`, OI-036) — not merely an `@oxfordra.net` domain suffix, since one Supabase auth project serves both admin and tenant audiences.
 - **Webhook route must be mounted before the CORS middleware** — Stripe signature verification needs the untouched raw request body.

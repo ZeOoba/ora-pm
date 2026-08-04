@@ -17,7 +17,9 @@ export function AdminLogin() {
     setError('')
     const { error: err } = await supabase.auth.signInWithOtp({
       email,
-      options: { emailRedirectTo: window.location.origin },
+      // OI-036: admin accounts must be pre-created in the Supabase dashboard and added
+      // to ADMIN_EMAILS — this call must never self-provision a new auth user.
+      options: { emailRedirectTo: window.location.origin, shouldCreateUser: false },
     })
     setLoading(false)
     if (err) { setError(err.message); return }

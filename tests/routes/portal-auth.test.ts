@@ -34,11 +34,34 @@ const env = {
   CRON_SECRET: 'test',
   STRIPE_SECRET_KEY: 'sk_test_dummy',
   STRIPE_WEBHOOK_SECRET: 'whsec_dummy',
+  ADMIN_EMAILS: 'ggoldberg@oxfordra.net',
 }
 
 // /api/admin is gated by adminAuthMiddleware: requests must carry a Bearer token
-// that resolves to an @oxfordra.net user.
+// that resolves to an ADMIN_EMAILS-allowlisted user (OI-036) who is not also a tenant.
 const AUTH = { Authorization: 'Bearer admin-token' }
+
+// adminAuthMiddleware ALSO queries the `tenants` table (its tenant-exclusion check,
+// OI-036) on every request that passes the email-allowlist check — through the same
+// mockFrom this file's own handler-level tenant lookups use. Both call `.from('tenants')`,
+// so this helper differentiates by the `.eq()` column: the middleware always queries
+// `auth_user_id` (and expects nobody to match — these tests' admin is never a tenant),
+// while portal-auth.ts's own handlers query by `id`.
+function mockTenantsTable(byIdResult: { data: unknown; error: unknown }, opts?: {
+  update?: ReturnType<typeof vi.fn>
+}) {
+  return {
+    select: vi.fn().mockReturnValue({
+      eq: vi.fn((column: string) => {
+        if (column === 'auth_user_id') {
+          return { maybeSingle: vi.fn().mockResolvedValue({ data: null, error: null }) }
+        }
+        return { single: vi.fn().mockResolvedValue(byIdResult) }
+      }),
+    }),
+    update: opts?.update ?? vi.fn().mockReturnValue({ eq: vi.fn().mockResolvedValue({ error: null }) }),
+  }
+}
 
 const app = createApp()
 
@@ -53,19 +76,10 @@ beforeEach(() => {
 
 describe('POST /api/admin/tenants/:id/invite', () => {
   it('invites tenant and stores auth_user_id', async () => {
-    mockFrom.mockReturnValue({
-      select: vi.fn().mockReturnValue({
-        eq: vi.fn().mockReturnValue({
-          single: vi.fn().mockResolvedValue({
-            data: { id: 'tenant_1', contact_email: 'tenant@example.com', auth_user_id: null },
-            error: null,
-          }),
-        }),
-      }),
-      update: vi.fn().mockReturnValue({
-        eq: vi.fn().mockResolvedValue({ error: null }),
-      }),
-    })
+    mockFrom.mockReturnValue(mockTenantsTable({
+      data: { id: 'tenant_1', contact_email: 'tenant@example.com', auth_user_id: null },
+      error: null,
+    }))
     mockInviteUserByEmail.mockResolvedValue({
       data: { user: { id: 'auth_user_new' } },
       error: null,
@@ -82,16 +96,10 @@ describe('POST /api/admin/tenants/:id/invite', () => {
   })
 
   it('returns 409 if tenant already has portal access', async () => {
-    mockFrom.mockReturnValue({
-      select: vi.fn().mockReturnValue({
-        eq: vi.fn().mockReturnValue({
-          single: vi.fn().mockResolvedValue({
-            data: { id: 'tenant_1', contact_email: 'tenant@example.com', auth_user_id: 'existing_id' },
-            error: null,
-          }),
-        }),
-      }),
-    })
+    mockFrom.mockReturnValue(mockTenantsTable({
+      data: { id: 'tenant_1', contact_email: 'tenant@example.com', auth_user_id: 'existing_id' },
+      error: null,
+    }))
 
     const res = await app.request('/api/admin/tenants/tenant_1/invite', {
       method: 'POST',
@@ -101,13 +109,7 @@ describe('POST /api/admin/tenants/:id/invite', () => {
   })
 
   it('returns 404 if tenant not found', async () => {
-    mockFrom.mockReturnValue({
-      select: vi.fn().mockReturnValue({
-        eq: vi.fn().mockReturnValue({
-          single: vi.fn().mockResolvedValue({ data: null, error: { message: 'not found' } }),
-        }),
-      }),
-    })
+    mockFrom.mockReturnValue(mockTenantsTable({ data: null, error: { message: 'not found' } }))
 
     const res = await app.request('/api/admin/tenants/bad_id/invite', {
       method: 'POST',
@@ -117,16 +119,10 @@ describe('POST /api/admin/tenants/:id/invite', () => {
   })
 
   it('returns 400 if tenant has no contact_email', async () => {
-    mockFrom.mockReturnValue({
-      select: vi.fn().mockReturnValue({
-        eq: vi.fn().mockReturnValue({
-          single: vi.fn().mockResolvedValue({
-            data: { id: 'tenant_1', contact_email: null, auth_user_id: null },
-            error: null,
-          }),
-        }),
-      }),
-    })
+    mockFrom.mockReturnValue(mockTenantsTable({
+      data: { id: 'tenant_1', contact_email: null, auth_user_id: null },
+      error: null,
+    }))
 
     const res = await app.request('/api/admin/tenants/tenant_1/invite', {
       method: 'POST',
@@ -138,19 +134,10 @@ describe('POST /api/admin/tenants/:id/invite', () => {
 
 describe('DELETE /api/admin/tenants/:id/revoke-access', () => {
   it('revokes portal access', async () => {
-    mockFrom.mockReturnValue({
-      select: vi.fn().mockReturnValue({
-        eq: vi.fn().mockReturnValue({
-          single: vi.fn().mockResolvedValue({
-            data: { auth_user_id: 'existing_auth_id' },
-            error: null,
-          }),
-        }),
-      }),
-      update: vi.fn().mockReturnValue({
-        eq: vi.fn().mockResolvedValue({ error: null }),
-      }),
-    })
+    mockFrom.mockReturnValue(mockTenantsTable({
+      data: { auth_user_id: 'existing_auth_id' },
+      error: null,
+    }))
     mockDeleteUser.mockResolvedValue({ data: {}, error: null })
 
     const res = await app.request('/api/admin/tenants/tenant_1/revoke-access', {
@@ -164,16 +151,7 @@ describe('DELETE /api/admin/tenants/:id/revoke-access', () => {
   })
 
   it('returns 404 if tenant has no portal access to revoke', async () => {
-    mockFrom.mockReturnValue({
-      select: vi.fn().mockReturnValue({
-        eq: vi.fn().mockReturnValue({
-          single: vi.fn().mockResolvedValue({
-            data: { auth_user_id: null },
-            error: null,
-          }),
-        }),
-      }),
-    })
+    mockFrom.mockReturnValue(mockTenantsTable({ data: { auth_user_id: null }, error: null }))
 
     const res = await app.request('/api/admin/tenants/tenant_1/revoke-access', {
       method: 'DELETE',
@@ -187,17 +165,10 @@ describe('admin auth gate (security regression)', () => {
   // Full happy-path mocks: if the endpoint were NOT gated, these would 200.
   // The point is that auth must be enforced BEFORE the handler runs.
   function armInviteHappyPath() {
-    mockFrom.mockReturnValue({
-      select: vi.fn().mockReturnValue({
-        eq: vi.fn().mockReturnValue({
-          single: vi.fn().mockResolvedValue({
-            data: { id: 'tenant_1', contact_email: 'tenant@example.com', auth_user_id: null },
-            error: null,
-          }),
-        }),
-      }),
-      update: vi.fn().mockReturnValue({ eq: vi.fn().mockResolvedValue({ error: null }) }),
-    })
+    mockFrom.mockReturnValue(mockTenantsTable({
+      data: { id: 'tenant_1', contact_email: 'tenant@example.com', auth_user_id: null },
+      error: null,
+    }))
     mockInviteUserByEmail.mockResolvedValue({ data: { user: { id: 'auth_user_new' } }, error: null })
   }
 
@@ -208,14 +179,7 @@ describe('admin auth gate (security regression)', () => {
   })
 
   it('DELETE /revoke-access is rejected with 401 when no Authorization header is sent', async () => {
-    mockFrom.mockReturnValue({
-      select: vi.fn().mockReturnValue({
-        eq: vi.fn().mockReturnValue({
-          single: vi.fn().mockResolvedValue({ data: { auth_user_id: 'existing_auth_id' }, error: null }),
-        }),
-      }),
-      update: vi.fn().mockReturnValue({ eq: vi.fn().mockResolvedValue({ error: null }) }),
-    })
+    mockFrom.mockReturnValue(mockTenantsTable({ data: { auth_user_id: 'existing_auth_id' }, error: null }))
     mockDeleteUser.mockResolvedValue({ data: {}, error: null })
 
     const res = await app.request('/api/admin/tenants/tenant_1/revoke-access', { method: 'DELETE' }, env)
@@ -240,17 +204,10 @@ describe('admin auth gate (security regression)', () => {
   // app-level admin gate in server/index.ts.
   it('portalAuthRouter self-gates when mounted without the app-level gate', async () => {
     // Happy-path mocks: an UNGATED router would reach the handler and 200.
-    mockFrom.mockReturnValue({
-      select: vi.fn().mockReturnValue({
-        eq: vi.fn().mockReturnValue({
-          single: vi.fn().mockResolvedValue({
-            data: { id: 'tenant_1', contact_email: 'tenant@example.com', auth_user_id: null },
-            error: null,
-          }),
-        }),
-      }),
-      update: vi.fn().mockReturnValue({ eq: vi.fn().mockResolvedValue({ error: null }) }),
-    })
+    mockFrom.mockReturnValue(mockTenantsTable({
+      data: { id: 'tenant_1', contact_email: 'tenant@example.com', auth_user_id: null },
+      error: null,
+    }))
     mockInviteUserByEmail.mockResolvedValue({ data: { user: { id: 'auth_user_new' } }, error: null })
 
     const bare = new Hono()
