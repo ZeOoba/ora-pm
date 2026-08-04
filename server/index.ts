@@ -23,6 +23,24 @@ import { portalInsuranceRouter } from './routes/portal-insurance'
 import { intakeRouter } from './routes/intake'
 import { errorHandlerMiddleware } from './middleware/error-handler'
 
+// OI-037: explicit CORS allowlist — the app was previously mounting Hono's bare
+// cors(), whose default `origin: '*'` echoes Access-Control-Allow-Origin: * to
+// any caller on every /api/* route (admin CRUD, portal, and Stripe endpoints
+// included). Origins:
+//   - https://ora-pm.pages.dev  — confirmed live production host (curl -I).
+//   - https://pm.oxfordra.net, https://tenant.oxfordra.net — documented custom
+//     domains (README.md "DNS" step: CNAME to ora-pm.pages.dev); DNS is not yet
+//     live (unresolvable as of this change) and cutover needs Gabriel's explicit
+//     go-ahead per README, but listing them here is inert until then and avoids a
+//     second code change the day DNS goes live.
+//   - http://localhost:5173 — Vite dev server.
+const ALLOWED = [
+  'https://ora-pm.pages.dev',
+  'https://pm.oxfordra.net',
+  'https://tenant.oxfordra.net',
+  'http://localhost:5173',
+]
+
 export interface Env {
   SUPABASE_URL: string
   SUPABASE_SERVICE_ROLE_KEY: string
@@ -45,7 +63,12 @@ export function createApp() {
   // Webhook MUST be before CORS — needs raw body
   app.route('/api/webhooks', webhookRouter)
 
-  app.use('/api/*', cors())
+  app.use('/api/*', cors({
+    origin: (origin) => (ALLOWED.includes(origin) ? origin : undefined),
+    credentials: false,
+    allowHeaders: ['Authorization', 'Content-Type'],
+    allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  }))
 
   app.get('/api/health', (c) =>
     c.json({ status: 'ok', ts: new Date().toISOString() })
