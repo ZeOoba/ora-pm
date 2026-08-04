@@ -25,6 +25,15 @@ pages_build_output_dir = "./dist"
 # infra action outside this code change's scope):
 #   1. wrangler kv namespace create RATE_LIMIT_KV
 #   2. paste the returned id below in place of the placeholder
-[[kv_namespaces]]
-binding = "RATE_LIMIT_KV"
-id = "REPLACE_WITH_REAL_NAMESPACE_ID"  # placeholder — see provisioning step above before deploy
+#   3. uncomment the [[kv_namespaces]] block below
+#
+# REFUTE-pass correction (2026-08-03): left UNCOMMENTED with a placeholder id,
+# this block would likely fail `wrangler pages deploy` outright (an invalid
+# namespace id is a deploy-time error, not a runtime no-op) — blocking this
+# entire deploy, not "safely degrading" as the code comments above describe.
+# Commented out until a real id is provisioned, so the code's own documented
+# graceful-degradation path (kv undefined -> memory-only) is what actually
+# runs, matching the claim.
+# [[kv_namespaces]]
+# binding = "RATE_LIMIT_KV"
+# id = "REPLACE_WITH_REAL_NAMESPACE_ID"
