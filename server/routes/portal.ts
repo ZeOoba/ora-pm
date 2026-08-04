@@ -1,7 +1,14 @@
 import { Hono } from 'hono'
+import Stripe from 'stripe'
 import { getDb } from '../db/client'
+import { getStripe } from '../lib/stripe'
 import { tenantAuthMiddleware } from '../middleware/tenant-auth'
+import { dbError } from '../lib/api-error'
 import type { Env } from '../index'
+
+// OI-043: payment_method_id must look like a Stripe PaymentMethod id before
+// it's ever sent to Stripe or persisted.
+const PAYMENT_METHOD_ID_RE = /^pm_[A-Za-z0-9]+$/
 
 export const portalRouter = new Hono<{ Bindings: Env }>()
 
@@ -47,7 +54,7 @@ portalRouter.get('/charges', async (c) => {
     .in('lease_id', leaseIds)
     .order('due_date', { ascending: false })
 
-  if (error) return c.json({ error: error.message }, 500)
+  if (error) return dbError(c, error, 'Failed to load charges')
   return c.json({ data })
 })
 
@@ -71,7 +78,7 @@ portalRouter.get('/payments', async (c) => {
     .in('lease_id', leaseIds)
     .order('payment_date', { ascending: false })
 
-  if (error) return c.json({ error: error.message }, 500)
+  if (error) return dbError(c, error, 'Failed to load payment history')
   return c.json({ data })
 })
 
@@ -90,7 +97,7 @@ portalRouter.get('/lease', async (c) => {
     .eq('tenant_id', tenant.id)
     .eq('status', 'active')
 
-  if (error) return c.json({ error: error.message }, 500)
+  if (error) return dbError(c, error, 'Failed to load lease information')
   return c.json({ data })
 })
 
@@ -114,7 +121,7 @@ portalRouter.get('/documents', async (c) => {
     .in('lease_id', leaseIds)
     .order('uploaded_at', { ascending: false })
 
-  if (error) return c.json({ error: error.message }, 500)
+  if (error) return dbError(c, error, 'Failed to load documents')
   return c.json({ data })
 })
 
@@ -125,20 +132,45 @@ portalRouter.patch('/autopay', async (c) => {
   if (!lease_id) return c.json({ error: 'lease_id required' }, 400)
 
   const db = getDb(c.env)
-  const { data: tenant, error: tenantErr } = await db.from('tenants').select('id').eq('auth_user_id', userId).single()
+  const { data: tenant, error: tenantErr } = await db.from('tenants').select('id, stripe_customer_id').eq('auth_user_id', userId).single()
   if (tenantErr) return c.json({ error: 'DB error' }, 500)
   if (!tenant) return c.json({ error: 'Tenant not found' }, 404)
 
-  // Verify this lease belongs to this tenant (IDOR guard)
+  // Verify this lease belongs to this tenant (IDOR guard) — unchanged by OI-043.
   const { data: lease } = await db.from('leases').select('id, tenant_id').eq('id', lease_id).single()
   if (!lease || lease.tenant_id !== tenant.id) return c.json({ error: 'Lease not found' }, 404)
 
   const updates: Record<string, unknown> = { autopay_enabled: enabled }
-  if (enabled && payment_method_id) updates.autopay_payment_method_id = payment_method_id
+  if (enabled && payment_method_id) {
+    // OI-043: a client-supplied Stripe object id was previously written
+    // straight through with no verification it's actually attached to this
+    // tenant's Stripe customer — a mismatch failed silently, off-session,
+    // months later in cron.ts. Verify it here, before it's ever persisted.
+    if (!PAYMENT_METHOD_ID_RE.test(payment_method_id)) {
+      return c.json({ error: 'Invalid payment_method_id format' }, 400)
+    }
+    if (!tenant.stripe_customer_id) {
+      return c.json({ error: 'No Stripe customer on file for this tenant' }, 400)
+    }
+
+    const stripe = getStripe(c.env.STRIPE_SECRET_KEY)
+    let pm: Stripe.PaymentMethod
+    try {
+      pm = await stripe.paymentMethods.retrieve(payment_method_id)
+    } catch (err) {
+      if (err instanceof Stripe.errors.StripeError) return c.json({ error: err.message }, 400)
+      throw err
+    }
+    if (pm.customer !== tenant.stripe_customer_id || pm.type !== 'us_bank_account') {
+      return c.json({ error: 'Payment method does not belong to this account' }, 403)
+    }
+
+    updates.autopay_payment_method_id = payment_method_id
+  }
   if (!enabled) updates.autopay_payment_method_id = null
 
   const { error } = await db.from('leases').update(updates).eq('id', lease_id)
-  if (error) return c.json({ error: error.message }, 500)
+  if (error) return dbError(c, error, 'Failed to update autopay settings')
 
   return c.json({ autopay_enabled: enabled })
 })
