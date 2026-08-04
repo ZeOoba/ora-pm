@@ -390,6 +390,26 @@ describe('PATCH /api/portal/autopay', () => {
     expect(updateMock).not.toHaveBeenCalled()
   })
 
+  // REFUTE-pass coverage gap (2026-08-03): the ownership check is `pm.customer
+  // !== tenant.stripe_customer_id` — correctly rejects an orphaned PM (never
+  // attached to any Stripe customer, customer: null) since null !== a real
+  // customer id, but that path was previously unpinned by any test. A future
+  // refactor of that boolean could silently reintroduce a bypass with nothing
+  // to catch it.
+  it('403 when the payment method has no attached Stripe customer at all (orphaned PM)', async () => {
+    const updateMock = vi.fn().mockReturnValue({ eq: vi.fn().mockResolvedValue({ error: null }) })
+    mockAutopayTables({ updateSpy: updateMock })
+    mockStripe.paymentMethods.retrieve.mockResolvedValue({ id: 'pm_orphan', customer: null, type: 'us_bank_account' })
+
+    const res = await app.request('/api/portal/autopay', {
+      method: 'PATCH',
+      headers: { Authorization: 'Bearer valid', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lease_id: 'lease_1', enabled: true, payment_method_id: 'pm_orphan' }),
+    }, env)
+    expect(res.status).toBe(403)
+    expect(updateMock).not.toHaveBeenCalled()
+  })
+
   it('RED 2: 400 on a malformed payment_method_id, before any Stripe call', async () => {
     mockAutopayTables()
 
