@@ -2,24 +2,72 @@ import { Hono } from 'hono'
 import type { Env } from '../index'
 import { parseTerms, containsConfidentialTerm } from '../lib/confidentiality'
 import { extractLease } from '../lib/lease-extract'
+import { extractPdfText } from '../lib/pdf-extract'
+import { checkRateLimit } from '../lib/rate-limit'
+import { getDb } from '../db/client'
 
 export const intakeRouter = new Hono<{ Bindings: Env }>()
 
 const DEFAULT_MODEL = 'claude-opus-5'
 const MAX_PDF_BYTES = 10 * 1024 * 1024 // mirror the client cap; the client check is bypassable
 
+// OI-038 remainder: this is an LLM-spend-specific budget (each request egresses
+// a document to api.anthropic.com), independent of and tighter than the
+// generic 120/min admin-mutation limit server/index.ts applies to every
+// admin-gated mutation route (this one included) — both buckets apply here.
+const INTAKE_RATE_LIMIT = { scope: 'intake', maxCalls: 10, windowMs: 24 * 60 * 60 * 1000 } // 10/day per admin
+
+// OI-038 remainder, item 3: INTAKE_MODEL was previously an unconstrained env
+// override — any value an operator (or a compromised/misconfigured env) set
+// went straight into the Anthropic request. Constrained to an allowlist
+// (smaller diff than removing the override outright, and the override is a
+// real, documented ops escape hatch — see README's "INTAKE_MODEL" env var
+// and architecture diagram — for swapping models without a redeploy, e.g.
+// around a model deprecation). A non-allowlisted value silently falls back
+// to DEFAULT_MODEL rather than rejecting the request — the operator's intent
+// was "use my override", not "block lease intake"; the resulting request
+// still runs, just against a known-good model. Update this list when a new
+// model id is approved for lease-intake use.
+const ALLOWED_MODELS = new Set<string>(['claude-opus-5', 'claude-sonnet-5'])
+
+function resolveModel(requested: string | undefined): string {
+  return requested && ALLOWED_MODELS.has(requested) ? requested : DEFAULT_MODEL
+}
+
 intakeRouter.post('/lease', async (c) => {
+  // Rate limit first — cheap, and keyed off the authenticated admin (set by
+  // server/index.ts's adminAuthMiddleware, which gates this route), not
+  // request-body content. Falls back to CF-Connecting-IP then a fixed key
+  // only when adminUserId isn't set (e.g. this router mounted standalone in
+  // a test, bypassing the real admin-auth middleware chain).
+  const adminUserId = c.get('adminUserId') ?? c.req.header('CF-Connecting-IP') ?? 'unknown-admin'
+  const { allowed, retryAfterMs } = await checkRateLimit(c.env.RATE_LIMIT_KV, adminUserId, INTAKE_RATE_LIMIT)
+  if (!allowed) {
+    return c.json({ error: `Too many lease-intake requests — retry in ${Math.ceil(retryAfterMs / 1000)}s` }, 429)
+  }
+
   const { filename, pdfBase64, tenant_id, unit_id } = await c.req.json().catch(() => ({}))
   if (!filename || !pdfBase64 || !tenant_id || !unit_id) {
     return c.json({ error: 'filename, pdfBase64, tenant_id, unit_id are required' }, 400)
   }
 
-  // Confidentiality guard. NOTE (Phase 2a scope): this scans the FILENAME only, not the decoded PDF
-  // CONTENT — full server-side PDF text extraction is deferred to Phase 2b (the Cloudflare Worker
-  // runtime has no clean PDF parser). Defense-in-depth meanwhile: (1) fail-closed when the denylist
-  // is unconfigured (below); (2) the route is admin-gated; (3) it is structurally limited to an
-  // existing managed tenant_id+unit_id, so by construction it is a managed-portfolio lease, never a
-  // confidential acquisition; (4) the upload UI carries an explicit attestation.
+  // OI-044 tightening: tenant_id/unit_id were previously only checked for
+  // PRESENCE, not existence — the compensating-control argument below ("by
+  // construction a managed-portfolio lease") only holds if the ids actually
+  // resolve to real rows. Existence-check both, before any egress.
+  const db = getDb(c.env)
+  const { data: tenantRow, error: tenantErr } = await db.from('tenants').select('id').eq('id', tenant_id).maybeSingle()
+  if (tenantErr) return c.json({ error: 'Failed to verify tenant' }, 500)
+  if (!tenantRow) return c.json({ error: 'Tenant not found' }, 404)
+  const { data: unitRow, error: unitErr } = await db.from('units').select('id').eq('id', unit_id).maybeSingle()
+  if (unitErr) return c.json({ error: 'Failed to verify unit' }, 500)
+  if (!unitRow) return c.json({ error: 'Unit not found' }, 404)
+
+  // Confidentiality guard — filename check. NOTE: this used to be the ONLY content check (scanned the
+  // FILENAME only, never the decoded PDF content) — see the extracted-text scan further down for the
+  // OI-044 fix. Defense-in-depth kept regardless: (1) fail-closed when the denylist is unconfigured
+  // (below); (2) the route is admin-gated; (3) tenant_id+unit_id are now existence-checked, not just
+  // presence-checked, against the managed portfolio; (4) the upload UI carries an explicit attestation.
   const terms = parseTerms(c.env.CONFIDENTIAL_TERMS)
   if (terms.length === 0) {
     // Fail-CLOSED: never egress a document to the external API with no confidentiality denylist set.
@@ -42,9 +90,31 @@ intakeRouter.post('/lease', async (c) => {
     return c.json({ error: 'Uploaded file is not a valid PDF.' }, 415)
   }
 
+  // OI-044: PDF CONTENT scan, pre-egress. The filename check above never saw the actual document
+  // text — a confidential-matter lease saved as an innocuous filename would have egressed in full.
+  // Extract the text and run it through the same denylist. On a match, block with the same 422 the
+  // filename check uses, and — this is the load-bearing property — WITHOUT ever calling extractLease
+  // (no egress to api.anthropic.com happens for a blocked document).
+  let contentScanWarning: string | undefined
+  const extractedText = await safeDecodeAndExtract(pdfBase64)
+  if (extractedText) {
+    if (containsConfidentialTerm(extractedText, terms)) {
+      return c.json({ error: 'Blocked: document appears to reference a confidential matter.' }, 422)
+    }
+  } else {
+    // JUDGMENT CALL (flagged explicitly for the branch's final REFUTE pass — see task-6-report.md):
+    // an image-only/scanned PDF has no text layer for pdf.js to find, so the content scan cannot run.
+    // We deliberately FAIL OPEN here — proceed with the request — rather than fail closed and block
+    // every scanned lease outright. This is acceptable because the four compensating controls above
+    // (fail-closed empty denylist, admin gating, existence-checked tenant/unit binding, upload-UI
+    // attestation) all still apply; a hard fail-closed here would make lease intake unusable for any
+    // lease that was ever scanned rather than saved as a native PDF, which is common in practice.
+    contentScanWarning = 'Content scan unavailable (image-based PDF) — filename-only screening applied'
+  }
+
   let result
   try {
-    const model = c.env.INTAKE_MODEL ?? DEFAULT_MODEL
+    const model = resolveModel(c.env.INTAKE_MODEL)
     result = await extractLease(pdfBase64, { apiKey: c.env.ANTHROPIC_API_KEY, model })
   } catch {
     return c.json({ error: 'Lease extraction failed. Enter the lease manually.' }, 502)
@@ -52,6 +122,7 @@ intakeRouter.post('/lease', async (c) => {
 
   // Post-egress defense: scrub any field whose text hits the denylist.
   const warnings = [...result.warnings]
+  if (contentScanWarning) warnings.push(contentScanWarning)
   const fields: Record<string, unknown> = {}
   for (const [k, v] of Object.entries(result.fields)) {
     if (typeof v === 'string' && containsConfidentialTerm(v, terms)) {
@@ -62,3 +133,17 @@ intakeRouter.post('/lease', async (c) => {
   }
   return c.json({ fields, confidence: result.confidence, warnings })
 })
+
+/** Decodes the base64 payload and runs the PDF text extractor. Never throws —
+ *  a decode failure (shouldn't happen once the magic-byte check above has
+ *  passed, but is not impossible for a crafted payload) collapses to the
+ *  same "no text available" signal as an image-only PDF; see the
+ *  fail-open-with-warning handling at the call site. */
+async function safeDecodeAndExtract(pdfBase64: string): Promise<string> {
+  try {
+    const bytes = Uint8Array.from(atob(pdfBase64), (ch) => ch.charCodeAt(0))
+    return await extractPdfText(bytes)
+  } catch {
+    return ''
+  }
+}
