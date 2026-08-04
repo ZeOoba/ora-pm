@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 import { getDb } from '../db/client'
+import { dbError } from '../lib/api-error'
 
 type Env = { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string }
 
@@ -12,7 +13,7 @@ reportsRouter.get('/ar-aging', async (c) => {
   let q = db.from('ar_ledger').select('*').gt('balance', 0)
   if (propertyId) q = q.eq('property_id', propertyId)
   const { data, error } = await q
-  if (error) return c.json({ error: error.message }, 500)
+  if (error) return dbError(c, error, 'Failed to load AR aging report')
   return c.json({ data })
 })
 
@@ -23,7 +24,7 @@ reportsRouter.get('/rent-roll', async (c) => {
   let q = db.from('rent_roll').select('*').order('property_name').order('suite')
   if (propertyId) q = q.eq('property_id', propertyId)
   const { data, error } = await q
-  if (error) return c.json({ error: error.message }, 500)
+  if (error) return dbError(c, error, 'Failed to load rent roll')
   return c.json({ data })
 })
 
@@ -31,7 +32,7 @@ reportsRouter.get('/rent-roll', async (c) => {
 reportsRouter.get('/critical-dates', async (c) => {
   const db = getDb(c.env)
   const { data, error } = await db.from('critical_dates').select('*').order('days_until')
-  if (error) return c.json({ error: error.message }, 500)
+  if (error) return dbError(c, error, 'Failed to load critical dates')
   return c.json({ data })
 })
 
@@ -50,16 +51,16 @@ reportsRouter.get('/actuals', async (c) => {
     .select('category, amount')
     .eq('property_id', propertyId)
     .gte('expense_date', start).lte('expense_date', end)
-  if (exErr) return c.json({ error: exErr.message }, 500)
+  if (exErr) return dbError(c, exErr, 'Failed to load expense actuals')
 
   // Income actuals from charges on this property's leases, mapped to income budget categories
   const { data: unitRows, error: unitErr } = await db.from('units').select('id').eq('property_id', propertyId)
-  if (unitErr) return c.json({ error: unitErr.message }, 500)
+  if (unitErr) return dbError(c, unitErr, 'Failed to load unit actuals')
   const unitIds = (unitRows ?? []).map((u: { id: string }) => u.id)
   let leaseIds: string[] = []
   if (unitIds.length) {
     const { data: leaseRows, error: leaseErr } = await db.from('leases').select('id').in('unit_id', unitIds)
-    if (leaseErr) return c.json({ error: leaseErr.message }, 500)
+    if (leaseErr) return dbError(c, leaseErr, 'Failed to load lease actuals')
     leaseIds = (leaseRows ?? []).map((l: { id: string }) => l.id)
   }
   let charges: { type: string; amount: number }[] = []
