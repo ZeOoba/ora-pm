@@ -108,8 +108,9 @@ export const portalApi = {
     amount_cents: number
     payment_method_id: string
     description?: string
+    client_request_id: string
   }) =>
-    stripeFetch<{ payment_intent_id: string; status: string }>('/payment-intent', {
+    stripeFetch<{ payment_intent_id: string; status: string; deduped?: boolean }>('/payment-intent', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
