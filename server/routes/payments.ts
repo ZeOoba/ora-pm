@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import { getDb } from '../db/client'
 import { PaymentInsertSchema, PaginationSchema } from '../lib/schemas'
+import { dbError } from '../lib/api-error'
 
 type Env = { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string }
 
@@ -19,7 +20,7 @@ paymentsRouter.get('/', async (c) => {
     .order('payment_date', { ascending: false })
   if (leaseId) q = q.eq('lease_id', leaseId)
   const { data, error } = await q.range(offset, offset + limit - 1)
-  if (error) return c.json({ error: error.message }, 500)
+  if (error) return dbError(c, error, 'Failed to load payments')
   return c.json({ data })
 })
 

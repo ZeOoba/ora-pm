@@ -13,12 +13,14 @@ vi.mock('../../server/middleware/admin-auth', () => ({
 // Mock @supabase/supabase-js — stateful, arg-aware mock (same style as
 // tests/routes/cron-billing.test.ts).
 //
-// `state.rec` is the single cam_reconciliations row used by the approve
-// tests. The conditional-update mock genuinely filters on `.eq('id', ...)`
-// and `.eq('status', 'draft')` against this row and mutates it on a match —
-// so a second approve() call against the SAME app instance really does see
-// the first call's committed status flip, exactly like two sequential
-// requests hitting a real Postgres row would.
+// `state.rec` is the single cam_reconciliations row in play. Both the
+// SELECT and UPDATE chains genuinely filter on whatever `.eq()`/`.neq()`
+// predicates the route code calls against this row and mutate it on a
+// match — so a second approve() or calculate() call against the SAME app
+// instance really does see the first call's committed state, exactly like
+// two sequential requests hitting a real Postgres row would. The INSERT
+// chain enforces the same (lease_id, reconciliation_year) uniqueness the
+// real DB constraint does, surfacing a 23505 on conflict.
 //
 // `state.charges` is a real in-memory charges table; the true-up insert
 // dedupes by `idempotency_key`, mirroring the DB's unique constraint (a
@@ -31,9 +33,16 @@ vi.mock('@supabase/supabase-js', () => ({ createClient: () => ({ from: mockFrom 
 
 type Row = Record<string, unknown>
 type PgError = { code?: string; message: string }
+type Predicate = { col: string; val: unknown; op: 'eq' | 'neq' }
+
+function matchesAll(rec: Row | null, predicates: Predicate[]): boolean {
+  if (!rec) return false
+  return predicates.every((p) => (p.op === 'eq' ? rec[p.col] === p.val : rec[p.col] !== p.val))
+}
 
 const chargesInsertSpy = vi.fn()
-const camUpsertSpy = vi.fn()
+const camUpdateSpy = vi.fn()
+const camInsertSpy = vi.fn()
 
 const state = {
   rec: null as Row | null,
@@ -43,52 +52,90 @@ const state = {
   charges: [] as Row[],
   chargesInsertError: null as PgError | null,
   reconciliationUpdateError: null as PgError | null,
+  camInsertError: null as PgError | null,
   listReconciliations: [] as Row[],
   listError: null as PgError | null,
-  upsertResult: null as Row | null,
-  upsertError: null as PgError | null,
 }
 
 function installDbMock() {
   mockFrom.mockImplementation((table: string) => {
     if (table === 'cam_reconciliations') {
       return {
-        select: vi.fn().mockReturnValue({
-          eq: vi.fn().mockImplementation(() => ({
-            single: vi.fn().mockImplementation(async () => {
-              if (state.recSelectError) return { data: null, error: state.recSelectError }
-              if (!state.rec) return { data: null, error: { message: 'not found', code: 'PGRST116' } }
-              return { data: state.rec, error: null }
-            }),
-          })),
-          order: vi.fn().mockImplementation(async () => {
-            if (state.listError) return { data: null, error: state.listError }
-            return { data: state.listReconciliations, error: null }
-          }),
+        // Generic SELECT chain: accumulates `.eq()` predicates, terminates
+        // in `.single()` (used by /:id/approve — 404s on no match) or
+        // `.maybeSingle()` (used by /calculate's existing-row check —
+        // `{data:null,error:null}` on no match, never an error).
+        select: vi.fn().mockImplementation(() => {
+          function chain(predicates: Predicate[]): Row {
+            return {
+              eq: (col: string, val: unknown) => chain([...predicates, { col, val, op: 'eq' as const }]),
+              single: vi.fn().mockImplementation(async () => {
+                if (state.recSelectError) return { data: null, error: state.recSelectError }
+                if (!matchesAll(state.rec, predicates)) {
+                  return { data: null, error: { message: 'not found', code: 'PGRST116' } }
+                }
+                return { data: state.rec, error: null }
+              }),
+              maybeSingle: vi.fn().mockImplementation(async () => {
+                if (state.recSelectError) return { data: null, error: state.recSelectError }
+                if (!matchesAll(state.rec, predicates)) return { data: null, error: null }
+                return { data: { status: (state.rec as Row).status }, error: null }
+              }),
+            }
+          }
+          return chain([])
         }),
-        update: vi.fn().mockImplementation((patch: Row) => ({
-          eq: vi.fn().mockImplementation((_col1: string, idVal: string) => ({
-            eq: vi.fn().mockImplementation((_col2: string, statusVal: string) => ({
+        order: vi.fn().mockImplementation(async () => {
+          if (state.listError) return { data: null, error: state.listError }
+          return { data: state.listReconciliations, error: null }
+        }),
+        // Generic conditional-UPDATE chain: accumulates `.eq()`/`.neq()`
+        // predicates, `.select()` mutates + returns [state.rec] only if
+        // ALL predicates match — zero rows otherwise (the atomic
+        // compare-and-swap both OI-046's /:id/approve and OI-069's
+        // /calculate rely on).
+        update: vi.fn().mockImplementation((patch: Row) => {
+          camUpdateSpy(patch)
+          function chain(predicates: Predicate[]): Row {
+            return {
+              eq: (col: string, val: unknown) => chain([...predicates, { col, val, op: 'eq' as const }]),
+              neq: (col: string, val: unknown) => chain([...predicates, { col, val, op: 'neq' as const }]),
               select: vi.fn().mockImplementation(async () => {
-                if (state.reconciliationUpdateError) {
-                  return { data: null, error: state.reconciliationUpdateError }
-                }
-                if (!state.rec || state.rec.id !== idVal || state.rec.status !== statusVal) {
-                  return { data: [], error: null } // conditional update matched zero rows
-                }
-                Object.assign(state.rec, patch)
+                if (state.reconciliationUpdateError) return { data: null, error: state.reconciliationUpdateError }
+                if (!matchesAll(state.rec, predicates)) return { data: [], error: null }
+                Object.assign(state.rec as Row, patch)
                 return { data: [state.rec], error: null }
               }),
-            })),
-          })),
-        })),
-        upsert: vi.fn().mockImplementation((row: Row) => {
-          camUpsertSpy(row)
+            }
+          }
+          return chain([])
+        }),
+        // INSERT enforces the same (lease_id, reconciliation_year)
+        // uniqueness the real DB constraint does — inserting into an
+        // existing lease/year surfaces a 23505, exactly like Postgres.
+        insert: vi.fn().mockImplementation((row: Row) => {
+          camInsertSpy(row)
           return {
             select: vi.fn().mockReturnValue({
               single: vi.fn().mockImplementation(async () => {
-                if (state.upsertError) return { data: null, error: state.upsertError }
-                return { data: state.upsertResult ?? { id: 'rec_new', ...row }, error: null }
+                if (state.camInsertError) return { data: null, error: state.camInsertError }
+                if (
+                  state.rec &&
+                  state.rec.lease_id === row.lease_id &&
+                  state.rec.reconciliation_year === row.reconciliation_year
+                ) {
+                  return {
+                    data: null,
+                    error: {
+                      code: '23505',
+                      message: 'duplicate key value violates unique constraint '
+                        + '"cam_reconciliations_lease_id_reconciliation_year_key"',
+                    },
+                  }
+                }
+                const newRec = { id: 'rec_new', ...row }
+                state.rec = newRec
+                return { data: newRec, error: null }
               }),
             }),
           }
@@ -177,10 +224,9 @@ beforeEach(() => {
   state.charges = []
   state.chargesInsertError = null
   state.reconciliationUpdateError = null
+  state.camInsertError = null
   state.listReconciliations = []
   state.listError = null
-  state.upsertResult = null
-  state.upsertError = null
   installDbMock()
 })
 
@@ -296,41 +342,198 @@ describe('POST /api/cam/calculate', () => {
     total_leased_sf: 50000,
   }
 
-  it('calculates and saves a CAM reconciliation for a valid body', async () => {
+  it('calculates and saves a CAM reconciliation for a valid body (first-ever calculation)', async () => {
+    // Default state.rec (from beforeEach) has a DIFFERENT lease_id than
+    // VALID_BODY — simulates "no existing row for this lease/year": the
+    // conditional UPDATE matches zero rows, falls through to INSERT.
     const res = await calculate(VALID_BODY)
     expect(res.status).toBe(200)
-    expect(camUpsertSpy).toHaveBeenCalledTimes(1)
+    expect(camUpdateSpy).toHaveBeenCalledTimes(1) // attempted first, matched nothing
+    expect(camInsertSpy).toHaveBeenCalledTimes(1) // fell through, succeeded
+    const json = await res.json() as { data: Row }
+    expect(json.data.lease_id).toBe(VALID_BODY.lease_id)
+    expect(json.data.status).toBe('draft')
   })
 
   // RED 4 — a string where a number is required is rejected before any DB write.
   it('rejects a non-numeric total_leased_sf with 422 and never touches the DB', async () => {
     const res = await calculate({ ...VALID_BODY, total_leased_sf: 'abc' })
     expect(res.status).toBe(422)
-    expect(camUpsertSpy).not.toHaveBeenCalled()
+    expect(camUpdateSpy).not.toHaveBeenCalled()
+    expect(camInsertSpy).not.toHaveBeenCalled()
   })
 
   it('rejects a missing lease_id with 422', async () => {
     const { lease_id: _drop, ...rest } = VALID_BODY
     const res = await calculate(rest)
     expect(res.status).toBe(422)
-    expect(camUpsertSpy).not.toHaveBeenCalled()
+    expect(camUpdateSpy).not.toHaveBeenCalled()
+    expect(camInsertSpy).not.toHaveBeenCalled()
   })
 
   it('rejects a negative total_property_recoverable_expenses with 422', async () => {
     const res = await calculate({ ...VALID_BODY, total_property_recoverable_expenses: -1 })
     expect(res.status).toBe(422)
-    expect(camUpsertSpy).not.toHaveBeenCalled()
+    expect(camUpdateSpy).not.toHaveBeenCalled()
+    expect(camInsertSpy).not.toHaveBeenCalled()
   })
 
-  // RED 5 — a genuine DB error on save must never leak the raw Postgres message.
-  it('does not leak the raw Postgres error message when the save fails', async () => {
-    state.upsertError = { code: '23503', message: 'insert or update on table "cam_reconciliations" violates foreign key constraint "cam_reconciliations_lease_id_fkey"' }
+  // RED 5 — a genuine DB error on the insert fallback must never leak the
+  // raw Postgres message.
+  it('does not leak the raw Postgres error message when the insert genuinely fails', async () => {
+    state.camInsertError = { code: '23503', message: 'insert or update on table "cam_reconciliations" violates foreign key constraint "cam_reconciliations_lease_id_fkey"' }
 
     const res = await calculate(VALID_BODY)
     expect(res.status).toBe(500)
     const text = await res.text()
     expect(text).not.toContain('foreign key constraint')
     expect(text).not.toContain('cam_reconciliations_lease_id_fkey')
+  })
+
+  it('does not leak the raw Postgres error message when the conditional update genuinely fails', async () => {
+    state.rec = freshRec({
+      lease_id: VALID_BODY.lease_id,
+      reconciliation_year: VALID_BODY.reconciliation_year,
+      status: 'draft',
+    })
+    state.reconciliationUpdateError = { code: '53300', message: 'too many connections for role "cam_reconciliations_writer"' }
+
+    const res = await calculate(VALID_BODY)
+    expect(res.status).toBe(500)
+    const text = await res.text()
+    expect(text).not.toContain('cam_reconciliations_writer')
+  })
+
+  // ---------------------------------------------------------------------------
+  // OI-069 — recalculating an already-billed reconciliation must not silently
+  // reopen it. Before this fix: /calculate's upsert unconditionally reset
+  // status to 'draft' even if it was 'billed', so a later /approve posted a
+  // NEW true-up charge whose idempotency key (`cam_true_up:<lease>:<year>`)
+  // collides with the OLD (already-posted) charge's key — the insert silently
+  // no-ops on the 23505 conflict (that IS the OI-046 idempotency guarantee,
+  // working exactly as designed), the status update still succeeds, and the
+  // API reports success while the ledger keeps the STALE amount. Silent
+  // under-billing, not an error anywhere in the call chain.
+  //
+  // REFUTE finding: a check-then-act pre-check (separate SELECT, then
+  // upsert) closes the single-request-rerun case but not a genuine race — a
+  // concurrent /:id/approve could bill the row in the window between the
+  // check and the write. The fix instead makes the update itself atomically
+  // conditional (`.neq('status','billed')`), the same "conditional update
+  // IS the concurrency control" idiom OI-046 already uses on /:id/approve —
+  // there is no window in which this can silently overwrite a billed row.
+  // ---------------------------------------------------------------------------
+  it('rejects recalculation of an already-billed reconciliation with 409, and the persisted row is untouched', async () => {
+    state.rec = freshRec({
+      lease_id: VALID_BODY.lease_id,
+      reconciliation_year: VALID_BODY.reconciliation_year,
+      status: 'billed',
+      true_up_amount: 500,
+    })
+
+    const res = await calculate(VALID_BODY)
+    expect(res.status).toBe(409)
+    const json = await res.json() as { error: string }
+    expect(json.error).toMatch(/already been billed/i)
+    // The stale $500 figure survives untouched — not silently overwritten
+    // with the new (would-be $700-ish) recalculation.
+    expect(state.rec?.status).toBe('billed')
+    expect(state.rec?.true_up_amount).toBe(500)
+  })
+
+  it('still allows recalculation of a draft (not yet billed) reconciliation, via the atomic conditional update', async () => {
+    state.rec = freshRec({
+      lease_id: VALID_BODY.lease_id,
+      reconciliation_year: VALID_BODY.reconciliation_year,
+      status: 'draft',
+    })
+
+    const res = await calculate(VALID_BODY)
+    expect(res.status).toBe(200)
+    expect(camUpdateSpy).toHaveBeenCalledTimes(1)
+    expect(camInsertSpy).not.toHaveBeenCalled() // update matched — never falls through to insert
+    expect(state.rec?.status).toBe('draft')
+  })
+
+  // The race the REFUTE pass found: a concurrent approve bills the row
+  // between when /calculate reads it (for the tenantSF/estimatedCamPaid
+  // lookups) and when /calculate writes its recalculated figures. Modeled
+  // here by flipping state.rec to 'billed' via the mock DIRECTLY (simulating
+  // a concurrent request's completed write) before calculate()'s own
+  // conditional update runs — the atomic `.neq('status','billed')` guard
+  // must see the CURRENT (billed) state at write time, not a stale read.
+  // (Guard is `.eq('status','draft')`, an allow-list — see the 'collected'
+  // regression test below for why not `.neq('status','billed')`.)
+  it('closes the TOCTOU race: a concurrent approve billing the row mid-request is not silently reopened', async () => {
+    state.rec = freshRec({
+      lease_id: VALID_BODY.lease_id,
+      reconciliation_year: VALID_BODY.reconciliation_year,
+      status: 'draft',
+      true_up_amount: 500,
+    })
+    // Simulate the concurrent approve's write landing on the leases lookup
+    // (the first DB call /calculate makes after validation) — by the time
+    // /calculate reaches its own conditional update, the row is billed.
+    const originalLeasesFrom = mockFrom.getMockImplementation()!
+    mockFrom.mockImplementation((table: string) => {
+      if (table === 'leases' && state.rec?.status === 'draft') {
+        Object.assign(state.rec as Row, { status: 'billed', true_up_amount: 500 })
+      }
+      return originalLeasesFrom(table)
+    })
+
+    const res = await calculate(VALID_BODY)
+    expect(res.status).toBe(409)
+    expect(state.rec?.status).toBe('billed')
+    expect(state.rec?.true_up_amount).toBe(500) // never overwritten with the recalculated figure
+  })
+
+  // 'collected' is the third legal status (0002_financial_tables.sql:71),
+  // currently unreachable elsewhere in this codebase but part of the DB's
+  // own CHECK constraint. The guard is deliberately an allow-list
+  // (`.eq('status','draft')`), not a deny-list against 'billed' — this
+  // pins that choice: a deny-list would let this exact recalculation
+  // silently succeed against a 'collected' row, reintroducing OI-069's bug
+  // class for the third status value the moment anything starts setting it.
+  it('also rejects recalculation of a "collected" reconciliation, not just "billed"', async () => {
+    state.rec = freshRec({
+      lease_id: VALID_BODY.lease_id,
+      reconciliation_year: VALID_BODY.reconciliation_year,
+      status: 'collected',
+      true_up_amount: 500,
+    })
+
+    const res = await calculate(VALID_BODY)
+    expect(res.status).toBe(409)
+    expect(state.rec?.status).toBe('collected')
+    expect(state.rec?.true_up_amount).toBe(500)
+  })
+
+  it('allows the first-ever calculation for a lease/year with no existing reconciliation', async () => {
+    // Default state.rec (from beforeEach) has a DIFFERENT lease_id/year than
+    // VALID_BODY, simulating "no existing row for this lease/year" — this is
+    // the same fixture every other test in this describe block already
+    // relies on implicitly; asserted explicitly here as an OI-069 regression
+    // guard so a future change can't silently start blocking first-time
+    // calculations.
+    const res = await calculate(VALID_BODY)
+    expect(res.status).toBe(200)
+    expect(camInsertSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not leak the raw Postgres error message if the already-billed existence check itself fails', async () => {
+    state.rec = freshRec({
+      lease_id: VALID_BODY.lease_id,
+      reconciliation_year: VALID_BODY.reconciliation_year,
+      status: 'billed',
+    })
+    state.recSelectError = { code: '57014', message: 'canceling statement due to statement timeout on relation "cam_reconciliations"' }
+
+    const res = await calculate(VALID_BODY)
+    expect(res.status).toBe(500)
+    const text = await res.text()
+    expect(text).not.toContain('statement timeout')
+    expect(text).not.toContain('relation "cam_reconciliations"')
   })
 })
 

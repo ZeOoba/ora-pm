@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import { getDb } from '../db/client'
 import { ExpenseInsertSchema, ExpenseUpdateSchema, PaginationSchema } from '../lib/schemas'
+import { dbError } from '../lib/api-error'
 
 type Env = { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string }
 
@@ -19,7 +20,7 @@ expensesRouter.get('/', async (c) => {
     .order('expense_date', { ascending: false })
   if (propertyId) q = q.eq('property_id', propertyId)
   const { data, error } = await q.range(offset, offset + limit - 1)
-  if (error) return c.json({ error: error.message }, 500)
+  if (error) return dbError(c, error, 'Failed to load expenses')
   return c.json({ data })
 })
 
@@ -51,6 +52,6 @@ expensesRouter.put('/:id', async (c) => {
 expensesRouter.delete('/:id', async (c) => {
   const db = getDb(c.env)
   const { error } = await db.from('expenses').delete().eq('id', c.req.param('id'))
-  if (error) return c.json({ error: error.message }, 400)
+  if (error) return dbError(c, error, 'Failed to delete expense')
   return c.json({ success: true })
 })

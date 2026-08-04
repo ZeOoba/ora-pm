@@ -20,6 +20,16 @@ vi.mock('../../server/middleware/admin-auth', () => ({
   adminAuthMiddleware: vi.fn(async (_c: unknown, next: () => Promise<void>) => next()),
 }))
 
+// OI-045: auto-pass the AAL2 step-up gate here — this file exercises
+// setup-intent/payment-intent's OWN logic (IDOR guards, amount caps,
+// idempotency), not the gate itself. The gate's behavior (including the
+// actual bypass it closes) has its own dedicated coverage:
+// tests/middleware/aal-guard.test.ts and
+// tests/routes/portal-autopay-aal-integration.test.ts.
+vi.mock('../../server/middleware/aal-guard', () => ({
+  requireAal2: vi.fn(async (_c: unknown, next: () => Promise<void>) => next()),
+}))
+
 // ---------------------------------------------------------------------------
 // Mock server/lib/stripe — return a controllable stub
 // ---------------------------------------------------------------------------

@@ -63,26 +63,107 @@ camRouter.post('/calculate', async (c) => {
     return c.json({ error: (err as Error).message }, 400)
   }
 
-  const { data, error } = await db
+  const patch = {
+    total_property_recoverable_expenses,
+    tenant_pro_rata_share_pct: result.tenantProRataSharePct,
+    estimated_cam_paid: estimatedCamPaid,
+    actual_cam_owed: result.actualCamOwed,
+    true_up_amount: result.trueUpAmount,
+    status: 'draft' as const,
+  }
+
+  const ALREADY_BILLED = {
+    error: 'This reconciliation has already been billed. Recalculating would silently reopen it '
+      + 'and orphan the posted true-up charge — void or credit the existing charge manually before '
+      + 'recalculating.',
+  }
+
+  // OI-069: this used to be a single `.upsert(..., {onConflict})` that
+  // unconditionally reset status to 'draft' — even for an already-'billed'
+  // row. A later /:id/approve on that reopened row would try to post a NEW
+  // true-up charge whose idempotency key (cam_true_up:<lease_id>:<year>)
+  // collides with the OLD charge's key; the collision is correctly
+  // swallowed as a no-op by OI-046's own guarantee (working as designed),
+  // but the status update still succeeds — the API reports success while
+  // the ledger silently keeps the STALE amount.
+  //
+  // A separate check-then-act pre-check (SELECT status, then upsert) closes
+  // the single-request-rerun case but not a genuine race: a concurrent
+  // /:id/approve can bill the row in the window between the check and the
+  // upsert, and the upsert's unconditional 'draft' reset reopens it anyway.
+  // This attempts the update FIRST, atomically guarded by `.eq('status',
+  // 'draft')` — the same "conditional update as the concurrency control"
+  // idiom OI-046 already uses on /:id/approve, just applied here instead of
+  // a separate read. A concurrent approve that bills the row after this
+  // request read it (for the lease/tenantSF/estimatedCamPaid lookups above)
+  // but before this UPDATE simply causes it to match zero rows — it can
+  // never silently overwrite a row that is not 'draft' at the moment of the
+  // write, because the DB evaluates the WHERE clause atomically. Allow-list
+  // ('draft' only), not a deny-list against 'billed' — 'collected' is a
+  // third legal status (0002_financial_tables.sql:71) that must be guarded
+  // identically, plus any future status value by default.
+  const { data: updated, error: updateErr } = await db
     .from('cam_reconciliations')
-    .upsert(
-      {
-        lease_id,
-        reconciliation_year,
-        total_property_recoverable_expenses,
-        tenant_pro_rata_share_pct: result.tenantProRataSharePct,
-        estimated_cam_paid: estimatedCamPaid,
-        actual_cam_owed: result.actualCamOwed,
-        true_up_amount: result.trueUpAmount,
-        status: 'draft',
-      },
-      { onConflict: 'lease_id,reconciliation_year' }
-    )
+    .update(patch)
+    .eq('lease_id', lease_id)
+    .eq('reconciliation_year', reconciliation_year)
+    .eq('status', 'draft')
+    .select()
+
+  if (updateErr) return dbError(c, updateErr, 'Failed to save CAM reconciliation')
+  if (updated && updated.length > 0) return c.json({ data: updated[0] })
+
+  // Zero rows updated: either no reconciliation exists yet for this
+  // lease/year (first-ever calculation — insert), or one exists and IS
+  // 'billed' (must reject, not silently reopen). Insert directly rather
+  // than reading again first — the unique constraint on
+  // (lease_id, reconciliation_year) makes an insert into an existing row
+  // fail (23505) instead of silently corrupting it, so this can only ever
+  // succeed for the genuinely-new case.
+  const { data: inserted, error: insertErr } = await db
+    .from('cam_reconciliations')
+    .insert({ lease_id, reconciliation_year, ...patch })
     .select()
     .single()
 
-  if (error) return dbError(c, error, 'Failed to save CAM reconciliation')
-  return c.json({ data })
+  if (!insertErr) return c.json({ data: inserted })
+  if (insertErr.code !== '23505') return dbError(c, insertErr, 'Failed to save CAM reconciliation')
+
+  // Insert conflicted — a row already exists. Either it's the 'billed' row
+  // this request should reject, or a concurrent first-time-calculation
+  // request for the SAME lease/year beat this one to creating it as
+  // 'draft' (a benign, narrow race unrelated to OI-069 — both requests are
+  // computing the same lease/year's first draft). Read it to tell which.
+  const { data: existing, error: existingErr } = await db
+    .from('cam_reconciliations')
+    .select('status')
+    .eq('lease_id', lease_id)
+    .eq('reconciliation_year', reconciliation_year)
+    .maybeSingle()
+
+  if (existingErr) return dbError(c, existingErr, 'Failed to check existing reconciliation')
+  // Allow-list, not a deny-list: only 'draft' may be recalculated. Guards
+  // 'billed' AND 'collected' (a third legal status per the CHECK constraint,
+  // 0002_financial_tables.sql:71 — currently unreachable in this codebase,
+  // but a deny-list here would silently reopen it too the moment anything
+  // starts setting it) identically, plus any future status value by default.
+  if (existing?.status !== 'draft') return c.json(ALREADY_BILLED, 409)
+
+  // Existing row is 'draft' (lost the first-time-calculation race above) —
+  // retry the same conditional update now that the row exists.
+  const { data: retried, error: retryErr } = await db
+    .from('cam_reconciliations')
+    .update(patch)
+    .eq('lease_id', lease_id)
+    .eq('reconciliation_year', reconciliation_year)
+    .eq('status', 'draft')
+    .select()
+
+  if (retryErr) return dbError(c, retryErr, 'Failed to save CAM reconciliation')
+  // Vanishingly narrow window: billed between the read above and this
+  // retry. Still correctly rejected, not silently reopened.
+  if (!retried || retried.length === 0) return c.json(ALREADY_BILLED, 409)
+  return c.json({ data: retried[0] })
 })
 
 // Approve CAM reconciliation — posts true-up charge to tenant ledger.

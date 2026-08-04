@@ -3,6 +3,7 @@ import Stripe from 'stripe'
 import { getDb } from '../db/client'
 import { getStripe } from '../lib/stripe'
 import { tenantAuthMiddleware } from '../middleware/tenant-auth'
+import { requireAal2 } from '../middleware/aal-guard'
 import { dbError } from '../lib/api-error'
 import type { Env } from '../index'
 
@@ -126,7 +127,14 @@ portalRouter.get('/documents', async (c) => {
 })
 
 // PATCH /api/portal/autopay — toggle autopay for a lease
-portalRouter.patch('/autopay', async (c) => {
+//
+// OI-045: this is the ACH-authorizing action the browser SPA's AAL2 gate
+// exists to protect — enabling it attaches a Stripe bank-account payment
+// method for recurring autopay. The SPA gate alone is client-side-only and
+// trivially bypassed by a direct API call (see server/middleware/aal-guard.ts's
+// header comment); requireAal2 enforces the same decision here, server-side,
+// so it holds regardless of how the request arrives.
+portalRouter.patch('/autopay', requireAal2, async (c) => {
   const userId = c.get('tenantUserId')
   const { lease_id, enabled, payment_method_id } = await c.req.json()
   if (!lease_id) return c.json({ error: 'lease_id required' }, 400)

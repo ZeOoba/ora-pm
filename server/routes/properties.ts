@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import { getDb } from '../db/client'
 import { PropertyInsertSchema, PropertyUpdateSchema, PaginationSchema } from '../lib/schemas'
+import { dbError } from '../lib/api-error'
 
 type Env = { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string }
 
@@ -17,7 +18,7 @@ propertiesRouter.get('/', async (c) => {
     .select('*')
     .order('name')
     .range(offset, offset + limit - 1)
-  if (error) return c.json({ error: error.message }, 500)
+  if (error) return dbError(c, error, 'Failed to load properties')
   return c.json({ data })
 })
 
@@ -28,7 +29,9 @@ propertiesRouter.get('/:id', async (c) => {
     .select('*, units(*)')
     .eq('id', c.req.param('id'))
     .single()
-  if (error) return c.json({ error: error.message }, 404)
+  // Not-found is a 404, not a 500 — dbError always returns 500, so this
+  // stays a plain generic response rather than routing through it.
+  if (error) return c.json({ error: 'Property not found' }, 404)
   return c.json({ data })
 })
 
@@ -60,6 +63,6 @@ propertiesRouter.put('/:id', async (c) => {
 propertiesRouter.delete('/:id', async (c) => {
   const db = getDb(c.env)
   const { error } = await db.from('properties').delete().eq('id', c.req.param('id'))
-  if (error) return c.json({ error: error.message }, 400)
+  if (error) return dbError(c, error, 'Failed to delete property')
   return c.json({ success: true })
 })
