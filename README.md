@@ -81,9 +81,10 @@ src/                          Admin SPA
   lib/                           supabase.ts (admin auth client), api.ts (fetch wrapper incl. file download),
                                 mutations.ts, format.ts
   portal/                       Tenant-facing SPA, mounted at /portal/* inside the same build
-    PortalApp.tsx / PortalRouter.tsx   Session bootstrap + nested route table
+    PortalApp.tsx / PortalRouter.tsx   Session bootstrap (incl. AAL2 MFA guard) + nested route table
     pages/                        Dashboard, PayNow, PaymentHistory, MyLease, Documents, Insurance, Account, Login
-    lib/                          supabase-portal.ts (separate anon-key client), portal-api.ts, charges.ts
+    components/                   PortalShell, PortalMfaChallenge (AAL2 step-up screen)
+    lib/                          supabase-portal.ts (separate anon-key client), portal-api.ts, charges.ts, mfa-guard.ts (pure AAL2 decision fn)
 supabase/migrations/           Ordered SQL migrations (0001 core entities -> 0010 ar_ledger fix); source of schema truth
 scripts/
   import-from-pipeline.mjs      One-time/rerunnable import from the ORA Lease Intelligence Pipeline's TENANTS.json
@@ -121,6 +122,8 @@ Deployment is Cloudflare Pages, driven by `wrangler.toml` (`name = "ora-pm"`, bu
 4. DNS (`pm.oxfordra.net`, `tenant.oxfordra.net` CNAME to `ora-pm.pages.dev`) — **requires Gabriel's explicit go-ahead before changing.**
 
 **Adding a new admin (OI-036):** admin accounts do not self-provision. In the Supabase dashboard, create the auth user for the new admin's `@oxfordra.net` address (Authentication → Users → Add user; no password needed, they'll sign in via magic link). Then add that exact email to the `ADMIN_EMAILS` secret — a comma-separated exact-match allowlist, case-insensitive — via `wrangler pages secret put ADMIN_EMAILS` (re-enter the full list; this overwrites, it does not append). `adminAuthMiddleware` (`server/middleware/admin-auth.ts`) fails closed with a 503 if `ADMIN_EMAILS` is unset or empty, and separately rejects with 403 any allowlisted email that also resolves to a `tenants` row — an admin cannot also be a tenant contact.
+
+**Tenant MFA lockout recovery (OI-045):** the tenant portal's Account page (`src/portal/pages/PortalAccount.tsx`) lets a tenant enroll a TOTP authenticator; `PortalApp.tsx`'s AAL2 guard (`src/portal/lib/mfa-guard.ts`) then requires a challenge/verify step on every subsequent login once a factor is verified. If a tenant loses their authenticator device (phone lost/reset, app uninstalled) they cannot self-service — there is no backup-code flow. Recovery: in the Supabase dashboard, Authentication → Users → select the tenant → remove their MFA factor(s) (equivalent to calling the admin `mfa.listFactors`/`deleteFactor` API for that user). This drops them back to `aal1`, clearing the guard, and they can log in and re-enroll from the Account page. There is no in-app tenant self-recovery path by design — an admin action is required.
 
 Cron jobs have no native Cloudflare Pages trigger — the ORA fleet scheduler (or, as a fallback, Windows Task Scheduler running `scripts/trigger-billing.ps1` on the 1st of the month) POSTs to `/api/cron/monthly-billing`, `/api/cron/critical-dates-alerts`, and `/api/cron/delinquency-check` with `Authorization: Bearer <CRON_SECRET>`.
 
