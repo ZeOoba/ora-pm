@@ -39,8 +39,11 @@ vi.mock('../../server/lib/stripe', () => ({
   getStripe: vi.fn(() => mockStripe),
 }))
 
+// checkRateLimit is now async and KV-backed (OI-038 remainder, Task 6) —
+// mocked here the same as before, just returning a resolved Promise so the
+// route's `await checkRateLimit(...)` call site works under test.
 vi.mock('../../server/lib/rate-limit', () => ({
-  checkRateLimit: vi.fn(() => ({ allowed: true, retryAfterMs: 0 })),
+  checkRateLimit: vi.fn(async () => ({ allowed: true, retryAfterMs: 0 })),
 }))
 
 // ---------------------------------------------------------------------------
@@ -453,8 +456,13 @@ describe('POST /api/stripe/payment-intent', () => {
 
     // 'auth-user-A' is the tenantUserId the mocked tenantAuthMiddleware sets —
     // the spoofable X-Forwarded-For value ('203.0.113.7') must never reach the
-    // rate limiter as the key.
-    expect(checkRateLimit).toHaveBeenCalledWith('auth-user-A')
+    // rate limiter as the key. (checkRateLimit's signature is now
+    // (kv, key, config) — Task 6; ENV has no RATE_LIMIT_KV, so kv is undefined.)
+    expect(checkRateLimit).toHaveBeenCalledWith(
+      undefined,
+      'auth-user-A',
+      expect.objectContaining({ scope: 'payment-intent', maxCalls: 5, windowMs: 60_000 }),
+    )
   })
 })
 
