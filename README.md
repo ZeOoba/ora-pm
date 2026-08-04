@@ -45,14 +45,14 @@ flowchart TB
 
     Intake -- "PDF bytes (filename pre-screened)" --> Anthropic["Anthropic API\nclaude-opus-5 (INTAKE_MODEL)"]
     StripeR <-- "PaymentIntents, webhooks" --> Stripe["Stripe (ACH / us_bank_account)"]
-    Cron -- "digest email" --> Resend["Resend API\n(critical-date + delinquency alerts)"]
+    Cron -- "email digest in response (OI-047)" --> Scheduler
 
-    Scheduler["ORA fleet scheduler /\nWindows Task Scheduler\nscripts/trigger-billing.ps1"] -- "POST + Bearer CRON_SECRET" --> Cron
+    Scheduler["Windows Task Scheduler (two separate tasks, no ORA fleet involved)\nscripts/trigger-billing.ps1 -- monthly-billing, 1st of month\n'ORA PM Crons' task (ping-crons.ps1) -- critical-dates-alerts +\ndelinquency-check, daily 9am; also sends the digest via Outlook COM"] -- "POST + Bearer CRON_SECRET" --> Cron
 
     Pipeline["ORA Lease Intelligence Pipeline\nTENANTS.json export"] -- "scripts/import-from-pipeline.mjs\n(service role, bypasses RLS)" --> DB
 ```
 
-**Reading the diagram:** the admin app and tenant portal are two independent route trees and two independent Supabase sessions sharing one API; every `/api/*` request is admin-JWT-gated except the five explicitly exempted prefixes (webhooks need a raw body for Stripe signature verification, cron uses its own Bearer-secret check, and portal/health/stripe have their own gates). The only outbound third-party calls are Anthropic (lease PDF extraction), Stripe (ACH payments/webhooks), and Resend (alert emails) — all server-side, never from the browser.
+**Reading the diagram:** the admin app and tenant portal are two independent route trees and two independent Supabase sessions sharing one API; every `/api/*` request is admin-JWT-gated except the five explicitly exempted prefixes (webhooks need a raw body for Stripe signature verification, cron uses its own Bearer-secret check, and portal/health/stripe have their own gates). The only outbound third-party calls are Anthropic (lease PDF extraction) and Stripe (ACH payments/webhooks) — all server-side, never from the browser. (Resend was removed from this Worker's egress path in OI-047 — critical-dates-alerts/delinquency-check now return the digest in the HTTP response instead of emailing directly; see the cron trigger note below.)
 
 ## Directory Structure
 
@@ -125,7 +125,7 @@ Deployment is Cloudflare Pages, driven by `wrangler.toml` (`name = "ora-pm"`, bu
 
 **Tenant MFA lockout recovery (OI-045):** the tenant portal's Account page (`src/portal/pages/PortalAccount.tsx`) lets a tenant enroll a TOTP authenticator; `PortalApp.tsx`'s AAL2 guard (`src/portal/lib/mfa-guard.ts`) then requires a challenge/verify step on every subsequent login once a factor is verified. If a tenant loses their authenticator device (phone lost/reset, app uninstalled) they cannot self-service — there is no backup-code flow. Recovery: in the Supabase dashboard, Authentication → Users → select the tenant → remove their MFA factor(s) (equivalent to calling the admin `mfa.listFactors`/`deleteFactor` API for that user). This drops them back to `aal1`, clearing the guard, and they can log in and re-enroll from the Account page. There is no in-app tenant self-recovery path by design — an admin action is required.
 
-Cron jobs have no native Cloudflare Pages trigger — the ORA fleet scheduler (or, as a fallback, Windows Task Scheduler running `scripts/trigger-billing.ps1` on the 1st of the month) POSTs to `/api/cron/monthly-billing`, `/api/cron/critical-dates-alerts`, and `/api/cron/delinquency-check` with `Authorization: Bearer <CRON_SECRET>`.
+Cron jobs have no native Cloudflare Pages trigger — two separate Windows Task Scheduler tasks POST to them with `Authorization: Bearer <CRON_SECRET>`. `scripts/trigger-billing.ps1` POSTs to `/api/cron/monthly-billing` on the 1st of the month. A standalone task ("ORA PM Crons", not part of the ORA fleet/`create_scheduled_task` registry) running `C:\Users\Owner\ora-pm-cron\ping-crons.ps1` POSTs to `/api/cron/critical-dates-alerts` and `/api/cron/delinquency-check` daily at 9:00 AM, and, since OI-047, also sends the resulting digest via Outlook COM (the Worker no longer emails directly — see the `email` field on each endpoint's response, and `RECIPIENTS` note in `server/routes/cron.ts`).
 
 ## Key Modules & Routes
 
