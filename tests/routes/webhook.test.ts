@@ -57,7 +57,10 @@ describe('POST /api/webhooks/stripe', () => {
     expect(json.error).toMatch(/stripe-signature/i)
   })
 
-  it('returns 400 if signature verification fails', async () => {
+  // OI-042: routes through the dbError helper (Task 7), which hardcodes 500
+  // and a generic public message — the raw Stripe SDK detail (algorithm,
+  // timestamp skew, raw-body hints) now only ever reaches console.error.
+  it('returns 500 with a generic message if signature verification fails', async () => {
     mockConstructEventAsync.mockRejectedValue(new Error('Invalid signature'))
 
     const res = await app.request('/api/webhooks/stripe', {
@@ -65,9 +68,10 @@ describe('POST /api/webhooks/stripe', () => {
       headers: { 'stripe-signature': 'bad_sig' },
       body: '{"id":"evt_test"}',
     }, env)
-    expect(res.status).toBe(400)
+    expect(res.status).toBe(500)
     const json = await res.json() as { error: string }
     expect(json.error).toMatch(/signature/i)
+    expect(json.error).not.toMatch(/Invalid signature/)
   })
 
   it('returns 200 with skipped:true for duplicate event (idempotency)', async () => {

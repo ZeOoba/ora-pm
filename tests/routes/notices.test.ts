@@ -66,12 +66,42 @@ describe('POST /api/leases/:id/notices', () => {
     expect(body.data.id).toBe('n2')
   })
 
-  it('returns 400 when notice_type is missing', async () => {
+  it('returns 422 when notice_type is missing', async () => {
     const res = await app.request('/api/leases/lease_1/notices', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sent_date: '2026-06-05' }),
+      body: JSON.stringify({ sent_date: '2026-06-05', method: 'email' }),
     }, env)
-    expect(res.status).toBe(400)
+    expect(res.status).toBe(422)
+    const body = await res.json() as { error: Record<string, string[]> }
+    expect(body.error.notice_type).toBeDefined()
+  })
+
+  // RED (OI-041 remainder): this route used to destructure explicit fields
+  // by hand with no Zod validation — an attacker-controlled id/created_at
+  // would previously have been silently ignored only because the hand-
+  // picked destructure happened not to include them. Now enforced by
+  // LeaseNoticeInsertSchema.strict() the same way as every other site.
+  it('rejects an unexpected field (id) with 422 and never calls insert', async () => {
+    const insertSpy = vi.fn()
+    mockFrom.mockImplementation((table: string) => {
+      if (table === 'tenant_notices') return {
+        insert: insertSpy.mockReturnValue({
+          select: vi.fn().mockReturnValue({ single: vi.fn() }),
+        }),
+      }
+      return { select: vi.fn() }
+    })
+
+    const res = await app.request('/api/leases/lease_1/notices', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        notice_type: 'late_payment', sent_date: '2026-06-05', method: 'email',
+        id: 'attacker-uuid', created_at: '1999-01-01',
+      }),
+    }, env)
+    expect(res.status).toBe(422)
+    expect(insertSpy).not.toHaveBeenCalled()
   })
 })

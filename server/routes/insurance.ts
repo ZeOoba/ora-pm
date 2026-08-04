@@ -1,5 +1,7 @@
 import { Hono } from 'hono'
 import { getDb } from '../db/client'
+import { InsuranceInsertSchema, InsuranceUpdateSchema } from '../lib/schemas'
+import { dbError } from '../lib/api-error'
 
 type Env = { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string }
 
@@ -11,7 +13,7 @@ insuranceRouter.get('/', async (c) => {
     .from('insurance_certificates')
     .select('*, tenants(name)')
     .order('expiration_date')
-  if (error) return c.json({ error: error.message }, 500)
+  if (error) return dbError(c, error, 'Failed to load insurance certificates')
 
   // Enrich status based on actual expiration date
   const today = Date.now()
@@ -30,23 +32,29 @@ insuranceRouter.get('/', async (c) => {
 
 insuranceRouter.post('/', async (c) => {
   const db = getDb(c.env)
+  const raw = await c.req.json()
+  const parsed = InsuranceInsertSchema.safeParse(raw)
+  if (!parsed.success) return c.json({ error: parsed.error.flatten().fieldErrors }, 422)
   const { data, error } = await db
     .from('insurance_certificates')
-    .insert(await c.req.json())
+    .insert(parsed.data)
     .select()
     .single()
-  if (error) return c.json({ error: error.message }, 400)
+  if (error) return dbError(c, error, 'Failed to create insurance certificate')
   return c.json({ data }, 201)
 })
 
 insuranceRouter.put('/:id', async (c) => {
   const db = getDb(c.env)
+  const raw = await c.req.json()
+  const parsed = InsuranceUpdateSchema.safeParse(raw)
+  if (!parsed.success) return c.json({ error: parsed.error.flatten().fieldErrors }, 422)
   const { data, error } = await db
     .from('insurance_certificates')
-    .update(await c.req.json())
+    .update(parsed.data)
     .eq('id', c.req.param('id'))
     .select()
     .single()
-  if (error) return c.json({ error: error.message }, 400)
+  if (error) return dbError(c, error, 'Failed to update insurance certificate')
   return c.json({ data })
 })

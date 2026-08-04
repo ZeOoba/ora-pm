@@ -43,14 +43,42 @@ describe('POST /api/tenants/:id/correspondence', () => {
     expect(body.data.id).toBe('c1')
   })
 
-  it('returns 400 when required fields are missing', async () => {
+  it('returns 422 when required fields are missing', async () => {
     const res = await app.request('/api/tenants/tenant_1/correspondence', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ direction: 'outbound' }),
     }, env)
-    expect(res.status).toBe(400)
-    const body = await res.json() as { error: string }
-    expect(body.error).toMatch(/required/)
+    expect(res.status).toBe(422)
+    const body = await res.json() as { error: Record<string, string[]> }
+    expect(body.error.contact_date).toBeDefined()
+    expect(body.error.subject).toBeDefined()
+  })
+
+  // RED (OI-041 remainder): this route used to destructure explicit fields
+  // by hand with no Zod validation. Now enforced by
+  // TenantCorrespondenceInsertSchema.strict().
+  it('rejects an unexpected field (id) with 422 and never calls insert', async () => {
+    const insertSpy = vi.fn()
+    mockFrom.mockImplementation((table: string) => {
+      if (table === 'correspondence_log') return {
+        insert: insertSpy.mockReturnValue({
+          select: vi.fn().mockReturnValue({ single: vi.fn() }),
+        }),
+      }
+      return { select: vi.fn() }
+    })
+
+    const res = await app.request('/api/tenants/tenant_1/correspondence', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        direction: 'outbound', contact_date: '2026-06-05', subject: 'Rent due',
+        summary: 'Called about June rent', method: 'phone',
+        id: 'attacker-uuid', created_at: '1999-01-01',
+      }),
+    }, env)
+    expect(res.status).toBe(422)
+    expect(insertSpy).not.toHaveBeenCalled()
   })
 })
