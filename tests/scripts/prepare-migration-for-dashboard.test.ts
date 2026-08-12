@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { execFileSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import {
@@ -12,6 +13,26 @@ import {
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const scriptPath = join(__dirname, '../../scripts/prepare-migration-for-dashboard.mjs')
+
+describe('the script source stays importable under vitest', () => {
+  // Regression guard for the shebang trap. This test file imports functions
+  // from the .mjs, so vitest runs the .mjs through Vite's SSR transform, which
+  // hoists injected `__vite_ssr_import__` boilerplate to the top of the module.
+  // A leading `#!/usr/bin/env node` shebang then ends up mid-module, and V8
+  // only accepts `#!` at byte 0 — anywhere else it throws
+  // "SyntaxError: Invalid or unexpected token", which fails the ENTIRE suite at
+  // load time (0 tests run). That manifested only on some platforms (Windows /
+  // newer Node), so CI stayed green while local runs went red. This assertion
+  // reads the raw source and runs identically everywhere, so a re-added shebang
+  // is caught on every platform — not just the ones where the transform trips.
+  // The script is always invoked as `node scripts/…` (see its usage banner and
+  // supabase/migrations/README.md) and is not marked executable, so it needs no
+  // shebang.
+  it('does not begin with a shebang (breaks Vite SSR transform when imported)', () => {
+    const source = readFileSync(scriptPath, 'utf8')
+    expect(source.startsWith('#!')).toBe(false)
+  })
+})
 
 describe('deriveVersionAndName', () => {
   it('splits a well-formed migration filename', () => {

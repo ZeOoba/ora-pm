@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 // This Code sandbox has no SUPABASE_ACCESS_TOKEN configured, so `supabase db
 // push`/`migration up` — the only commands that auto-write a row into
 // supabase_migrations.schema_migrations — can't run here. Migrations have
