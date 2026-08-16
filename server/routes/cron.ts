@@ -5,6 +5,29 @@ import { buildMonthlyCharges } from '../lib/billing'
 import { cronAuthMiddleware } from '../middleware/auth'
 import { checkRateLimit } from '../lib/rate-limit'
 
+// Runs `fetchChunk` once per chunkSize-sized slice of `ids`, concatenating results — used to keep
+// every `.in('lease_id', ids)` bulk query under a proxy URL-length limit regardless of how many
+// ids are involved, instead of either one unbounded query (risks the URL-length wall) or one
+// query per id (the O(leases) subrequest bug this whole file exists to avoid). Stops and surfaces
+// the error on the first failing chunk — never returns partial data silently, since a caller here
+// must be able to tell "some ids' state is unknown" from "confirmed empty."
+async function fetchChunked<T>(
+  ids: string[],
+  chunkSize: number,
+  // PromiseLike, not Promise: Supabase's un-awaited query builder is thenable (awaitable at
+  // runtime) but doesn't structurally satisfy the full Promise interface (catch/finally/
+  // Symbol.toStringTag) that TS requires for a bare Promise<...> parameter type.
+  fetchChunk: (chunk: string[]) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>
+): Promise<{ data: T[]; error: { message: string } | null }> {
+  const all: T[] = []
+  for (let i = 0; i < ids.length; i += chunkSize) {
+    const { data, error } = await fetchChunk(ids.slice(i, i + chunkSize))
+    if (error) return { data: all, error }
+    all.push(...(data ?? []))
+  }
+  return { data: all, error: null }
+}
+
 type Env = {
   SUPABASE_URL: string
   SUPABASE_SERVICE_ROLE_KEY: string
@@ -43,6 +66,62 @@ cronRouter.use('/*', async (c, next) => {
 })
 
 // POST /api/cron/monthly-billing?year=2026&month=6
+//
+// OI-162/#1 (2026-08-16): the original per-lease-insert, per-lease-query implementation hit
+// Cloudflare Workers' per-invocation subrequest limit on its first production run (139 active
+// leases) — 49 billed, 90 got nothing, and a re-run would hit the identical wall every time
+// (fresh subrequest budget per invocation, same O(leases) shape). Full five-round incident/fix
+// history (the early rounds moved the same underlying failure mode deeper into the autopay debit
+// path before landing here — worth reading before "simplifying" this file back toward per-lease
+// queries): ~/.claude/projects/.../memory/event_log.md, entry "OI-162 monthly-billing batching
+// fix", 2026-08-16 (ORA's cross-repo history log — not a file in this repo).
+//
+// Design invariants this file depends on — do not violate silently:
+//   - Charge posting and every "did we already collect autopay" check are BULK queries
+//     (`.upsert`/`.in`, chunked via `fetchChunked` at BULK_QUERY_CHUNK_SIZE ids) so subrequest
+//     count stays O(1) — or O(ids / 100) for the chunked ones — never O(leases).
+//   - Debit-input lookups (open-charges, period-paid, ar_ledger balance) are fetched for the
+//     FULL not-yet-collected set, not just the batch about to be processed — resolving every
+//     lease's debit amount before applying AUTOPAY_BATCH_LIMIT is what lets zero-debit leases
+//     (already paid manually) clear immediately instead of occupying a batch slot forever. Only
+//     leases that need an actual Stripe call are subject to the batch limit.
+//   - A failed charge upsert (`chargesBulkFailed`) defers the ENTIRE autopay phase — it does not
+//     run debit logic against charges known not to have been posted (that used to compute every
+//     lease as zero-debit and report `remaining: 0`, i.e. "nothing left to do," when the whole
+//     portfolio was actually still outstanding).
+//   - `remaining` must equal every eligible lease that did NOT get either resolved-as-zero-debit
+//     or a debit attempt this invocation — a failed pre-check, a failed debit-input lookup, the
+//     batch-limit slice, or a deferred-by-chargesBulkFailed run all count. `trigger-billing.ps1`
+//     loops on this; an undercount there is silent, permanent revenue under-collection, not a retry.
+//   - `chargesBulkFailed` / `priorAutopayCheckFailed` / `debitInputsBulkFailed` are whole-batch
+//     failures ("never debit blind") and return HTTP 500 — never look like a normal 200.
+//   - AUTOPAY_BATCH_LIMIT is MAX SAFE for this endpoint's subrequest budget, not "conservative."
+//     Fixed cost per invocation is `2 + ceil(eligible/100) + 3×ceil(notYetCollected/100)`
+//     (leases-select + charges-upsert + prior-check chunks + the three debit-input chunk sets),
+//     plus 2 more if RATE_LIMIT_KV is ever provisioned (currently commented out in wrangler.toml,
+//     costs 0 today). Each Stripe call is 1-2 subrequests (`maxNetworkRetries: 1` in
+//     server/lib/stripe.ts) plus 1 for the payments insert. Raising the limit means recomputing
+//     that formula against the actual Cloudflare plan's ceiling (Free=50, Paid=1000 —
+//     UNVERIFIED from this repo, confirm in the dashboard), not eyeballing a smaller number.
+//     AUTOPAY_BATCH_LIMIT × trigger-billing.ps1's MAX_INVOCATIONS is also a hard per-run debit
+//     ceiling (64 today) — see that script for the capacity note.
+//   - Every Stripe call carries a deterministic `idempotencyKey` (`autopay:<leaseId>:<period>`),
+//     so a retry — from `maxNetworkRetries`, a re-run, or the drain loop — is never itself a
+//     double-charge risk within Stripe's ~24h idempotency window.
+//   - KNOWN RESIDUAL (not fixed): `leases`/`needsDebit` have no explicit ordering, so a lease
+//     whose Stripe call fails DETERMINISTICALLY every attempt (bad payment method, revoked
+//     mandate, a bad STRIPE_SECRET_KEY failing all of them) can re-occupy the same batch slot on
+//     every drain-loop iteration, starving healthy leases behind it — the same failure shape the
+//     zero-debit-lease fix above closed, triggered by a different condition. Mitigated
+//     client-side (`trigger-billing.ps1` breaks the drain loop if `remaining` stops decreasing),
+//     not fixed server-side. A real fix needs failure-aware lease ordering (e.g. a last-attempt
+//     timestamp or failure count that rotates persistently-failing leases to the back) — deferred
+//     given zero autopay-eligible leases exist in production today.
+// Currently ZERO leases are autopay-eligible in production (autopay enrollment isn't reachable
+// from the tenant portal yet, OI-068) — the entire debit-processing path, batch limit, and drain
+// loop are unexercised at real scale. This is deliberately in place before that gap closes.
+// `errors` mixes units (charges vs. leases) — `chargeErrors`/`autopayErrors` split it, but
+// `trigger-billing.ps1` only checks the sum today; not fixed further, by design (event_log.md).
 cronRouter.post('/monthly-billing', async (c) => {
   const db = getDb(c.env)
   const now = new Date()
@@ -52,6 +131,9 @@ cronRouter.post('/monthly-billing', async (c) => {
   if (isNaN(year) || isNaN(month) || month < 1 || month > 12) {
     return c.json({ error: 'Invalid year or month' }, 400)
   }
+
+  const AUTOPAY_BATCH_LIMIT = 8
+  const BULK_QUERY_CHUNK_SIZE = 100
 
   const periodStartStr = `${year}-${String(month).padStart(2, '0')}-01`
   const lastDay = new Date(year, month, 0).getDate()
@@ -64,163 +146,229 @@ cronRouter.post('/monthly-billing', async (c) => {
 
   if (leaseErr) return c.json({ error: leaseErr.message }, 500)
 
-  let posted = 0, skipped = 0, errors = 0
+  let posted = 0, skipped = 0
+  let chargeErrors = 0, autopayErrors = 0
   const errorMessages: string[] = []
+  let chargesBulkFailed = false
 
-  for (const lease of (leases ?? [])) {
-    const { charges } = buildMonthlyCharges({
+  // --- Step 1: charge posting — one bulk upsert for the whole portfolio, not one insert/charge. ---
+  const allCharges = (leases ?? []).flatMap((lease) =>
+    buildMonthlyCharges({
       leaseId: lease.id,
       baseRentMonthly: lease.base_rent_monthly,
       camEstimateMonthly: lease.cam_estimate_monthly,
       leaseStartDate: lease.start_date,
       periodYear: year,
       periodMonth: month,
-    })
+    }).charges
+  )
 
-    for (const charge of charges) {
-      const { error: insErr } = await db.from('charges').insert(charge)
-      if (insErr) {
-        if (insErr.code === '23505') {
-          skipped++ // unique constraint = already posted (idempotent)
-        } else {
-          errors++
-          errorMessages.push(`lease ${lease.id}: ${insErr.message}`)
-        }
-      } else {
-        posted++
-      }
+  if (allCharges.length > 0) {
+    const { data: insertedCharges, error: chargesErr } = await db
+      .from('charges')
+      .upsert(allCharges, { onConflict: 'idempotency_key', ignoreDuplicates: true })
+      .select('idempotency_key')
+
+    if (chargesErr) {
+      chargesBulkFailed = true
+      chargeErrors += allCharges.length
+      errorMessages.push(`bulk charge upsert failed (batch of ${allCharges.length}), ZERO charges posted this run: ${chargesErr.message}`)
+    } else {
+      posted += insertedCharges?.length ?? 0
+      skipped += allCharges.length - (insertedCharges?.length ?? 0)
     }
+  }
 
-    // Auto-pay: create a PaymentIntent if autopay is enabled and bank account is saved
+  // --- Step 2: autopay eligibility + prior-period pre-check (bulk, one query for all eligible). ---
+  const eligibleLeases = (leases ?? []).filter((lease) => {
     const tenant = Array.isArray(lease.tenants) ? lease.tenants[0] : lease.tenants
-    if (lease.autopay_enabled && lease.autopay_payment_method_id && tenant?.stripe_customer_id) {
-      // Idempotency guard: one autopay collection per lease per billing period.
-      // autopay_period is stamped with the canonical period start (periodStartStr,
-      // always the first of the billing month), so a catch-up-burst re-run or a
-      // manual re-trigger days later produces the same value and is caught here —
-      // and, in a concurrent race, by the payments_autopay_period_uniq index below.
-      const { data: priorAutopay, error: priorErr } = await db
-        .from('payments')
-        .select('id')
-        .eq('lease_id', lease.id)
-        .eq('autopay_period', periodStartStr)
-        .limit(1)
+    return Boolean(lease.autopay_enabled && lease.autopay_payment_method_id && tenant?.stripe_customer_id)
+  })
 
-      if (priorErr) {
-        // Unknown whether this period was already collected — never debit blind.
-        errors++
-        errorMessages.push(`autopay lease ${lease.id}: period pre-check failed: ${priorErr.message}`)
-        continue
+  let alreadyCollected = new Set<string>()
+  let priorAutopayCheckFailed = false
+
+  // Round-5 review finding #2: a failed charge upsert must stop autopay here too, not just
+  // return 500 at the end. Before this guard, a chargesBulkFailed run still ran the full autopay
+  // phase against charges that are known NOT to have been posted — every lease then computed
+  // periodChargeTotal=0 (nothing in the DB to find) and got silently counted `skipped` ("nothing
+  // outstanding") instead of deferred, `remaining` read 0 ("nothing left to do"), and 4-6
+  // subrequests were spent on input the code already knew was garbage. Skip straight to
+  // "everything eligible is still outstanding" instead.
+  if (eligibleLeases.length > 0 && !chargesBulkFailed) {
+    // Idempotency guard: one autopay collection per lease per billing period. autopay_period is
+    // stamped with the canonical period start (periodStartStr, always the first of the billing
+    // month), so a catch-up-burst re-run or a manual re-trigger days later produces the same
+    // value and is caught here — and, in a concurrent race, by the payments_autopay_period_uniq
+    // index below. Chunked (via fetchChunked) at BULK_QUERY_CHUNK_SIZE ids per `.in()` call — an
+    // unbounded single call risks a proxy URL-length limit once the eligible-lease count grows
+    // past ~180-200.
+    const eligibleIds = eligibleLeases.map((l) => l.id)
+    const { data: priorAutopay, error: priorErr } = await fetchChunked(
+      eligibleIds,
+      BULK_QUERY_CHUNK_SIZE,
+      (chunk) => db.from('payments').select('lease_id').in('lease_id', chunk).eq('autopay_period', periodStartStr)
+    )
+
+    if (priorErr) {
+      // Unknown whether these leases were already collected — never debit blind. Skip the
+      // whole autopay phase this run rather than guessing per lease; next run retries all of it.
+      priorAutopayCheckFailed = true
+      autopayErrors += eligibleLeases.length
+      errorMessages.push(`autopay period pre-check failed (batch of ${eligibleLeases.length}), autopay skipped entirely this run: ${priorErr.message}`)
+    } else {
+      for (const p of priorAutopay as { lease_id: string }[]) alreadyCollected.add(p.lease_id)
+    }
+  }
+
+  // --- Step 3: autopay debit processing. ---
+  const autopayDeferred = priorAutopayCheckFailed || chargesBulkFailed
+  const notYetCollected = autopayDeferred
+    ? []
+    : eligibleLeases.filter((l) => !alreadyCollected.has(l.id))
+  if (!autopayDeferred) {
+    skipped += eligibleLeases.length - notYetCollected.length // already collected this period
+  }
+  let remaining = autopayDeferred ? eligibleLeases.length : 0
+  let debitInputsBulkFailed = false
+
+  if (notYetCollected.length > 0) {
+    const ids = notYetCollected.map((l) => l.id)
+
+    // Debit inputs are fetched for the FULL not-yet-collected set (chunked at
+    // BULK_QUERY_CHUNK_SIZE ids per query, same pattern as the prior-period pre-check above) —
+    // NOT pre-limited to AUTOPAY_BATCH_LIMIT. Round-3 limited this fetch itself to a small batch,
+    // which meant a run of already-fully-paid leases (debitAmount <= 0 — no Stripe call, cheap to
+    // resolve) could occupy the whole batch and starve leases that genuinely needed collecting:
+    // the drain loop would then report the same `remaining` count forever, never converging
+    // (round-4 review, empirically reproduced: 8-of-10 zero-debit leases deadlocked at
+    // remaining=2 for 8 straight invocations). Fetching inputs for everyone lets zero-debit
+    // leases resolve immediately regardless of position, and AUTOPAY_BATCH_LIMIT is applied only
+    // to the leases that actually need a Stripe call below.
+    const [openChargesRes, periodPaymentsRes, arRes] = await Promise.all([
+      fetchChunked(ids, BULK_QUERY_CHUNK_SIZE, (chunk) =>
+        db.from('charges').select('lease_id, amount').in('lease_id', chunk).gte('due_date', periodStartStr).lte('due_date', periodEndStr)),
+      // Period-paid: manual (check/wire/other) or succeeded ACH payments dated WITHIN this
+      // period. Autopay is only authorized to collect THIS period's rent — it must never sweep
+      // older, unrelated arrears via an automated ACH debit the tenant didn't specifically
+      // authorize for that purpose.
+      fetchChunked(ids, BULK_QUERY_CHUNK_SIZE, (chunk) =>
+        db.from('payments').select('lease_id, amount, method, stripe_status').in('lease_id', chunk).gte('payment_date', periodStartStr).lte('payment_date', periodEndStr)),
+      // Lifetime cap: never debit more than the lease's true outstanding AR balance — however
+      // period-scoping above is what prevents re-debiting a tenant who already paid THIS period
+      // and what prevents sweeping arrears from an earlier period into an unrelated autopay charge.
+      fetchChunked(ids, BULK_QUERY_CHUNK_SIZE, (chunk) => db.from('ar_ledger').select('lease_id, balance').in('lease_id', chunk)),
+    ])
+
+    if (openChargesRes.error || periodPaymentsRes.error || arRes.error) {
+      // Unknown open-charge/paid/balance state for this whole set — never debit blind. None of
+      // notYetCollected got a debit attempt, so all of it is still outstanding.
+      debitInputsBulkFailed = true
+      autopayErrors += notYetCollected.length
+      remaining += notYetCollected.length
+      const which = [
+        openChargesRes.error && 'open-charges',
+        periodPaymentsRes.error && 'period-payments',
+        arRes.error && 'ar_ledger',
+      ].filter(Boolean).join(', ')
+      errorMessages.push(`autopay input lookup failed (${which}) for a batch of ${notYetCollected.length} leases, skipped: ${(openChargesRes.error ?? periodPaymentsRes.error ?? arRes.error)?.message}`)
+    } else {
+      const chargesByLease = new Map<string, number>()
+      for (const row of openChargesRes.data as { lease_id: string; amount: number }[]) {
+        chargesByLease.set(row.lease_id, (chargesByLease.get(row.lease_id) ?? 0) + row.amount)
       }
-      if (priorAutopay && priorAutopay.length > 0) {
-        skipped++ // this period already collected (idempotent)
-        continue
+      const paidByLease = new Map<string, number>()
+      for (const p of periodPaymentsRes.data as { lease_id: string; amount: number; method: string; stripe_status?: string }[]) {
+        const counts = (p.method === 'ach_stripe' && p.stripe_status === 'succeeded') || ['check', 'wire', 'other'].includes(p.method)
+        if (counts) paidByLease.set(p.lease_id, (paidByLease.get(p.lease_id) ?? 0) + p.amount)
+      }
+      const balanceByLease = new Map<string, number>()
+      for (const row of arRes.data as { lease_id: string; balance: number }[]) {
+        balanceByLease.set(row.lease_id, row.balance)
       }
 
-      const { data: openCharges } = await db
-        .from('charges')
-        .select('amount')
-        .eq('lease_id', lease.id)
-        .gte('due_date', periodStartStr)
-        .lte('due_date', periodEndStr)
-
-      const periodChargeTotal = (openCharges ?? []).reduce((s: number, ch: { amount: number }) => s + ch.amount, 0)
-
-      // Period-paid: manual (check/wire/other) or succeeded ACH payments dated
-      // WITHIN this period. Autopay is only authorized to collect THIS period's
-      // rent — it must never sweep older, unrelated arrears via an automated
-      // ACH debit the tenant didn't specifically authorize for that purpose.
-      const { data: periodPayments, error: ppErr } = await db
-        .from('payments')
-        .select('amount, method, stripe_status')
-        .eq('lease_id', lease.id)
-        .gte('payment_date', periodStartStr)
-        .lte('payment_date', periodEndStr)
-
-      if (ppErr) {
-        errors++
-        errorMessages.push(`autopay lease ${lease.id}: period-payment lookup failed: ${ppErr.message}`)
-        continue
-      }
-
-      const periodPaid = (periodPayments ?? []).reduce(
-        (s: number, p: { amount: number; method: string; stripe_status?: string }) => {
-          if (p.method === 'ach_stripe' && p.stripe_status === 'succeeded') return s + p.amount
-          if (['check', 'wire', 'other'].includes(p.method)) return s + p.amount
-          return s
-        },
-        0,
-      )
-      const periodOutstanding = Math.max(0, periodChargeTotal - periodPaid)
-
-      // Lifetime cap: never debit more than the lease's true outstanding AR
-      // balance, however period-scoping above is what prevents re-debiting a
-      // tenant who already paid THIS period and what prevents sweeping arrears
-      // from an earlier period into an unrelated autopay charge.
-      const { data: arRows, error: arErr } = await db
-        .from('ar_ledger')
-        .select('balance')
-        .eq('lease_id', lease.id)
-        .limit(1)
-
-      if (arErr) {
-        // Unknown balance — never debit blind.
-        errors++
-        errorMessages.push(`autopay lease ${lease.id}: balance lookup failed: ${arErr.message}`)
-        continue
-      }
-
-      const outstandingBalance = arRows?.[0]?.balance ?? 0
-      const debitAmount = Math.min(periodOutstanding, outstandingBalance)
-      if (debitAmount <= 0) {
-        skipped++ // nothing outstanding to collect for this period
-        continue
-      }
-
-      try {
-        const stripe = getStripe(c.env.STRIPE_SECRET_KEY)
-        const pi = await stripe.paymentIntents.create({
-          amount: Math.round(debitAmount * 100),
-          currency: 'usd',
-          customer: tenant.stripe_customer_id,
-          payment_method: lease.autopay_payment_method_id,
-          payment_method_types: ['us_bank_account'],
-          confirm: true,
-          off_session: true,
-          description: `Autopay — ${periodStartStr}`,
-          metadata: { lease_id: lease.id, tenant_id: tenant.id },
-        }, {
-          // Deterministic per lease+period: a re-run inside Stripe's idempotency
-          // window returns the original PaymentIntent instead of debiting again.
-          idempotencyKey: `autopay:${lease.id}:${periodStartStr}`,
-        })
-        const { error: payErr } = await db.from('payments').insert({
-          lease_id: lease.id,
-          payment_date: new Date().toISOString().slice(0, 10),
-          amount: debitAmount,
-          method: 'ach_stripe',
-          stripe_payment_intent_id: pi.id,
-          stripe_status: pi.status,
-          notes: `Autopay — ${periodStartStr}`,
-          autopay_period: periodStartStr,
-        })
-        if (payErr) {
-          if (payErr.code === '23505') {
-            skipped++ // concurrent run recorded this period first (idempotent)
-          } else {
-            // Real insert failure — the debit happened but wasn't recorded; surface loudly.
-            errors++
-            errorMessages.push(`autopay lease ${lease.id}: payment ${pi.id} created but not recorded: ${payErr.message}`)
-          }
+      // Resolve EVERY not-yet-collected lease's debit amount now (cheap, in-memory) so
+      // zero-debit leases are settled this run regardless of batch position — only leases that
+      // actually need a real Stripe call are subject to AUTOPAY_BATCH_LIMIT.
+      const debitAmountByLease = new Map<string, number>()
+      const needsDebit: typeof notYetCollected = []
+      for (const lease of notYetCollected) {
+        const periodChargeTotal = chargesByLease.get(lease.id) ?? 0
+        const periodPaid = paidByLease.get(lease.id) ?? 0
+        const periodOutstanding = Math.max(0, periodChargeTotal - periodPaid)
+        const outstandingBalance = balanceByLease.get(lease.id) ?? 0
+        const debitAmount = Math.min(periodOutstanding, outstandingBalance)
+        debitAmountByLease.set(lease.id, debitAmount)
+        if (debitAmount <= 0) {
+          skipped++ // nothing outstanding to collect for this period — resolved now, not deferred
+        } else {
+          needsDebit.push(lease)
         }
-      } catch (err) {
-        errors++
-        errorMessages.push(`autopay lease ${lease.id}: ${(err as Error).message}`)
+      }
+
+      const toProcess = needsDebit.slice(0, AUTOPAY_BATCH_LIMIT)
+      remaining += needsDebit.length - toProcess.length
+
+      const stripe = getStripe(c.env.STRIPE_SECRET_KEY)
+
+      for (const lease of toProcess) {
+        const tenant = Array.isArray(lease.tenants) ? lease.tenants[0] : lease.tenants
+        const debitAmount = debitAmountByLease.get(lease.id) as number
+
+        try {
+          const pi = await stripe.paymentIntents.create({
+            amount: Math.round(debitAmount * 100),
+            currency: 'usd',
+            customer: tenant.stripe_customer_id,
+            payment_method: lease.autopay_payment_method_id,
+            payment_method_types: ['us_bank_account'],
+            confirm: true,
+            off_session: true,
+            description: `Autopay — ${periodStartStr}`,
+            metadata: { lease_id: lease.id, tenant_id: tenant.id },
+          }, {
+            // Deterministic per lease+period: a re-run inside Stripe's idempotency window (~24h)
+            // returns the original PaymentIntent instead of debiting again. Beyond that window,
+            // alreadyCollected (this run's or a future run's) is the only guard — which is why
+            // this phase is intentionally batch-limited: a wide-open, unbounded loop risks the
+            // subrequest budget running out AFTER this call but BEFORE the payments insert below
+            // records it, leaving no alreadyCollected row once the Stripe key also expires.
+            idempotencyKey: `autopay:${lease.id}:${periodStartStr}`,
+          })
+          const { error: payErr } = await db.from('payments').insert({
+            lease_id: lease.id,
+            payment_date: new Date().toISOString().slice(0, 10),
+            amount: debitAmount,
+            method: 'ach_stripe',
+            stripe_payment_intent_id: pi.id,
+            stripe_status: pi.status,
+            notes: `Autopay — ${periodStartStr}`,
+            autopay_period: periodStartStr,
+          })
+          if (payErr) {
+            if (payErr.code === '23505') {
+              skipped++ // concurrent run recorded this period first (idempotent)
+            } else {
+              // Real insert failure — the debit happened but wasn't recorded; surface loudly.
+              autopayErrors++
+              errorMessages.push(`autopay lease ${lease.id}: payment ${pi.id} created but not recorded: ${payErr.message}`)
+            }
+          }
+        } catch (err) {
+          autopayErrors++
+          errorMessages.push(`autopay lease ${lease.id}: ${(err as Error).message}`)
+        }
       }
     }
   }
 
-  return c.json({ posted, skipped, errors, errorMessages, year, month })
+  const errors = chargeErrors + autopayErrors
+  // Any of these three means a whole batch failed as a unit, not a per-lease shortfall — that
+  // must not look like a normal 200 (OI-162/#1 review round 2 finding #2, round 3 finding #7):
+  // the charge-bulk-upsert failing means the ENTIRE portfolio got zero charges this run; a failed
+  // autopay pre-check or debit-input lookup means that whole batch got zero debit attempts.
+  const status = (chargesBulkFailed || priorAutopayCheckFailed || debitInputsBulkFailed) ? 500 : 200
+  return c.json({ posted, skipped, errors, chargeErrors, autopayErrors, errorMessages, remaining, year, month }, status)
 })
 
 cronRouter.post('/critical-dates-alerts', async (c) => {
