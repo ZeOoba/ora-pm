@@ -52,8 +52,11 @@ const ALLOWLIST: Record<string, string[]> = {
   // cron.ts — operator-only /api/cron/* endpoints; Task 2's deliberate
   // judgment call to keep DB detail visible to the ops/alerting consumer,
   // not a tenant-reachable surface. Out of Task 9's scope (explicitly
-  // excluded per the brief).
-  'cron.ts': ["leaseErr.message", "cdErr.message", "insErr.message", "arErr.message"],
+  // excluded per the brief). overdueRes/existingFeeRes added 2026-08-17
+  // (delinquency-check N+1 batching fix) — same rationale, new variable
+  // names from the bulk fetchChunked() lookups that replaced the old
+  // per-lease queries.
+  'cron.ts': ["leaseErr.message", "cdErr.message", "insErr.message", "arErr.message", "overdueRes.error.message", "existingFeeRes.error.message"],
 
   // OI-063 closed 2026-08-04: all 5 files now route through dbError(); no
   // allowlist entries remain (see the "OI-063 scope files" assertion below).

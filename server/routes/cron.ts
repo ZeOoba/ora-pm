@@ -465,6 +465,7 @@ cronRouter.post('/delinquency-check', async (c) => {
   const periodStart = `${year}-${month}-01`
   const GRACE_DAYS = 30
   const LATE_FEE_AMOUNT = 50 // $50 flat late fee — adjust as needed
+  const BULK_QUERY_CHUNK_SIZE = 100
 
   // Fetch AR ledger rows with a positive balance
   const { data: arRows, error: arErr } = await db
@@ -482,36 +483,49 @@ cronRouter.post('/delinquency-check', async (c) => {
   cutoffDate.setDate(cutoffDate.getDate() - GRACE_DAYS)
   const cutoffStr = cutoffDate.toISOString().slice(0, 10)
 
+  // Bulk existence checks (2026-08-17 fix, OI-pending): the prior version ran these two lookups
+  // per lease inside the loop below — up to 2 sequential Supabase round-trips per AR row, which
+  // reliably exceeded ping-crons.ps1's 240s client timeout once the AR set grew past ~30-40 rows
+  // (live-confirmed 2026-08-17 at 68 rows: Cloudflare logged the invocation itself as `Canceled`,
+  // still running, no error). Chunked via fetchChunked at BULK_QUERY_CHUNK_SIZE ids per `.in()`
+  // call, same pattern as monthly-billing above — 2 bulk queries total instead of up to 2*N.
+  // Selecting `lease_id` only and testing set membership is behaviorally identical to the old
+  // per-row `.limit(1)` existence check: both only ever tested "does at least one matching charge
+  // exist for this lease," never used the row's own field values.
+  const leaseIds = (arRows as ARRow[]).map((ar) => ar.lease_id)
+  const [overdueRes, existingFeeRes] = await Promise.all([
+    fetchChunked(leaseIds, BULK_QUERY_CHUNK_SIZE, (chunk) =>
+      db.from('charges').select('lease_id').in('lease_id', chunk).lte('due_date', cutoffStr)),
+    fetchChunked(leaseIds, BULK_QUERY_CHUNK_SIZE, (chunk) =>
+      db.from('charges').select('lease_id').in('lease_id', chunk).eq('type', 'late_fee').gte('charge_date', periodStart)),
+  ])
+
+  // Intentional behavior change from the pre-fix code, not just a mechanical batching swap: the
+  // old per-row queries never checked their own error at all (`const { data } = await db...`), so
+  // a query failure silently fell through the `!data || data.length === 0` guard and just skipped
+  // that one lease — under-reporting delinquency without surfacing it. These bulk checks fail the
+  // whole request closed instead, matching this function's own top-level `arErr` convention above
+  // (never report a delinquency digest built from partially-unknown data).
+  if (overdueRes.error) return c.json({ error: overdueRes.error.message }, 500)
+  if (existingFeeRes.error) return c.json({ error: existingFeeRes.error.message }, 500)
+
+  const overdueLeaseIds = new Set((overdueRes.data as { lease_id: string }[]).map((r) => r.lease_id))
+  const existingFeeLeaseIds = new Set((existingFeeRes.data as { lease_id: string }[]).map((r) => r.lease_id))
+
   let lateFeesPosted = 0
   const delinquentLeases: { tenant_name: string; property: string; balance: number }[] = []
 
   for (const ar of arRows as ARRow[]) {
-    // Find oldest unpaid charge to check if > GRACE_DAYS past due
-    const { data: overdueCharges } = await db
-      .from('charges')
-      .select('id, due_date, amount')
-      .eq('lease_id', ar.lease_id)
-      .lte('due_date', cutoffStr)
-      .order('due_date')
-      .limit(1)
+    if (!overdueLeaseIds.has(ar.lease_id)) continue
 
-    if (!overdueCharges || overdueCharges.length === 0) continue
-
-    // Check if a late_fee charge already exists for this lease this period
-    const { data: existingFee } = await db
-      .from('charges')
-      .select('id')
-      .eq('lease_id', ar.lease_id)
-      .eq('type', 'late_fee')
-      .gte('charge_date', periodStart)
-      .limit(1)
-
-    if (existingFee && existingFee.length > 0) {
+    if (existingFeeLeaseIds.has(ar.lease_id)) {
       delinquentLeases.push({ tenant_name: ar.tenant_name, property: [ar.property_name, ar.suite].filter(Boolean).join(' '), balance: ar.balance })
       continue
     }
 
-    // Post late fee charge
+    // Post late fee charge — still one insert per newly-delinquent lease (a small subset of the
+    // AR set, not the full N), left un-batched because the 23505 idempotency-collision branch
+    // below needs a per-row result.
     const { error: feeErr } = await db.from('charges').insert({
       lease_id: ar.lease_id,
       charge_date: today,
