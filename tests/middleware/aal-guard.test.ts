@@ -64,13 +64,25 @@ describe('requireAal2 middleware', () => {
     expect(res.status).toBe(200)
   })
 
-  it('allows through when the tenant has no verified factor enrolled at all (nextLevel stays aal1)', async () => {
+  it('OI-081: blocks (403) when the tenant has no verified factor enrolled at all (nextLevel stays aal1) instead of the prior no-op', async () => {
     mockGetAal.mockResolvedValue({
       data: { currentLevel: 'aal1', nextLevel: 'aal1', currentAuthenticationMethods: [] },
       error: null,
     })
     const res = await req(makeApp(), 'valid_jwt')
-    expect(res.status).toBe(200)
+    expect(res.status).toBe(403)
+    const json = await res.json() as { error: string }
+    expect(json.error).toMatch(/enroll/i)
+  })
+
+  it('OI-081: the enroll-required message is distinct from the complete-your-challenge message', async () => {
+    mockGetAal.mockResolvedValue({
+      data: { currentLevel: 'aal1', nextLevel: 'aal1', currentAuthenticationMethods: [] },
+      error: null,
+    })
+    const res = await req(makeApp(), 'valid_jwt')
+    const json = await res.json() as { error: string }
+    expect(json.error).not.toMatch(/complete/i)
   })
 
   it('THE ACTUAL BYPASS THIS FIX CLOSES: a direct API call with a bare aal1 JWT and a verified factor never reaches the handler', async () => {
