@@ -11,7 +11,10 @@ export function PortalLogin() {
     setError('')
     const { error } = await portalSupabase.auth.signInWithOtp({
       email,
-      options: { emailRedirectTo: window.location.origin + '/portal' },
+      // OI-080: tenant accounts are provisioned exclusively via portal-auth.ts's
+      // inviteUserByEmail — this call must never self-provision a new auth user
+      // (mirrors AdminLogin.tsx's OI-036 fix).
+      options: { emailRedirectTo: window.location.origin + '/portal', shouldCreateUser: false },
     })
     if (error) setError(error.message)
     else setSent(true)
