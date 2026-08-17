@@ -204,32 +204,10 @@ describe('POST /api/cron/delinquency-check', () => {
       }
       if (table === 'charges') {
         chargesCall++
-        if (chargesCall === 1) {
-          return {
-            select: vi.fn().mockReturnValue({
-              eq: vi.fn().mockReturnValue({
-                lte: vi.fn().mockReturnValue({
-                  order: vi.fn().mockReturnValue({
-                    limit: vi.fn().mockResolvedValue({ data: [{ id: 'ch1', due_date: '2026-04-01', amount: 1200 }], error: null }),
-                  }),
-                }),
-              }),
-            }),
-          }
-        }
-        if (chargesCall === 2) {
-          return {
-            select: vi.fn().mockReturnValue({
-              eq: vi.fn().mockReturnValue({
-                eq: vi.fn().mockReturnValue({
-                  gte: vi.fn().mockReturnValue({
-                    limit: vi.fn().mockResolvedValue({ data: [], error: null }),
-                  }),
-                }),
-              }),
-            }),
-          }
-        }
+        // Call 1: bulk overdue check -> lease_1 IS overdue. Call 2: bulk existing-fee check ->
+        // no fee posted yet this period. Call 3: the insert itself.
+        if (chargesCall === 1) return chainable([{ lease_id: 'lease_1' }])
+        if (chargesCall === 2) return chainable([])
         return { insert: vi.fn().mockResolvedValue({ error: null }) }
       }
       return { select: vi.fn() }
@@ -250,7 +228,6 @@ describe('POST /api/cron/delinquency-check', () => {
   })
 
   it('does not double-post when a late fee already exists this period', async () => {
-    let chargesCall = 0
     mockFrom.mockImplementation((table: string) => {
       if (table === 'ar_ledger') return {
         select: vi.fn().mockReturnValue({
@@ -260,33 +237,10 @@ describe('POST /api/cron/delinquency-check', () => {
           }),
         }),
       }
-      if (table === 'charges') {
-        chargesCall++
-        if (chargesCall === 1) {
-          return {
-            select: vi.fn().mockReturnValue({
-              eq: vi.fn().mockReturnValue({
-                lte: vi.fn().mockReturnValue({
-                  order: vi.fn().mockReturnValue({
-                    limit: vi.fn().mockResolvedValue({ data: [{ id: 'ch1', due_date: '2026-04-01', amount: 1200 }], error: null }),
-                  }),
-                }),
-              }),
-            }),
-          }
-        }
-        return {
-          select: vi.fn().mockReturnValue({
-            eq: vi.fn().mockReturnValue({
-              eq: vi.fn().mockReturnValue({
-                gte: vi.fn().mockReturnValue({
-                  limit: vi.fn().mockResolvedValue({ data: [{ id: 'fee1' }], error: null }),
-                }),
-              }),
-            }),
-          }),
-        }
-      }
+      // Both bulk lookups (overdue check, existing-fee check) report lease_1 as a hit — already
+      // overdue AND already fee'd this period — so the insert branch (a 3rd `.from('charges')`
+      // call) should never fire.
+      if (table === 'charges') return chainable([{ lease_id: 'lease_1' }])
       return { select: vi.fn() }
     })
 
@@ -302,5 +256,54 @@ describe('POST /api/cron/delinquency-check', () => {
     // must still report it, matching the current bodyText behavior.
     expect(body.email).not.toBeNull()
     expect(fetch).not.toHaveBeenCalled()
+  })
+
+  // Generic auto-chaining/auto-resolving stub: any method call returns the same proxy (so it
+  // tolerates either the old per-lease .eq(...) chain shape or the new bulk .in(...) shape without
+  // the test needing to know which), and `await`-ing it at any point resolves to {data, error} via
+  // the 'then' trap. Isolates this regression test from the exact query-builder shape so it fails
+  // on CALL COUNT (the actual bug) rather than on a shape mismatch.
+  function chainable(data: unknown, error: unknown = null): unknown {
+    return new Proxy(() => {}, {
+      get(_t, prop) {
+        if (prop === 'then') return (resolve: (v: unknown) => void) => resolve({ data, error })
+        return () => chainable(data, error)
+      },
+    })
+  }
+
+  it('does O(1) bulk delinquency-lookup queries, not one-per-lease (N+1 regression, 2026-08-17)', async () => {
+    const N = 5
+    const arRows = Array.from({ length: N }, (_, i) => ({
+      lease_id: `lease_${i}`, tenant_id: `t${i}`, tenant_name: `Tenant ${i}`, property_name: 'Prop', suite: `${i}`, balance: 1000,
+    }))
+
+    let chargesFromCalls = 0
+    mockFrom.mockImplementation((table: string) => {
+      if (table === 'ar_ledger') return {
+        select: vi.fn().mockReturnValue({
+          gt: vi.fn().mockResolvedValue({ data: arRows, error: null }),
+        }),
+      }
+      if (table === 'charges') {
+        chargesFromCalls++
+        // Every bulk lookup reports every lease as overdue AND already fee'd this period, so the
+        // insert branch is never reached — isolates the SELECT-side N+1 fix from insert-call count.
+        return chainable(arRows.map((r) => ({ lease_id: r.lease_id })))
+      }
+      return { select: vi.fn() }
+    })
+
+    const res = await app.request('/api/cron/delinquency-check', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer test' },
+    }, env)
+    expect(res.status).toBe(200)
+    const body = await res.json() as { delinquent_count: number }
+    expect(body.delinquent_count).toBe(N)
+
+    // Pre-fix: 2 selects PER lease (overdue-check + existing-fee-check) -> scales with N (10 for
+    // N=5). Post-fix: exactly 2 bulk `.in()` calls total, independent of N.
+    expect(chargesFromCalls).toBeLessThanOrEqual(2)
   })
 })
