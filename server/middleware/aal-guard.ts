@@ -13,12 +13,26 @@ type Env = { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string }
 // autopay. This middleware enforces the same decision server-side, so it
 // holds even against a request that never touches the browser UI.
 //
-// Decision logic deliberately mirrors src/portal/lib/mfa-guard.ts's
-// checkAal2Guard exactly — keep the two in sync if either changes:
-// nextLevel === 'aal2' && currentLevel !== 'aal2' means a verified factor
-// exists but THIS session hasn't cleared the challenge yet. A tenant with
-// no verified factor never sees nextLevel rise above currentLevel, so this
-// is a no-op for them (matches the SPA's own behavior).
+// OI-081: the original condition, `nextLevel === 'aal2' && currentLevel !==
+// 'aal2'`, is a no-op for a tenant who has NEVER enrolled MFA at all —
+// `nextLevel` only reaches 'aal2' once a verified factor exists, so an
+// unenrolled tenant's request sails through with only a valid magic-link
+// session (aal1) as its sole control. That is the realistic majority case
+// (enrollment is voluntary — src/portal/pages/PortalAccount.tsx:90), so this
+// guard protected far less than its presence implied.
+//
+// Fix: this middleware now REQUIRES currentLevel === 'aal2' outright on
+// every route it gates — money-movement actions (autopay, ACH setup,
+// payment) mandate a completed MFA challenge, full stop, rather than only
+// enforcing it for tenants who happened to already enroll. This
+// deliberately DIVERGES from src/portal/lib/mfa-guard.ts's checkAal2Guard,
+// which still gates only which React screen renders post-login for GENERAL
+// portal navigation (viewing a lease, rent history, etc. — actions that
+// were never in scope for MFA in the first place). Do not "resync" the two
+// by loosening this one back to the SPA's condition — that reintroduces the
+// exact gap OI-081 closes. An unenrolled tenant hitting one of these three
+// routes now gets a distinct message steering them to enroll, rather than
+// the SPA's "complete your challenge" copy, which does not apply to them.
 export async function requireAal2(c: Context<{ Bindings: Env }>, next: Next) {
   const authHeader = c.req.header('Authorization')
   const jwt = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null
@@ -43,8 +57,19 @@ export async function requireAal2(c: Context<{ Bindings: Env }>, next: Next) {
     return c.json({ error: 'Unable to verify authentication level' }, 403)
   }
 
-  if (data.nextLevel === 'aal2' && data.currentLevel !== 'aal2') {
-    return c.json({ error: 'Multi-factor authentication required for this action' }, 403)
+  if (data.currentLevel !== 'aal2') {
+    if (data.nextLevel === 'aal2') {
+      // A verified factor exists; this session just hasn't cleared the
+      // challenge yet — same case the original condition caught.
+      return c.json({ error: 'Multi-factor authentication required for this action' }, 403)
+    }
+    // OI-081: no verified factor enrolled at all — block instead of the
+    // prior no-op, and say so distinctly so the client can route the
+    // tenant to enrollment rather than a (nonexistent) challenge step.
+    return c.json(
+      { error: 'Multi-factor authentication is required for this action. Enroll an authenticator before continuing.' },
+      403,
+    )
   }
 
   await next()

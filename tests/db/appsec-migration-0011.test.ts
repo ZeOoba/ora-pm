@@ -33,6 +33,9 @@ const MIGRATIONS_DIR = join(__dirname, '../../supabase/migrations')
 //  - DROP VIEW IF EXISTS: not parseable; 0011 uses it to release ar_ledger's
 //    dependency on charges.amount/payments.amount before ALTER COLUMN TYPE
 //    (the drop/recreate ordering is asserted textually below).
+//  - ALTER VIEW ... SET (security_invoker = true): pg-mem's grammar doesn't
+//    recognize this Postgres-15 view-option syntax (0012, OI-079). Not under
+//    test here for the same reason as the other RLS/policy statements above.
 // ---------------------------------------------------------------------------
 const PG_MEM_SKIP: RegExp[] = [
   /^ALTER TABLE\s+\S+\s+ENABLE ROW LEVEL SECURITY$/i,
@@ -40,6 +43,7 @@ const PG_MEM_SKIP: RegExp[] = [
   /^CREATE OR REPLACE VIEW\b/i,
   /^DELETE FROM payments a\s+USING\b/i,
   /^DROP VIEW IF EXISTS\b/i,
+  /^ALTER VIEW\s+\S+\s+SET\s*\(\s*security_invoker\s*=\s*true\s*\)$/i,
 ]
 
 // Splits SQL into statements on ";" while respecting single-quoted strings
