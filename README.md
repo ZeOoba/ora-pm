@@ -47,10 +47,11 @@ flowchart TB
     StripeR <-- "PaymentIntents, webhooks" --> Stripe["Stripe (ACH / us_bank_account)"]
     Cron -- "email digest in response (OI-047)" --> Scheduler
 
-    Scheduler["Windows Task Scheduler (two separate tasks, no ORA fleet involved)\nscripts/trigger-billing.ps1 -- monthly-billing, 1st of month\n'ORA PM Crons' task (ping-crons.ps1) -- critical-dates-alerts +\ndelinquency-check, daily 9am; also sends the digest via Outlook COM"] -- "POST + Bearer CRON_SECRET" --> Cron
+    Scheduler["ORA CC/MCP fleet (create_scheduled_task registry)\nora-pm-monthly-billing -- scripts/trigger-billing.ps1, 1st of month 11:10 AM ET\nora-pm-daily-crons -- scripts trigger critical-dates-alerts +\ndelinquency-check daily, ping-crons.ps1; also sends the digest via Outlook COM"] -- "POST + Bearer CRON_SECRET" --> Cron
 
     Pipeline["ORA Lease Intelligence Pipeline\nTENANTS.json export"] -- "scripts/import-from-pipeline.mjs\n(service role, bypasses RLS)" --> DB
 ```
+<!-- diagram-verified: 2026-08-21 -->
 
 **Reading the diagram:** the admin app and tenant portal are two independent route trees and two independent Supabase sessions sharing one API; every `/api/*` request is admin-JWT-gated except the five explicitly exempted prefixes (webhooks need a raw body for Stripe signature verification, cron uses its own Bearer-secret check, and portal/health/stripe have their own gates). The only outbound third-party calls are Anthropic (lease PDF extraction) and Stripe (ACH payments/webhooks) — all server-side, never from the browser. (Resend was removed from this Worker's egress path in OI-047 — critical-dates-alerts/delinquency-check now return the digest in the HTTP response instead of emailing directly; see the cron trigger note below.)
 
@@ -88,7 +89,7 @@ src/                          Admin SPA
 supabase/migrations/           Ordered SQL migrations (0001 core entities -> 0010 ar_ledger fix); source of schema truth
 scripts/
   import-from-pipeline.mjs      One-time/rerunnable import from the ORA Lease Intelligence Pipeline's TENANTS.json
-  trigger-billing.ps1           Windows Task Scheduler entrypoint that POSTs /api/cron/monthly-billing
+  trigger-billing.ps1           ORA CC/MCP fleet task (ora-pm-monthly-billing) entrypoint that POSTs /api/cron/monthly-billing
 tests/                         Vitest suites mirroring server/lib, server/routes, server/middleware, src/components,
                                 src/portal — run via `npm test`
 docs/superpowers/              Design specs and phase plans (design system, UX overhaul, lease intake, prod hardening)
@@ -116,7 +117,7 @@ npm run lint                 # tsc --noEmit (lint is currently an alias for type
 Deployment is Cloudflare Pages, driven by `wrangler.toml` (`name = "ora-pm"`, build output `./dist`):
 
 1. Create a Supabase project; run `supabase db push` to apply `supabase/migrations/`.
-2. Connect the GitHub repo to Cloudflare Pages — build command `npm run build`, output directory `dist`.
+2. Deploy is `.github/workflows/ci.yml` on push to `main`: typecheck -> test -> build -> `npx wrangler pages deploy ./dist --project-name ora-pm`. The Cloudflare Pages Git integration is deliberately NOT connected (`wrangler pages project list` shows `Git Provider: No`) — CI is the sole deploy path, no race between two triggers.
    Plaintext env vars: `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`. Encrypted secrets (`wrangler pages secret put <NAME>`): `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `CRON_SECRET`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `ANTHROPIC_API_KEY`, `CONFIDENTIAL_TERMS`, `ADMIN_EMAILS`.
 3. Configure Cloudflare Access (Zero Trust) on the Pages deployment — allow `ggoldberg@oxfordra.net`, `egoldberg@oxfordra.net`.
 4. DNS (`pm.oxfordra.net`, `tenant.oxfordra.net` CNAME to `ora-pm.pages.dev`) — **requires Gabriel's explicit go-ahead before changing.**
@@ -125,7 +126,7 @@ Deployment is Cloudflare Pages, driven by `wrangler.toml` (`name = "ora-pm"`, bu
 
 **Tenant MFA lockout recovery (OI-045):** the tenant portal's Account page (`src/portal/pages/PortalAccount.tsx`) lets a tenant enroll a TOTP authenticator; `PortalApp.tsx`'s AAL2 guard (`src/portal/lib/mfa-guard.ts`) then requires a challenge/verify step on every subsequent login once a factor is verified. If a tenant loses their authenticator device (phone lost/reset, app uninstalled) they cannot self-service — there is no backup-code flow. Recovery: in the Supabase dashboard, Authentication → Users → select the tenant → remove their MFA factor(s) (equivalent to calling the admin `mfa.listFactors`/`deleteFactor` API for that user). This drops them back to `aal1`, clearing the guard, and they can log in and re-enroll from the Account page. There is no in-app tenant self-recovery path by design — an admin action is required.
 
-Cron jobs have no native Cloudflare Pages trigger — two separate Windows Task Scheduler tasks POST to them with `Authorization: Bearer <CRON_SECRET>`. `scripts/trigger-billing.ps1` POSTs to `/api/cron/monthly-billing` on the 1st of the month. A standalone task ("ORA PM Crons", not part of the ORA fleet/`create_scheduled_task` registry) running `C:\Users\Owner\ora-pm-cron\ping-crons.ps1` POSTs to `/api/cron/critical-dates-alerts` and `/api/cron/delinquency-check` daily at 9:00 AM, and, since OI-047, also sends the resulting digest via Outlook COM (the Worker no longer emails directly — see the `email` field on each endpoint's response, and `RECIPIENTS` note in `server/routes/cron.ts`).
+Cron jobs have no native Cloudflare Pages trigger — two ORA CC/MCP fleet tasks (`create_scheduled_task` registry, `~/.claude/scheduled-tasks/`) POST to them with `Authorization: Bearer <CRON_SECRET>`, both reading the same `CRON_SECRET` from different local sources. `ora-pm-monthly-billing` (registered 2026-08-21, cron `10 11 1 * *`) runs `scripts/trigger-billing.ps1`, which POSTs to `/api/cron/monthly-billing` on the 1st of the month, authenticated via `$env:ORA_PM_CRON_SECRET`. `ora-pm-daily-crons` (registered 2026-08-16, superseding the standalone "ORA PM Crons" Windows Task Scheduler task, since disabled) runs `C:\Users\Owner\ora-pm-cron\ping-crons.ps1`, which POSTs to `/api/cron/critical-dates-alerts` and `/api/cron/delinquency-check` daily, authenticated via `C:\Users\Owner\ora-pm-cron\cron-secret.txt`, and, since OI-047, also sends the resulting digest via Outlook COM (the Worker no longer emails directly — see the `email` field on each endpoint's response, and `RECIPIENTS` note in `server/routes/cron.ts`).
 
 ## Key Modules & Routes
 
