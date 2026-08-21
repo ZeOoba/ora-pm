@@ -116,3 +116,32 @@ WHERE NOT (
   OR (schemaname = 'storage' AND tablename = 'objects')
 )
 ORDER BY schemaname, tablename, policyname;
+
+-- ── Part 4 (OI-078): rowsecurity should be `true` for all 17 of these, with
+-- ZERO matching rows in Part 2/3-style pg_policies output (deliberate
+-- default-deny — see 0013_enable_rls_remaining_tables.sql's header) ────────
+SELECT
+  schemaname,
+  tablename,
+  rowsecurity
+FROM pg_tables
+WHERE schemaname = 'public'
+  AND tablename IN (
+    'properties', 'units', 'tenants', 'leases', 'expenses', 'budgets',
+    'renewals', 'broker_commissions', 'cam_reconciliations',
+    'correspondence_log', 'journal_entry_exports', 'lease_move_events',
+    'sent_notifications', 'stripe_webhook_events', 'tenant_sales_reports',
+    'utility_meters', 'utility_readings'
+  )
+ORDER BY tablename;
+
+-- ── Part 5 (OI-079): reloptions should contain security_invoker=true for
+-- all three views ───────────────────────────────────────────────────────
+SELECT
+  c.relname AS view_name,
+  c.reloptions
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public'
+  AND c.relname IN ('ar_ledger', 'rent_roll', 'critical_dates')
+ORDER BY c.relname;
