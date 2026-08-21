@@ -146,12 +146,13 @@ describe('POST /api/stripe/payment-intent — real requireAal2 wired onto the re
     expect(mockStripe.paymentIntents.create).toHaveBeenCalledTimes(1)
   })
 
-  it('a tenant with no verified MFA factor at all is unaffected by the gate', async () => {
+  it('OI-081: a tenant with no verified MFA factor at all is now BLOCKED, not waved through', async () => {
     mockGetAal.mockResolvedValue({
       data: { currentLevel: 'aal1', nextLevel: 'aal1', currentAuthenticationMethods: [] },
       error: null,
     })
     const res = await post('/api/stripe/payment-intent', 'valid_no_mfa_jwt', VALID_BODY)
-    expect(res.status).toBe(200)
+    expect(res.status).toBe(403)
+    expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
   })
 })

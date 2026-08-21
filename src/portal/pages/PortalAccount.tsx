@@ -25,13 +25,22 @@ export function PortalAccount() {
 
   const [autopayStatus, setAutopayStatus] = useState<Record<string, boolean>>({})
   const [saving, setSaving] = useState<string | null>(null)
+  const [autopayError, setAutopayError] = useState<Record<string, string>>({})
 
   async function toggleAutopay(leaseId: string, currentEnabled: boolean) {
     setSaving(leaseId)
+    setAutopayError(s => ({ ...s, [leaseId]: '' }))
     try {
       await portalApi.setAutopay(leaseId, !currentEnabled)
       setAutopayStatus(s => ({ ...s, [leaseId]: !currentEnabled }))
       qc.invalidateQueries({ queryKey: ['portal-lease'] })
+    } catch (err) {
+      // OI-081: requireAal2 now blocks this call (403) for a tenant with no
+      // enrolled MFA factor, instead of the prior silent pass-through — that
+      // rejection needs to reach the UI (mirrors PortalPayNow.tsx's catch),
+      // not disappear as an unhandled promise rejection while the toggle
+      // silently reverts.
+      setAutopayError(s => ({ ...s, [leaseId]: (err as Error).message }))
     } finally {
       setSaving(null)
     }
@@ -175,17 +184,22 @@ export function PortalAccount() {
                     : 'No bank account linked — pay once to save'}
                 </p>
               </div>
-              <button
-                onClick={() => toggleAutopay(lease.id, enabled)}
-                disabled={saving === lease.id || !lease.autopay_payment_method_id}
-                className={`text-xs font-medium px-3 py-1.5 rounded-full transition-colors ${
-                  enabled
-                    ? 'bg-green-100 text-green-700 hover:bg-green-200'
-                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                } disabled:opacity-50`}
-              >
-                {saving === lease.id ? '…' : enabled ? 'Autopay ON' : 'Autopay OFF'}
-              </button>
+              <div className="flex flex-col items-end gap-1">
+                <button
+                  onClick={() => toggleAutopay(lease.id, enabled)}
+                  disabled={saving === lease.id || !lease.autopay_payment_method_id}
+                  className={`text-xs font-medium px-3 py-1.5 rounded-full transition-colors ${
+                    enabled
+                      ? 'bg-green-100 text-green-700 hover:bg-green-200'
+                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                  } disabled:opacity-50`}
+                >
+                  {saving === lease.id ? '…' : enabled ? 'Autopay ON' : 'Autopay OFF'}
+                </button>
+                {autopayError[lease.id] && (
+                  <p className="text-xs text-red-600 max-w-[220px] text-right">{autopayError[lease.id]}</p>
+                )}
+              </div>
             </div>
           )
         })}

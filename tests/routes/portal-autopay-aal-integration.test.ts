@@ -110,14 +110,14 @@ describe('PATCH /api/portal/autopay — real requireAal2 wired onto the real rou
     expect(res.status).toBe(200)
   })
 
-  it('a tenant with no verified MFA factor at all (nextLevel never rises to aal2) is unaffected by the gate', async () => {
+  it('OI-081: a tenant with no verified MFA factor at all (nextLevel never rises to aal2) is now BLOCKED, not waved through', async () => {
     mockGetAal.mockResolvedValue({
       data: { currentLevel: 'aal1', nextLevel: 'aal1', currentAuthenticationMethods: [] },
       error: null,
     })
 
     const res = await patchAutopay('valid_no_mfa_jwt', { lease_id: 'lease_1', enabled: false })
-    expect(res.status).toBe(200)
+    expect(res.status).toBe(403)
   })
 
   it('rejects with 401 before ever reaching the AAL check when the JWT itself is invalid', async () => {
