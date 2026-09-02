@@ -1,0 +1,86 @@
+name: Monthly billing (off-host backup trigger)
+
+# Off-host backup for the laptop-bound `ora-pm-monthly-billing` fleet task
+# (CC/MCP registry, cron `10 11 1 * *` ET, runs scripts/trigger-billing.ps1).
+# That task only fires while Claude Desktop is open on the ORA laptop; the
+# 2026-08-29 -> 09-01 host outage made it miss its 2026-09-01 fire entirely.
+#
+# This workflow fires 16:40 UTC on the 1st = 12:40 EDT / 11:40 EST, i.e. 30-90
+# minutes AFTER the laptop slot. Charge posting is idempotent (bulk upsert,
+# ON CONFLICT DO NOTHING on idempotency_key), so:
+#   - laptop already ran  -> this posts 0, skips everything, exits 0
+#   - laptop was closed   -> this catches the month within the hour
+# Drain semantics mirror scripts/trigger-billing.ps1: at most 8 calls, stop
+# and FAIL the moment `remaining` stops decreasing, never silently under-drain.
+#
+# Required repo secret: ORA_PM_CRON_SECRET (same value as the Cloudflare Pages
+# CRON_SECRET). Set it in GitHub -> Settings -> Secrets -> Actions. The
+# workflow refuses to run without it.
+
+on:
+  schedule:
+    - cron: '40 16 1 * *'
+  workflow_dispatch:
+    inputs:
+      year:
+        description: 'Billing year (default: current, America/New_York)'
+        required: false
+      month:
+        description: 'Billing month 1-12 (default: current, America/New_York)'
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  drain-monthly-billing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Drain /api/cron/monthly-billing
+        env:
+          CRON_SECRET: ${{ secrets.ORA_PM_CRON_SECRET }}
+          BASE_URL: https://ora-pm.pages.dev
+          IN_YEAR: ${{ github.event.inputs.year }}
+          IN_MONTH: ${{ github.event.inputs.month }}
+        run: |
+          set -uo pipefail
+          if [ -z "${CRON_SECRET}" ]; then
+            echo "::error::ORA_PM_CRON_SECRET repo secret is not set -- refusing to run"
+            exit 1
+          fi
+          YEAR="${IN_YEAR:-$(TZ=America/New_York date +%Y)}"
+          MONTH="${IN_MONTH:-$(TZ=America/New_York date +%-m)}"
+          MAX_INVOCATIONS=8
+          remaining=1; prev=""; inv=0
+          total_posted=0; total_skipped=0; total_charge_err=0; total_autopay_err=0
+          while [ "$remaining" -gt 0 ] && [ "$inv" -lt "$MAX_INVOCATIONS" ]; do
+            inv=$((inv+1))
+            url="${BASE_URL}/api/cron/monthly-billing?year=${YEAR}&month=${MONTH}"
+            resp=$(curl -sS --max-time 60 -X POST "$url" \
+                     -H "Authorization: Bearer ${CRON_SECRET}" \
+                     -H "Content-Type: application/json" \
+                     -w '\n%{http_code}') || { echo "::error::curl failed on invocation $inv"; exit 1; }
+            code=$(printf '%s' "$resp" | tail -n1)
+            body=$(printf '%s' "$resp" | sed '$d')
+            if [ "$code" -lt 200 ] || [ "$code" -ge 300 ]; then
+              echo "::error::invocation $inv -> HTTP $code: $body"
+              exit 1
+            fi
+            posted=$(printf '%s' "$body" | jq -r '.posted // 0')
+            skipped=$(printf '%s' "$body" | jq -r '.skipped // 0')
+            cerr=$(printf '%s' "$body" | jq -r '.chargeErrors // 0')
+            aerr=$(printf '%s' "$body" | jq -r '.autopayErrors // 0')
+            remaining=$(printf '%s' "$body" | jq -r '.remaining // 0')
+            echo "invocation $inv: posted=$posted skipped=$skipped chargeErrors=$cerr autopayErrors=$aerr remaining=$remaining"
+            total_posted=$((total_posted+posted)); total_skipped=$((total_skipped+skipped))
+            total_charge_err=$((total_charge_err+cerr)); total_autopay_err=$((total_autopay_err+aerr))
+            if [ -n "$prev" ] && [ "$remaining" -ge "$prev" ] && [ "$remaining" -gt 0 ]; then
+              echo "::error::remaining did not decrease ($prev -> $remaining) -- stalled drain, see trigger-billing.ps1 round-5 note"
+              exit 1
+            fi
+            prev="$remaining"
+          done
+          echo "TOTAL ${YEAR}-${MONTH}: posted=$total_posted skipped=$total_skipped chargeErrors=$total_charge_err autopayErrors=$total_autopay_err remaining=$remaining"
+          if [ "$remaining" -gt 0 ]; then echo "::error::remaining=$remaining after $inv invocation(s)"; exit 1; fi
+          if [ "$total_charge_err" -gt 0 ] || [ "$total_autopay_err" -gt 0 ]; then echo "::error::non-zero error counts"; exit 1; fi
