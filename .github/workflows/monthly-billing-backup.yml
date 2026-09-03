@@ -5,13 +5,20 @@ name: Monthly billing (off-host backup trigger)
 # That task only fires while Claude Desktop is open on the ORA laptop; the
 # 2026-08-29 -> 09-01 host outage made it miss its 2026-09-01 fire entirely.
 #
-# This workflow fires 16:40 UTC on the 1st = 12:40 EDT / 11:40 EST, i.e. 30-90
-# minutes AFTER the laptop slot. Charge posting is idempotent (bulk upsert,
-# ON CONFLICT DO NOTHING on idempotency_key), so:
+# This workflow fires 17:40 UTC on the 1st = 13:40 EDT / 12:40 EST, i.e. 90-150
+# minutes AFTER the laptop slot AND always in a LATER fixed UTC-hour bucket of
+# the endpoint's rate limiter (server/lib/rate-limit.ts: 10 calls/hour/path).
+# The laptop drain can spend up to 8 of those; at 16:40 UTC this backup would
+# have shared the 16:00-17:00 bucket with the laptop's 16:10 EST slot and been
+# throttled after 2 calls (PR #24 review, cross-repo finding). Charge posting
+# is idempotent (bulk upsert, ON CONFLICT DO NOTHING on idempotency_key), so:
 #   - laptop already ran  -> this posts 0, skips everything, exits 0
-#   - laptop was closed   -> this catches the month within the hour
+#   - laptop was closed   -> this catches the month within ~2 hours
 # Drain semantics mirror scripts/trigger-billing.ps1: at most 8 calls, stop
 # and FAIL the moment `remaining` stops decreasing, never silently under-drain.
+# A 2xx body that is not the endpoint's documented shape (all five counters
+# present and numeric) is a FAILURE, not a zero -- this job moves money and
+# must never report success on a response it cannot read.
 #
 # Required repo secret: ORA_PM_CRON_SECRET (same value as the Cloudflare Pages
 # CRON_SECRET). Set it in GitHub -> Settings -> Secrets -> Actions. The
@@ -19,7 +26,7 @@ name: Monthly billing (off-host backup trigger)
 
 on:
   schedule:
-    - cron: '40 16 1 * *'
+    - cron: '40 17 1 * *'
   workflow_dispatch:
     inputs:
       year:
@@ -67,11 +74,22 @@ jobs:
               echo "::error::invocation $inv -> HTTP $code: $body"
               exit 1
             fi
-            posted=$(printf '%s' "$body" | jq -r '.posted // 0')
-            skipped=$(printf '%s' "$body" | jq -r '.skipped // 0')
-            cerr=$(printf '%s' "$body" | jq -r '.chargeErrors // 0')
-            aerr=$(printf '%s' "$body" | jq -r '.autopayErrors // 0')
-            remaining=$(printf '%s' "$body" | jq -r '.remaining // 0')
+            # Strict shape check: every counter must be present AND numeric.
+            # Defaulting absent fields to 0 would let `{}` (or any wrong-shaped
+            # 2xx) terminate the drain as "remaining=0, no errors" with no
+            # evidence billing ran.
+            if ! printf '%s' "$body" | jq -e '
+                  (.posted|type)=="number" and (.skipped|type)=="number"
+                  and (.chargeErrors|type)=="number" and (.autopayErrors|type)=="number"
+                  and (.remaining|type)=="number"' >/dev/null 2>&1; then
+              echo "::error::invocation $inv -> HTTP $code but body is not the monthly-billing response shape (need numeric posted/skipped/chargeErrors/autopayErrors/remaining): $body"
+              exit 1
+            fi
+            posted=$(printf '%s' "$body" | jq -r '.posted')
+            skipped=$(printf '%s' "$body" | jq -r '.skipped')
+            cerr=$(printf '%s' "$body" | jq -r '.chargeErrors')
+            aerr=$(printf '%s' "$body" | jq -r '.autopayErrors')
+            remaining=$(printf '%s' "$body" | jq -r '.remaining')
             echo "invocation $inv: posted=$posted skipped=$skipped chargeErrors=$cerr autopayErrors=$aerr remaining=$remaining"
             total_posted=$((total_posted+posted)); total_skipped=$((total_skipped+skipped))
             total_charge_err=$((total_charge_err+cerr)); total_autopay_err=$((total_autopay_err+aerr))
