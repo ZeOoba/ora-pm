@@ -26,14 +26,27 @@ webhookRouter.post('/stripe', async (c) => {
   const db = getDb(c.env)
 
   // Idempotency: INSERT then check for PK violation (23505 = unique_violation).
-  // Two concurrent deliveries both attempt the insert; the second gets 23505 and skips.
+  // Two concurrent deliveries both attempt the insert; the second gets 23505.
   const { error: insertError } = await db
     .from('stripe_webhook_events')
     .insert({ id: event.id, event_type: event.type })
 
   if (insertError) {
-    if (insertError.code === '23505') return c.json({ received: true, skipped: true })
-    return dbError(c, insertError, 'Failed to record event')
+    if (insertError.code !== '23505') return dbError(c, insertError, 'Failed to record event')
+
+    // OI-222: a PK conflict is NOT proof the event was handled. A prior attempt
+    // may have thrown and marked the row 'failed' (500 → Stripe retries). Read
+    // the row's status: skip only a fully 'processed' event (re-running a
+    // side-effecting handler could double-apply it); anything else falls
+    // through to the handler below exactly like a fresh insert.
+    const { data: existing, error: statusError } = await db
+      .from('stripe_webhook_events')
+      .select('status')
+      .eq('id', event.id)
+      .single()
+
+    if (statusError) return dbError(c, statusError, 'Failed to read event status')
+    if (existing?.status === 'processed') return c.json({ received: true, skipped: true })
   }
 
   try {
