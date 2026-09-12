@@ -216,9 +216,10 @@ describe('POST /api/cron/delinquency-check', () => {
       }
       if (table === 'charges') {
         chargesCall++
-        // Call 1: bulk overdue check -> lease_1 IS overdue. Call 2: bulk existing-fee check ->
-        // no fee posted yet this period. Call 3: the insert itself.
-        if (chargesCall === 1) return chainable([{ lease_id: 'lease_1' }])
+        // Call 1: bulk recent-charges sum (OI-234) -> no charges newer than the grace cutoff, so
+        // the whole 1200 balance is overdue. Call 2: bulk existing-fee check -> no fee posted yet
+        // this period. Call 3: the insert itself.
+        if (chargesCall === 1) return chainable([])
         if (chargesCall === 2) return chainable([])
         return { insert: vi.fn().mockResolvedValue({ error: null }) }
       }
@@ -240,6 +241,7 @@ describe('POST /api/cron/delinquency-check', () => {
   })
 
   it('does not double-post when a late fee already exists this period', async () => {
+    let chargesCall = 0
     mockFrom.mockImplementation((table: string) => {
       if (table === 'payments') return chainable([{ id: 'p' }]) // OI-278: feed live
       if (table === 'ar_ledger') return {
@@ -250,10 +252,14 @@ describe('POST /api/cron/delinquency-check', () => {
           }),
         }),
       }
-      // Both bulk lookups (overdue check, existing-fee check) report lease_1 as a hit — already
-      // overdue AND already fee'd this period — so the insert branch (a 3rd `.from('charges')`
-      // call) should never fire.
-      if (table === 'charges') return chainable([{ lease_id: 'lease_1' }])
+      // Call 1 (OI-234 recent-charges sum): only this month's $50 fee is newer than the cutoff, so
+      // 1150 of the 1200 balance is overdue. Call 2 (existing-fee check): lease_1 already fee'd
+      // this period — so the insert branch (a 3rd `.from('charges')` call) should never fire.
+      if (table === 'charges') {
+        chargesCall++
+        if (chargesCall === 1) return chainable([{ lease_id: 'lease_1', amount: 50 }])
+        return chainable([{ lease_id: 'lease_1' }])
+      }
       return { select: vi.fn() }
     })
 
@@ -301,9 +307,10 @@ describe('POST /api/cron/delinquency-check', () => {
       }
       if (table === 'charges') {
         chargesFromCalls++
-        // Every bulk lookup reports every lease as overdue AND already fee'd this period, so the
+        // Every bulk lookup reports every lease as overdue (a $0 recent charge leaves the full
+        // 1000 balance overdue under OI-234's recent-sum) AND already fee'd this period, so the
         // insert branch is never reached — isolates the SELECT-side N+1 fix from insert-call count.
-        return chainable(arRows.map((r) => ({ lease_id: r.lease_id })))
+        return chainable(arRows.map((r) => ({ lease_id: r.lease_id, amount: 0 })))
       }
       return { select: vi.fn() }
     })
@@ -401,7 +408,7 @@ describe('POST /api/cron/delinquency-check', () => {
       paymentsError?: { message: string } | null
       // Default: one overdue, not-yet-fee'd AR row — the exact shape that posts a fee under a live feed.
       arRows?: ARRow[]
-      overdue?: boolean // whether the bulk overdue lookup reports the AR row(s) as past GRACE_DAYS
+      overdue?: boolean // whether the AR row(s) are overdue under OI-234's oldest-first rule (recent charges < balance)
     }
     const ACME: ARRow = { lease_id: 'lease_1', tenant_id: 't1', tenant_name: 'Acme', property_name: null, suite: '101', balance: 1200 }
 
@@ -417,7 +424,9 @@ describe('POST /api/cron/delinquency-check', () => {
         }
         if (table === 'charges') {
           chargesCall++
-          if (chargesCall === 1) return chainable(overdue ? arRows.map((r) => ({ lease_id: r.lease_id })) : []) // overdue lookup
+          // recent-charges sum (OI-234 oldest-first): no recent charges -> the whole balance is overdue;
+          // recent charges equal to the balance -> nothing overdue.
+          if (chargesCall === 1) return chainable(overdue ? [] : arRows.map((r) => ({ lease_id: r.lease_id, amount: r.balance })))
           if (chargesCall === 2) return chainable([])                                                           // no fee yet this period
           return { insert: insertSpy }
         }
