@@ -796,7 +796,9 @@ describe('POST /api/cron/monthly-billing', () => {
       expect(new Set(state.charges.map(c => c.lease_id)).size).toBe(N)
       expect(body.posted).toBe(N)
       // Keyset-paged, each page within the cap — not one oversized request.
+      expect(leasesPageSpy).toHaveBeenCalledTimes(2)
       for (const [calls] of leasesPageSpy.mock.calls as [{ method: string; args: unknown[] }[]][]) {
+        expect(calls.find(c => c.method === 'order')?.args[0]).toBe('id')
         const limit = calls.find(c => c.method === 'limit')
         expect(limit).toBeDefined()
         expect(limit!.args[0] as number).toBeLessThanOrEqual(PG_MAX_ROWS)

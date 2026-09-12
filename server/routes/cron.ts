@@ -622,19 +622,26 @@ cronRouter.post('/delinquency-check', async (c) => {
   // per-row `.limit(1)` existence check: both only ever tested "does at least one matching charge
   // exist for this lease," never used the row's own field values.
   //
-  // Row cap (fail closed via fetchChunked's maxRows):
+  // Row cap:
   //   - overdue probe: returns EVERY charge dated <= cutoff, i.e. each lease's whole billing
-  //     history, so a 100-lease chunk reaches the cap at ~10 old charges per lease on average —
-  //     a real risk at current portfolio size, not a far-future one. A dropped row can only hide a
-  //     lease from overdueLeaseIds: a MISSED late fee and an under-reported digest.
+  //     history (monthly-billing posts ~2/lease/month), so a 100-lease chunk legitimately passes
+  //     1000 rows after a few billing cycles — current portfolio size, not a far-future one. A
+  //     dropped row hides a lease from overdueLeaseIds (MISSED late fee, under-reported digest),
+  //     and a plain row-cap guard would turn that into a permanent 500. So each chunk is itself
+  //     keyset-paged on charges.id (uuid PK) — complete, not capped; `maxRows: Infinity` because
+  //     the paged chunk result is legitimately unbounded.
   //   - existing-fee guard: <= 1 row per lease per month (unique idempotency_key), so it can't
   //     legitimately reach the cap; a dropped row would re-attempt a fee already posted (the
-  //     idempotency_key index and the 23505 branch below are the only backstop). Guarded anyway.
+  //     idempotency_key index and the 23505 branch below are the only backstop). Row-cap guarded.
   const leaseIds = (arRows as ARRow[]).map((ar) => ar.lease_id)
   const [overdueRes, existingFeeRes] = await Promise.all([
     fetchChunked(leaseIds, BULK_QUERY_CHUNK_SIZE, (chunk) =>
-      db.from('charges').select('lease_id').in('lease_id', chunk).lte('due_date', cutoffStr),
-      { maxRows: POSTGREST_MAX_ROWS }),
+      fetchAllPages((after) => {
+        let q = db.from('charges').select('id, lease_id').in('lease_id', chunk).lte('due_date', cutoffStr)
+        if (after !== null) q = q.gt('id', after)
+        return q.order('id').limit(POSTGREST_MAX_ROWS)
+      }, (row) => row.id),
+      { maxRows: Number.POSITIVE_INFINITY }),
     fetchChunked(leaseIds, BULK_QUERY_CHUNK_SIZE, (chunk) =>
       db.from('charges').select('lease_id').in('lease_id', chunk).eq('type', 'late_fee').gte('charge_date', periodStart),
       { maxRows: POSTGREST_MAX_ROWS }),

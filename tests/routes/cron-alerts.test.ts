@@ -281,7 +281,8 @@ describe('POST /api/cron/delinquency-check', () => {
         chargesFromCalls++
         // Every bulk lookup reports every lease as overdue AND already fee'd this period, so the
         // insert branch is never reached — isolates the SELECT-side N+1 fix from insert-call count.
-        return chainable(arRows.map((r) => ({ lease_id: r.lease_id })))
+        // `id`: the overdue probe is keyset-paged on charges.id, which must be ascending.
+        return chainable(arRows.map((r, i) => ({ id: `c_${i}`, lease_id: r.lease_id })))
       }
       return { select: vi.fn() }
     })
@@ -623,8 +624,20 @@ describe('POST /api/cron/delinquency-check', () => {
     const today = new Date().toISOString().slice(0, 10)
     const OLD = '2020-01-15' // always past the 30-day grace cutoff
     const arRow = (lease_id: string, balance = 100): Row => ({ lease_id, tenant_id: `t_${lease_id}`, tenant_name: `Tenant ${lease_id}`, property_name: 'Prop', suite: lease_id, balance })
-    const rentRow = (lease_id: string): Row => ({ lease_id, type: 'base_rent', amount: 100, due_date: OLD, charge_date: OLD })
-    const feeRow = (lease_id: string): Row => ({ lease_id, type: 'late_fee', amount: 50, due_date: today, charge_date: today })
+    // Unique, bytewise-ascending ids in creation order (charges.id is a uuid PK in production).
+    let seq = 0
+    const nextId = () => `c_${String(seq++).padStart(7, '0')}`
+    const rentRow = (lease_id: string): Row => ({ id: nextId(), lease_id, type: 'base_rent', amount: 100, due_date: OLD, charge_date: OLD })
+    const feeRow = (lease_id: string): Row => ({ id: nextId(), lease_id, type: 'late_fee', amount: 50, due_date: today, charge_date: today })
+    const expectKeysetPages = (pages: Call[][], key: string) => {
+      expect(pages.length).toBeGreaterThan(0)
+      for (const page of pages) {
+        expect(page.find(c => c.method === 'order')?.args[0]).toBe(key)
+        const limit = page.find(c => c.method === 'limit')
+        expect(limit).toBeDefined()
+        expect(limit!.args[0] as number).toBeLessThanOrEqual(PG_MAX_ROWS)
+      }
+    }
 
     function install(ar: ReturnType<typeof pgTable>, charges: ReturnType<typeof pgTable>) {
       mockFrom.mockImplementation((table: string) => {
@@ -652,11 +665,8 @@ describe('POST /api/cron/delinquency-check', () => {
       expect(res.status).toBe(200)
       const body = await res.json() as Body
       expect(body.delinquent_count).toBe(ids.length)
-      for (const page of ar.pages) {
-        const limit = page.find(c => c.method === 'limit')
-        expect(limit).toBeDefined()
-        expect(limit!.args[0] as number).toBeLessThanOrEqual(PG_MAX_ROWS)
-      }
+      expect(ar.pages).toHaveLength(2)
+      expectKeysetPages(ar.pages, 'lease_id')
     })
 
     it('fails closed (500, nothing posted) if an AR ledger page does not advance the keyset cursor — never loops or double-counts', async () => {
@@ -671,18 +681,23 @@ describe('POST /api/cron/delinquency-check', () => {
       expect(ar.pages.length).toBeLessThanOrEqual(3)
     })
 
-    it('fails closed (500, no fee) when the overdue-charges chunk reaches the row cap — never silently skips a delinquent lease', async () => {
+    it('pages the overdue-charges probe inside a chunk — a lease whose overdue charge is past row 1000 is still fined, not skipped and not a 500', async () => {
       // Direction: MISSED late fee. lease_a's 1000 historical charges fill the capped response, so
       // lease_b's overdue charge (row 1001) is cut off and the pre-fix handler never fines lease_b
-      // while posting lease_a's fee and returning 200.
+      // while posting lease_a's fee and returning 200. Long billing histories are NORMAL (every
+      // charge dated <= cutoff matches), so this probe must be complete, not merely fail closed.
       const insert = vi.fn().mockResolvedValue({ error: null })
       const charges = pgTable([...Array.from({ length: PG_MAX_ROWS }, () => rentRow('lease_a')), rentRow('lease_b')], { insert })
       install(pgTable([arRow('lease_a'), arRow('lease_b')]), charges)
 
       const res = await post()
-      expect(res.status).toBe(500)
-      expect(insert).not.toHaveBeenCalled()
-      expect((await res.json() as Body).error).toMatch(/row cap/)
+      expect(res.status).toBe(200)
+      const body = await res.json() as Body
+      expect(body.late_fees_posted).toBe(2)
+      expect(insert).toHaveBeenCalledWith(expect.objectContaining({ lease_id: 'lease_b', type: 'late_fee' }))
+      const overduePages = charges.pages.filter(p => p.some(c => c.method === 'lte' && c.args[0] === 'due_date'))
+      expect(overduePages).toHaveLength(2)
+      expectKeysetPages(overduePages, 'id')
     })
 
     it('fails closed (500, no fee) when the existing-fee chunk reaches the row cap — never re-posts a fee whose row was cut off', async () => {
