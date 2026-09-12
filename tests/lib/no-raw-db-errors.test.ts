@@ -55,8 +55,10 @@ const ALLOWLIST: Record<string, string[]> = {
   // excluded per the brief). overdueRes/existingFeeRes added 2026-08-17
   // (delinquency-check N+1 batching fix) — same rationale, new variable
   // names from the bulk fetchChunked() lookups that replaced the old
-  // per-lease queries.
-  'cron.ts': ["leaseErr.message", "cdErr.message", "insErr.message", "arErr.message", "overdueRes.error.message", "existingFeeRes.error.message"],
+  // per-lease queries. overdueRes -> recentRes 2026-09-12 (OI-234: the
+  // overdue existence probe became a recent-charges sum; same operator-only
+  // surface, same rationale).
+  'cron.ts': ["leaseErr.message", "cdErr.message", "insErr.message", "arErr.message", "recentRes.error.message", "existingFeeRes.error.message"],
 
   // OI-063 closed 2026-08-04: all 5 files now route through dbError(); no
   // allowlist entries remain (see the "OI-063 scope files" assertion below).
