@@ -282,7 +282,7 @@ describe('POST /api/cron/delinquency-check', () => {
         // Every bulk lookup reports every lease as overdue AND already fee'd this period, so the
         // insert branch is never reached — isolates the SELECT-side N+1 fix from insert-call count.
         // `id`: the overdue probe is keyset-paged on charges.id, which must be ascending.
-        return chainable(arRows.map((r, i) => ({ id: `c_${i}`, lease_id: r.lease_id })))
+        return chainable(arRows.map((r, i) => ({ id: `c_${String(i).padStart(7, '0')}`, lease_id: r.lease_id })))
       }
       return { select: vi.fn() }
     })
@@ -392,7 +392,7 @@ describe('POST /api/cron/delinquency-check', () => {
         if (table === 'ar_ledger') return chainable(arRows)
         if (table === 'charges') {
           chargesCall++
-          if (chargesCall === 1) return chainable(overdue ? arRows.map((r) => ({ lease_id: r.lease_id })) : []) // overdue lookup
+          if (chargesCall === 1) return chainable(overdue ? arRows.map((r, i) => ({ id: `c_${String(i).padStart(7, '0')}`, lease_id: r.lease_id })) : []) // overdue lookup
           if (chargesCall === 2) return chainable([])                                                           // no fee yet this period
           return { insert: insertSpy }
         }
@@ -576,7 +576,7 @@ describe('POST /api/cron/delinquency-check', () => {
     // against `rows`, then applies the server row cap. `ignoreGt` simulates a broken keyset (a
     // server that ignores the cursor) so the handler's non-advancing-page guard is exercised. A
     // filter on a column the row doesn't carry throws, so a wrong column name can't pass silently.
-    function pgTable(rows: Row[], opts: { insert?: ReturnType<typeof vi.fn>; ignoreGt?: boolean } = {}) {
+    function pgTable(rows: Row[], opts: { insert?: ReturnType<typeof vi.fn>; ignoreGt?: string } = {}) {
       const pages: Call[][] = []
       const table = {
         pages,
@@ -604,7 +604,7 @@ describe('POST /api/cron/delinquency-check', () => {
               const [c, v] = args as [string, unknown]
               if (method === 'in') out = out.filter(r => (v as unknown[]).includes(col(r, c)))
               if (method === 'eq') out = out.filter(r => String(col(r, c)) === String(v))
-              if (method === 'gt' && !(opts.ignoreGt && c === 'lease_id')) out = out.filter(r => cmp(col(r, c), v) > 0)
+              if (method === 'gt' && !(opts.ignoreGt === c)) out = out.filter(r => cmp(col(r, c), v) > 0)
               if (method === 'gte') out = out.filter(r => cmp(col(r, c), v) >= 0)
               if (method === 'lt') out = out.filter(r => cmp(col(r, c), v) < 0)
               if (method === 'lte') out = out.filter(r => cmp(col(r, c), v) <= 0)
@@ -672,7 +672,7 @@ describe('POST /api/cron/delinquency-check', () => {
     it('fails closed (500, nothing posted) if an AR ledger page does not advance the keyset cursor — never loops or double-counts', async () => {
       const ids = Array.from({ length: PG_MAX_ROWS }, (_, i) => `lease_${String(i).padStart(5, '0')}`)
       const insert = vi.fn().mockResolvedValue({ error: null })
-      const ar = pgTable(ids.map(id => arRow(id)), { ignoreGt: true })
+      const ar = pgTable(ids.map(id => arRow(id)), { ignoreGt: 'lease_id' })
       install(ar, pgTable(ids.map(rentRow), { insert }))
 
       const res = await post()
@@ -698,6 +698,20 @@ describe('POST /api/cron/delinquency-check', () => {
       const overduePages = charges.pages.filter(p => p.some(c => c.method === 'lte' && c.args[0] === 'due_date'))
       expect(overduePages).toHaveLength(2)
       expectKeysetPages(overduePages, 'id')
+    })
+
+    it('fails closed (500, no fee) if an overdue-charges page does not advance the charges.id cursor', async () => {
+      // The paged probe's own failure path: a cursor-ignoring page must surface as a 500 through
+      // fetchChunked, never be swallowed into "no overdue charges" (which would fine nobody, 200).
+      const insert = vi.fn().mockResolvedValue({ error: null })
+      const charges = pgTable([...Array.from({ length: PG_MAX_ROWS }, () => rentRow('lease_a')), rentRow('lease_b')], { insert, ignoreGt: 'id' })
+      install(pgTable([arRow('lease_a'), arRow('lease_b')]), charges)
+
+      const res = await post()
+      expect(res.status).toBe(500)
+      expect(insert).not.toHaveBeenCalled()
+      expect((await res.json() as Body).error).toMatch(/keyset page/)
+      expect(charges.pages.length).toBeLessThanOrEqual(4)
     })
 
     it('fails closed (500, no fee) when the existing-fee chunk reaches the row cap — never re-posts a fee whose row was cut off', async () => {
