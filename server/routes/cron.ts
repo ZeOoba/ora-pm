@@ -474,21 +474,48 @@ cronRouter.post('/delinquency-check', async (c) => {
   // with NO payments recorded every lease's balance is its lifetime charge total and every lease
   // past GRACE_DAYS looks delinquent — the live payments table had 0 rows ever, and this endpoint
   // posted 68 $50 late fees against tenants who had never been recorded as paying. Fail CLOSED:
-  // if no payment is dated inside PAYMENTS_FEED_LOOKBACK_DAYS, post zero fees. The delinquency
-  // list is still computed and returned (flagged) so the digest shows what WOULD have fired.
-  // payment_date (indexed, the business date the period-paid lookup in monthly-billing also
-  // filters on) rather than created_at — a backfill of old payments is not a live feed.
+  // if no QUALIFYING payment is dated inside [today − PAYMENTS_FEED_LOOKBACK_DAYS, today], post
+  // zero fees. The delinquency list is still computed and returned (flagged) so the digest shows
+  // what WOULD have fired.
+  //   - "Qualifying" = the SAME predicate ar_ledger's payment_totals sums (migration 0010, copied
+  //     verbatim by 0011): check/wire/other always; ach_stripe only when stripe_status='succeeded'.
+  //     Autopay (monthly-billing above) inserts ach_stripe rows as `processing` on the 1st and the
+  //     portal (stripe.ts) inserts intents as pending; if those later fail/return they never reduce
+  //     total_paid, so counting ANY row would lift the guard against balances that never moved.
+  //   - Upper bound `today`: a future-dated typo must not read as a live feed.
+  //   - payment_date (indexed, the business date the period-paid lookup in monthly-billing also
+  //     filters on) rather than created_at — a backfill of old payments is not a live feed.
   const lookbackDate = new Date()
   lookbackDate.setDate(lookbackDate.getDate() - PAYMENTS_FEED_LOOKBACK_DAYS)
   const lookbackStr = lookbackDate.toISOString().slice(0, 10)
   const { data: recentPayments, error: payErr } = await db
     .from('payments')
     .select('id')
+    .or('method.in.(check,wire,other),and(method.eq.ach_stripe,stripe_status.eq.succeeded)')
     .gte('payment_date', lookbackStr)
+    .lte('payment_date', today)
     .limit(1)
   // A failed probe is unknown feed state, not "absent" — same fail-the-request convention as arErr.
   if (payErr) return c.json({ error: payErr.message }, 500)
   const paymentsFeedAbsent = !recentPayments || recentPayments.length === 0
+
+  // Build the delinquency digest — OI-047 (2026-08-04): return it instead of emailing via Resend;
+  // ping-crons.ps1 sends it via Outlook COM, and ONLY when `email` is non-null. Live feed with
+  // nothing delinquent → null (unchanged). OI-278: when the feed is absent, ALWAYS return a
+  // flagged email — even with 0 delinquent leases — so the operator is told the feed is dead
+  // before anything crosses the grace window, not after. Subject and body both LEAD with the
+  // warning so the digest can't be read as a real delinquency list (the balances are
+  // unreliable by construction).
+  const buildEmail = (delinquent: { tenant_name: string; property: string; balance: number }[], lateFeesPosted: number): { subject: string; body: string } | null => {
+    if (delinquent.length === 0 && !paymentsFeedAbsent) return null
+    const lines = delinquent.map(d => `  • ${d.tenant_name} | ${d.property} | Balance: $${d.balance.toFixed(2)}`)
+    const lead = paymentsFeedAbsent ? `${PAYMENTS_FEED_ABSENT_LEAD}\n\n` : ''
+    const listing = lines.length > 0 ? lines.join('\n') : '  (no leases past the grace window)'
+    const bodyText = `${lead}ORA PM — Delinquency Report\n${today}\n\n${listing}\n\nLate fees posted: ${lateFeesPosted}\nhttps://ora-pm.pages.dev/ar`
+    const baseSubject = `[ORA PM] ${delinquent.length} Delinquent Tenant${delinquent.length === 1 ? '' : 's'} — ${today}`
+    const subject = paymentsFeedAbsent ? `${PAYMENTS_FEED_ABSENT_LEAD} — ${baseSubject}` : baseSubject
+    return { subject, body: bodyText }
+  }
 
   // Fetch AR ledger rows with a positive balance
   const { data: arRows, error: arErr } = await db
@@ -497,7 +524,7 @@ cronRouter.post('/delinquency-check', async (c) => {
     .gt('balance', 0)
 
   if (arErr) return c.json({ error: arErr.message }, 500)
-  if (!arRows || arRows.length === 0) return c.json({ late_fees_posted: 0, delinquent_count: 0, payments_feed_absent: paymentsFeedAbsent, email: null })
+  if (!arRows || arRows.length === 0) return c.json({ late_fees_posted: 0, delinquent_count: 0, payments_feed_absent: paymentsFeedAbsent, email: buildEmail([], 0) })
 
   type ARRow = { lease_id: string; tenant_id: string; tenant_name: string; property_name: string | null; suite: string | null; balance: number }
 
@@ -578,21 +605,9 @@ cronRouter.post('/delinquency-check', async (c) => {
     }
   }
 
-  // Build the delinquency digest — OI-047 (2026-08-04): return it instead of
-  // emailing via Resend; ping-crons.ps1 sends it via Outlook COM. Late fees
-  // above are already posted (or not) by this point regardless of what
-  // happens to the digest — unchanged from today's behavior.
-  let email: { subject: string; body: string } | null = null
-  if (delinquentLeases.length > 0) {
-    const lines = delinquentLeases.map(d => `  • ${d.tenant_name} | ${d.property} | Balance: $${d.balance.toFixed(2)}`)
-    // OI-278: when the feed is absent, subject and body both LEAD with the warning so the
-    // digest can't be read as a real delinquency list (the balances are unreliable by construction).
-    const lead = paymentsFeedAbsent ? `${PAYMENTS_FEED_ABSENT_LEAD}\n\n` : ''
-    const bodyText = `${lead}ORA PM — Delinquency Report\n${today}\n\n${lines.join('\n')}\n\nLate fees posted: ${lateFeesPosted}\nhttps://ora-pm.pages.dev/ar`
-    const baseSubject = `[ORA PM] ${delinquentLeases.length} Delinquent Tenant${delinquentLeases.length > 1 ? 's' : ''} — ${today}`
-    const subject = paymentsFeedAbsent ? `${PAYMENTS_FEED_ABSENT_LEAD} — ${baseSubject}` : baseSubject
-    email = { subject, body: bodyText }
-  }
+  // Late fees above are already posted (or not) by this point regardless of what happens to the
+  // digest — unchanged from today's behavior (buildEmail is defined above the AR fetch).
+  const email = buildEmail(delinquentLeases, lateFeesPosted)
 
   return c.json({ late_fees_posted: lateFeesPosted, delinquent_count: delinquentLeases.length, payments_feed_absent: paymentsFeedAbsent, email })
 })
