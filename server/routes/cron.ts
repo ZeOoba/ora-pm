@@ -533,19 +533,45 @@ cronRouter.post('/delinquency-check', async (c) => {
   cutoffDate.setDate(cutoffDate.getDate() - GRACE_DAYS)
   const cutoffStr = cutoffDate.toISOString().slice(0, 10)
 
-  // Bulk existence checks (2026-08-17 fix, OI-pending): the prior version ran these two lookups
-  // per lease inside the loop below — up to 2 sequential Supabase round-trips per AR row, which
-  // reliably exceeded ping-crons.ps1's 240s client timeout once the AR set grew past ~30-40 rows
-  // (live-confirmed 2026-08-17 at 68 rows: Cloudflare logged the invocation itself as `Canceled`,
-  // still running, no error). Chunked via fetchChunked at BULK_QUERY_CHUNK_SIZE ids per `.in()`
-  // call, same pattern as monthly-billing above — 2 bulk queries total instead of up to 2*N.
-  // Selecting `lease_id` only and testing set membership is behaviorally identical to the old
-  // per-row `.limit(1)` existence check: both only ever tested "does at least one matching charge
-  // exist for this lease," never used the row's own field values.
+  // Bulk lookups (2026-08-17 fix): the prior version ran these two lookups per lease inside the
+  // loop below — up to 2 sequential Supabase round-trips per AR row, which reliably exceeded
+  // ping-crons.ps1's 240s client timeout once the AR set grew past ~30-40 rows (live-confirmed
+  // 2026-08-17 at 68 rows: Cloudflare logged the invocation itself as `Canceled`, still running,
+  // no error). Chunked via fetchChunked at BULK_QUERY_CHUNK_SIZE ids per `.in()` call, same
+  // pattern as monthly-billing above — 2 bulk queries total instead of up to 2*N.
+  //
+  // OI-234 (ruled 2026-09-12, "Oldest-first"): the first lookup used to be an EXISTENCE probe —
+  // "does this lease have any charge with due_date <= cutoff" — so any positive-balance lease
+  // with an old charge was fined even when that old charge was fully paid (a tenant current on
+  // every old invoice and owing only this month's not-yet-overdue rent got the $50 fee).
+  // Payments now apply to the oldest charges first (standard AR aging):
+  //     recent_i  = Σ charges.amount for lease i with due_date >  cutoffStr
+  //     overdue_i = ar_ledger.balance_i − recent_i
+  //     delinquent iff overdue_i > OVERDUE_EPSILON
+  // `recent_i` must be summed over EXACTLY the charge population ar_ledger.balance counts. The
+  // live view (supabase/migrations/0011_appsec_idempotency_and_scale.sql, verbatim from 0010)
+  // sums every `charges` row for the lease with no type/void/status filter (the table has no
+  // such column; amount is NUMERIC(12,2) US dollars, CHECK >= 0), so no filter is applied here
+  // either — only the due_date split. A late fee posted this month has due_date = today, so it
+  // is always "recent" and can never make itself overdue.
+  //
+  // Row cap (PR #27 refute review): PostgREST returns at most `max_rows` (supabase/config.toml:18,
+  // 1000; hosted default is the same) per request and says nothing when it truncates. Before
+  // OI-234 a truncated existence probe could only MISS a fee; a truncated SUM understates recent_i,
+  // overstates overdue_i and FINES A CURRENT TENANT. A page that reaches the cap cannot be told
+  // apart from a complete one, so it fails the whole run closed (500, retried next run) rather
+  // than post from a possibly-partial sum. Scoped to this query only: the existing-fee guard is
+  // bounded at <= 1 row per lease per month by its unique idempotency_key.
+  const POSTGREST_MAX_ROWS = 1000
   const leaseIds = (arRows as ARRow[]).map((ar) => ar.lease_id)
-  const [overdueRes, existingFeeRes] = await Promise.all([
-    fetchChunked(leaseIds, BULK_QUERY_CHUNK_SIZE, (chunk) =>
-      db.from('charges').select('lease_id').in('lease_id', chunk).lte('due_date', cutoffStr)),
+  const [recentRes, existingFeeRes] = await Promise.all([
+    fetchChunked(leaseIds, BULK_QUERY_CHUNK_SIZE, async (chunk) => {
+      const res = await db.from('charges').select('lease_id, amount').in('lease_id', chunk).gt('due_date', cutoffStr)
+      if (!res.error && (res.data?.length ?? 0) >= POSTGREST_MAX_ROWS) {
+        return { data: null, error: { message: `recent-charges chunk returned ${res.data!.length} rows: at the PostgREST row cap, sum may be truncated` } }
+      }
+      return res
+    }),
     fetchChunked(leaseIds, BULK_QUERY_CHUNK_SIZE, (chunk) =>
       db.from('charges').select('lease_id').in('lease_id', chunk).eq('type', 'late_fee').gte('charge_date', periodStart)),
   ])
@@ -556,17 +582,30 @@ cronRouter.post('/delinquency-check', async (c) => {
   // that one lease — under-reporting delinquency without surfacing it. These bulk checks fail the
   // whole request closed instead, matching this function's own top-level `arErr` convention above
   // (never report a delinquency digest built from partially-unknown data).
-  if (overdueRes.error) return c.json({ error: overdueRes.error.message }, 500)
+  if (recentRes.error) return c.json({ error: recentRes.error.message }, 500)
   if (existingFeeRes.error) return c.json({ error: existingFeeRes.error.message }, 500)
 
-  const overdueLeaseIds = new Set((overdueRes.data as { lease_id: string }[]).map((r) => r.lease_id))
+  // Σ recent charges per lease, in memory. `Number(...)` because PostgREST may serialize NUMERIC
+  // as a JSON string depending on client/config — a string here would concatenate, not add. A
+  // non-finite amount is a data-integrity fault, not a zero: fail closed like the query errors.
+  const recentByLease = new Map<string, number>()
+  for (const r of recentRes.data as { lease_id: string; amount: number | string }[]) {
+    const amt = Number(r.amount)
+    if (!Number.isFinite(amt)) return c.json({ error: `non-numeric charges.amount for lease ${r.lease_id}` }, 500)
+    recentByLease.set(r.lease_id, (recentByLease.get(r.lease_id) ?? 0) + amt)
+  }
   const existingFeeLeaseIds = new Set((existingFeeRes.data as { lease_id: string }[]).map((r) => r.lease_id))
+
+  // Half-cent tolerance: balances and amounts are 2dp NUMERIC in Postgres but arrive as IEEE
+  // doubles, and the subtraction can leave ~1e-13 of noise — never fine a tenant over noise.
+  const OVERDUE_EPSILON = 0.005
 
   let lateFeesPosted = 0
   const delinquentLeases: { tenant_name: string; property: string; balance: number }[] = []
 
   for (const ar of arRows as ARRow[]) {
-    if (!overdueLeaseIds.has(ar.lease_id)) continue
+    const overdue = Number(ar.balance) - (recentByLease.get(ar.lease_id) ?? 0)
+    if (!(overdue > OVERDUE_EPSILON)) continue
 
     // OI-278: with the payments feed absent, report the lease but never post the fee.
     if (existingFeeLeaseIds.has(ar.lease_id) || paymentsFeedAbsent) {
