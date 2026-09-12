@@ -204,9 +204,10 @@ describe('POST /api/cron/delinquency-check', () => {
       }
       if (table === 'charges') {
         chargesCall++
-        // Call 1: bulk overdue check -> lease_1 IS overdue. Call 2: bulk existing-fee check ->
-        // no fee posted yet this period. Call 3: the insert itself.
-        if (chargesCall === 1) return chainable([{ lease_id: 'lease_1' }])
+        // Call 1: bulk recent-charges sum (OI-234) -> no charges newer than the grace cutoff, so
+        // the whole 1200 balance is overdue. Call 2: bulk existing-fee check -> no fee posted yet
+        // this period. Call 3: the insert itself.
+        if (chargesCall === 1) return chainable([])
         if (chargesCall === 2) return chainable([])
         return { insert: vi.fn().mockResolvedValue({ error: null }) }
       }
@@ -228,6 +229,7 @@ describe('POST /api/cron/delinquency-check', () => {
   })
 
   it('does not double-post when a late fee already exists this period', async () => {
+    let chargesCall = 0
     mockFrom.mockImplementation((table: string) => {
       if (table === 'ar_ledger') return {
         select: vi.fn().mockReturnValue({
@@ -237,10 +239,14 @@ describe('POST /api/cron/delinquency-check', () => {
           }),
         }),
       }
-      // Both bulk lookups (overdue check, existing-fee check) report lease_1 as a hit — already
-      // overdue AND already fee'd this period — so the insert branch (a 3rd `.from('charges')`
-      // call) should never fire.
-      if (table === 'charges') return chainable([{ lease_id: 'lease_1' }])
+      // Call 1 (OI-234 recent-charges sum): only this month's $50 fee is newer than the cutoff, so
+      // 1150 of the 1200 balance is overdue. Call 2 (existing-fee check): lease_1 already fee'd
+      // this period — so the insert branch (a 3rd `.from('charges')` call) should never fire.
+      if (table === 'charges') {
+        chargesCall++
+        if (chargesCall === 1) return chainable([{ lease_id: 'lease_1', amount: 50 }])
+        return chainable([{ lease_id: 'lease_1' }])
+      }
       return { select: vi.fn() }
     })
 
@@ -287,9 +293,10 @@ describe('POST /api/cron/delinquency-check', () => {
       }
       if (table === 'charges') {
         chargesFromCalls++
-        // Every bulk lookup reports every lease as overdue AND already fee'd this period, so the
+        // Every bulk lookup reports every lease as overdue (a $0 recent charge leaves the full
+        // 1000 balance overdue under OI-234's recent-sum) AND already fee'd this period, so the
         // insert branch is never reached — isolates the SELECT-side N+1 fix from insert-call count.
-        return chainable(arRows.map((r) => ({ lease_id: r.lease_id })))
+        return chainable(arRows.map((r) => ({ lease_id: r.lease_id, amount: 0 })))
       }
       return { select: vi.fn() }
     })
