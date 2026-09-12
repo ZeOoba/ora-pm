@@ -89,6 +89,7 @@ const state = {
   paymentsInsertError: null as { code?: string; message: string } | null,
   priorAutopayCheckError: null as { code?: string; message: string } | null,
   debitInputsError: null as { code?: string; message: string } | null,
+  arLedgerPaddingRows: 0,
 }
 
 function paymentCounts(p: PaymentRow): boolean {
@@ -108,15 +109,45 @@ function ledgerBalanceLease1(): number {
   return ledgerBalance('lease_1')
 }
 
+// PostgREST's `max_rows` (supabase/config.toml, 1000): every SELECT response is silently cut to
+// this many rows, with no error and no marker. Every read path in this mock applies it, so a
+// handler that trusts a response's length as "complete" fails these tests the way it would in
+// production — not only when a test happens to hand it exactly 1000 rows.
+const PG_MAX_ROWS = 1000
+const capped = <T>(rows: T[]): T[] => rows.slice(0, PG_MAX_ROWS)
+
+// `leases` builder: records `.eq`/`.gt`/`.order`/`.limit` and applies them at `await` (the
+// builder is thenable at any point, like supabase-js), then applies the row cap. A keyset-paged
+// handler (`.gt('id', last).order('id').limit(n)`) and the pre-fix single `.select().eq()` both
+// run against the same honest table.
+const leasesPageSpy = vi.hoisted(() => vi.fn())
+function leasesTable() {
+  const calls: { method: string; args: unknown[] }[] = []
+  const b: Record<string, unknown> = {}
+  for (const m of ['select', 'eq', 'gt', 'order', 'limit']) {
+    b[m] = (...args: unknown[]) => { calls.push({ method: m, args }); return b }
+  }
+  b.then = (resolve: (v: unknown) => void) => {
+    leasesPageSpy(calls)
+    let rows = [...state.leases] as { id: string }[]
+    for (const c of calls) {
+      if (c.method === 'gt') rows = rows.filter(r => (r as Record<string, unknown>)[c.args[0] as string] as string > (c.args[1] as string))
+    }
+    const order = calls.find(c => c.method === 'order')
+    if (order) {
+      const key = (r: unknown) => String((r as Record<string, unknown>)[order.args[0] as string])
+      rows.sort((x, y) => (key(x) < key(y) ? -1 : key(x) > key(y) ? 1 : 0)) // bytewise, like uuid ordering
+    }
+    const limit = calls.find(c => c.method === 'limit')
+    if (limit) rows = rows.slice(0, limit.args[0] as number)
+    return resolve({ data: capped(rows), error: null })
+  }
+  return b
+}
+
 function installDbMock() {
   mockFrom.mockImplementation((table: string) => {
-    if (table === 'leases') {
-      return {
-        select: vi.fn().mockReturnValue({
-          eq: vi.fn().mockResolvedValue({ data: state.leases, error: null }),
-        }),
-      }
-    }
+    if (table === 'leases') return leasesTable()
     if (table === 'charges') {
       return {
         // Step 1: bulk upsert — simulates INSERT ... ON CONFLICT (idempotency_key) DO NOTHING
@@ -145,13 +176,13 @@ function installDbMock() {
               lte: vi.fn().mockImplementation(async (lteCol: string, lteVal: string) => {
                 if (state.debitInputsError) return { data: null, error: state.debitInputsError }
                 return {
-                  data: state.charges
+                  data: capped(state.charges
                     .filter(c =>
                       leaseIds.includes(c.lease_id) &&
                       gteCol === 'due_date' && lteCol === 'due_date' &&
                       c.due_date >= gteVal && c.due_date <= lteVal
                     )
-                    .map(c => ({ lease_id: c.lease_id, amount: c.amount })),
+                    .map(c => ({ lease_id: c.lease_id, amount: c.amount }))),
                   error: null,
                 }
               }),
@@ -168,9 +199,9 @@ function installDbMock() {
             eq: vi.fn().mockImplementation(async (col2: string, val2: string) => {
               if (state.priorAutopayCheckError) return { data: null, error: state.priorAutopayCheckError }
               return {
-                data: state.payments
+                data: capped(state.payments
                   .filter(p => col === 'lease_id' && leaseIds.includes(p.lease_id) && col2 === 'autopay_period' && p.autopay_period === val2)
-                  .map(p => ({ lease_id: p.lease_id })),
+                  .map(p => ({ lease_id: p.lease_id }))),
                 error: null,
               }
             }),
@@ -179,11 +210,11 @@ function installDbMock() {
               lte: vi.fn().mockImplementation(async (lteCol: string, lteVal: string) => {
                 if (state.debitInputsError) return { data: null, error: state.debitInputsError }
                 return {
-                  data: state.payments.filter(p =>
+                  data: capped(state.payments.filter(p =>
                     col === 'lease_id' && leaseIds.includes(p.lease_id) &&
                     gteCol === 'payment_date' && lteCol === 'payment_date' &&
                     p.payment_date !== undefined && p.payment_date >= gteVal && p.payment_date <= lteVal
-                  ),
+                  )),
                   error: null,
                 }
               }),
@@ -203,8 +234,12 @@ function installDbMock() {
           // Step 3: bulk balance lookup — .in('lease_id', ids)
           in: inArLedgerSpy.mockImplementation(async (_col: string, leaseIds: string[]) => {
             if (state.debitInputsError) return { data: null, error: state.debitInputsError }
+            // ar_ledger is one row per lease, so a real chunk of <= 100 ids can't reach the cap;
+            // `arLedgerPaddingRows` injects foreign rows AHEAD of the real ones to exercise the
+            // guard anyway (defence in depth if the view ever stops being one-row-per-lease).
+            const padding = Array.from({ length: state.arLedgerPaddingRows }, (_, i) => ({ lease_id: `pad_${i}`, balance: 0 }))
             return {
-              data: leaseIds.map((id: string) => ({ lease_id: id, balance: ledgerBalance(id) })),
+              data: capped([...padding, ...leaseIds.map((id: string) => ({ lease_id: id, balance: ledgerBalance(id) }))]),
               error: null,
             }
           }),
@@ -281,6 +316,7 @@ beforeEach(() => {
   state.paymentsInsertError = null
   state.priorAutopayCheckError = null
   state.debitInputsError = null
+  state.arLedgerPaddingRows = 0
   installDbMock()
   mockStripe.paymentIntents.create.mockResolvedValue({ id: 'pi_auto_1', status: 'processing' })
 })
@@ -618,8 +654,9 @@ describe('POST /api/cron/monthly-billing', () => {
   it('does not let a batch-limit\'s worth of already-paid leases starve leases that actually need a debit', async () => {
     const ZERO_DEBIT_COUNT = 8 // == AUTOPAY_BATCH_LIMIT
     const REAL_DEBIT_COUNT = 4
-    const zeroDebitLeases = Array.from({ length: ZERO_DEBIT_COUNT }, (_, i) => autopayLease(`paid_${i}`))
-    const realDebitLeases = Array.from({ length: REAL_DEBIT_COUNT }, (_, i) => autopayLease(`owes_${i}`))
+    // Ids prefixed so the zero-debit leases sort first: the handler pages leases ordered by id.
+    const zeroDebitLeases = Array.from({ length: ZERO_DEBIT_COUNT }, (_, i) => autopayLease(`a_paid_${i}`))
+    const realDebitLeases = Array.from({ length: REAL_DEBIT_COUNT }, (_, i) => autopayLease(`b_owes_${i}`))
     // Zero-debit leases come FIRST in eligibleLeases — the exact ordering that deadlocked round 3.
     state.leases = [...zeroDebitLeases, ...realDebitLeases]
     // Each zero-debit lease's rent is paid in full by check, in-period.
@@ -736,5 +773,102 @@ describe('POST /api/cron/monthly-billing', () => {
       expect.objectContaining({ amount: 500000 }), // the exact charge step 1 just posted, read back by step 3
       expect.anything(),
     )
+  })
+
+  // -------------------------------------------------------------------------
+  // PostgREST max_rows (1000) — silent truncation. Each test is built so the pre-fix handler
+  // does the WRONG money thing against a capped response (bills too few leases, debits twice,
+  // over-debits, under-collects), not merely so a length check trips.
+  // -------------------------------------------------------------------------
+  describe('PostgREST max_rows truncation', () => {
+    type Body = { posted: number; remaining: number; autopayErrors: number; errorMessages: string[] }
+
+    it('bills EVERY active lease when the portfolio exceeds one PostgREST page (leases select is paged, not truncated)', async () => {
+      // Direction: a truncated leases select drops leases from the run entirely — no rent charge
+      // posted and no autopay attempted for them, with a 200 and no error.
+      const N = PG_MAX_ROWS + 1
+      state.leases = Array.from({ length: N }, (_, i) => nonAutopayLease(`lease_${String(i).padStart(5, '0')}`))
+
+      const res = await postBilling()
+      expect(res.status).toBe(200)
+      const body = await res.json() as Body
+
+      expect(new Set(state.charges.map(c => c.lease_id)).size).toBe(N)
+      expect(body.posted).toBe(N)
+      // Keyset-paged, each page within the cap — not one oversized request.
+      for (const [calls] of leasesPageSpy.mock.calls as [{ method: string; args: unknown[] }[]][]) {
+        const limit = calls.find(c => c.method === 'limit')
+        expect(limit).toBeDefined()
+        expect(limit!.args[0] as number).toBeLessThanOrEqual(PG_MAX_ROWS)
+      }
+    })
+
+    it('fails closed (500, no Stripe call) when the prior-autopay pre-check chunk reaches the row cap — never re-debits a lease whose collection row was cut off', async () => {
+      // Direction: WRONG charge. lease_2 was already autopay-collected this period, but its row
+      // (still `processing`, as monthly-billing inserts it) sits past row 1000. Truncated, lease_2
+      // looks uncollected; its processing payment counts toward neither period-paid nor the
+      // ar_ledger balance, so the pre-fix handler debits it a second time.
+      const lease1 = autopayLease('lease_1')
+      const lease2 = autopayLease('lease_2')
+      state.leases = [lease1, lease2]
+      state.payments = [
+        ...Array.from({ length: PG_MAX_ROWS }, () => ({ lease_id: 'lease_1', amount: 0, method: 'ach_stripe', stripe_status: 'failed', autopay_period: '2026-06-01', payment_date: '2026-05-01' })),
+        { lease_id: 'lease_2', amount: 5000, method: 'ach_stripe', stripe_status: 'processing', autopay_period: '2026-06-01', payment_date: '2026-06-01' },
+      ]
+
+      const res = await postBilling()
+      expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
+      expect(res.status).toBe(500)
+      const body = await res.json() as Body
+      expect(body.remaining).toBe(2)
+      expect(body.errorMessages.join(' ')).toMatch(/row cap/)
+    })
+
+    it('fails closed (500, no Stripe call) when a period-payments chunk reaches the row cap — never over-debits a tenant whose manual payment was cut off', async () => {
+      // Direction: WRONG charge. lease_2 paid June by check (row 1001 of the chunk) but carries
+      // May arrears, so its ar_ledger balance still covers a full debit. Truncated, the check
+      // disappears, June looks unpaid, and the pre-fix handler debits lease_2 $5,000 for a period
+      // it already paid — sweeping the arrears via an ACH the tenant never authorized for that.
+      state.leases = [autopayLease('lease_1'), autopayLease('lease_2')]
+      state.charges = [{ lease_id: 'lease_2', idempotency_key: 'arrears_lease_2_may', amount: 5000, due_date: '2026-05-01' }]
+      state.payments = [
+        ...Array.from({ length: PG_MAX_ROWS }, () => ({ lease_id: 'lease_1', amount: 1, method: 'ach_stripe', stripe_status: 'failed', payment_date: '2026-06-02' })),
+        { lease_id: 'lease_2', amount: 5000, method: 'check', payment_date: '2026-06-03' },
+      ]
+
+      const res = await postBilling()
+      expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
+      expect(res.status).toBe(500)
+      const body = await res.json() as Body
+      expect(body.remaining).toBe(2)
+      expect(body.errorMessages.join(' ')).toMatch(/period-payments/)
+    })
+
+    it('fails closed (500, lease left in remaining) when an open-charges chunk reaches the row cap — never under-collects from a truncated period total', async () => {
+      // Direction: MISSED collection. 1000 $0 in-period charge rows precede this month's rent
+      // charge; truncated, the rent charge vanishes, the period total reads $0, and the pre-fix
+      // handler resolves lease_1 as "nothing to collect" (200, remaining 0).
+      state.charges = Array.from({ length: PG_MAX_ROWS }, (_, i) => ({ lease_id: 'lease_1', idempotency_key: `zero_${i}`, amount: 0, due_date: '2026-06-15' }))
+
+      const res = await postBilling()
+      expect(res.status).toBe(500)
+      const body = await res.json() as Body
+      expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
+      expect(body.remaining).toBe(1)
+      expect(body.errorMessages.join(' ')).toMatch(/open-charges/)
+    })
+
+    it('fails closed (500, lease left in remaining) when an ar_ledger balance chunk reaches the row cap', async () => {
+      // Direction: MISSED collection. A lease whose balance row is cut off reads balance 0, so
+      // min(periodOutstanding, 0) = 0 and the pre-fix handler resolves it as "nothing to collect."
+      state.arLedgerPaddingRows = PG_MAX_ROWS
+
+      const res = await postBilling()
+      expect(res.status).toBe(500)
+      const body = await res.json() as Body
+      expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
+      expect(body.remaining).toBe(1)
+      expect(body.errorMessages.join(' ')).toMatch(/ar_ledger/)
+    })
   })
 })
