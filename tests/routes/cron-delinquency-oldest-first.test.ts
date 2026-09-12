@@ -89,8 +89,18 @@ function makeCharges(stub: ChargesStub) {
   return table
 }
 
+// Live payments feed (OI-278 guard passes): one qualifying payment inside the lookback. The guard's own
+// behaviour is covered in cron-alerts.test.ts; these tests isolate the OI-234 overdue arithmetic.
+function livePayments() {
+  const b: Record<string, unknown> = {}
+  for (const m of ['select', 'or', 'gte', 'lte']) b[m] = () => b
+  b.limit = async () => ({ data: [{ id: 'p' }], error: null })
+  return b
+}
+
 function wire(arRows: ARRow[], charges: ReturnType<typeof makeCharges>) {
   mockFrom.mockImplementation((table: string) => {
+    if (table === 'payments') return livePayments()
     if (table === 'ar_ledger') return {
       select: vi.fn().mockReturnValue({ gt: vi.fn().mockResolvedValue({ data: arRows, error: null }) }),
     }
@@ -115,7 +125,7 @@ describe('POST /api/cron/delinquency-check — oldest-first overdue test (OI-234
     wire([ar('lease_1', 1200)], charges)
     const { status, body } = await run()
     expect(status).toBe(200)
-    expect(body).toEqual({ late_fees_posted: 0, delinquent_count: 0, email: null })
+    expect(body).toEqual({ late_fees_posted: 0, delinquent_count: 0, payments_feed_absent: false, email: null })
     expect(charges.insert).not.toHaveBeenCalled()
   })
 
@@ -161,7 +171,7 @@ describe('POST /api/cron/delinquency-check — oldest-first overdue test (OI-234
     wire([ar('lease_1', 1100)], charges)
     const { status, body } = await run()
     expect(status).toBe(200)
-    expect(body).toEqual({ late_fees_posted: 0, delinquent_count: 0, email: null })
+    expect(body).toEqual({ late_fees_posted: 0, delinquent_count: 0, payments_feed_absent: false, email: null })
     expect(charges.insert).not.toHaveBeenCalled()
   })
 
@@ -184,7 +194,7 @@ describe('POST /api/cron/delinquency-check — oldest-first overdue test (OI-234
     wire([ar('lease_1', 50)], charges)
     const { status, body } = await run()
     expect(status).toBe(200)
-    expect(body).toEqual({ late_fees_posted: 0, delinquent_count: 0, email: null })
+    expect(body).toEqual({ late_fees_posted: 0, delinquent_count: 0, payments_feed_absent: false, email: null })
     expect(charges.insert).not.toHaveBeenCalled()
   })
 
@@ -194,7 +204,7 @@ describe('POST /api/cron/delinquency-check — oldest-first overdue test (OI-234
     wire([ar('lease_1', 1000.004)], charges)
     let out = await run()
     expect(out.status).toBe(200)
-    expect(out.body).toEqual({ late_fees_posted: 0, delinquent_count: 0, email: null })
+    expect(out.body).toEqual({ late_fees_posted: 0, delinquent_count: 0, payments_feed_absent: false, email: null })
     expect(charges.insert).not.toHaveBeenCalled()
 
     // Float noise: 0.1 + 0.2 = 0.30000000000000004 vs a recent charge of 0.30.
@@ -202,7 +212,7 @@ describe('POST /api/cron/delinquency-check — oldest-first overdue test (OI-234
     wire([ar('lease_1', 0.1 + 0.2)], charges)
     out = await run()
     expect(out.status).toBe(200)
-    expect(out.body).toEqual({ late_fees_posted: 0, delinquent_count: 0, email: null })
+    expect(out.body).toEqual({ late_fees_posted: 0, delinquent_count: 0, payments_feed_absent: false, email: null })
     expect(charges.insert).not.toHaveBeenCalled()
 
     // One real cent of old money outstanding is delinquent.
@@ -254,7 +264,7 @@ describe('POST /api/cron/delinquency-check — oldest-first overdue test (OI-234
     wire([ar('lease_1', 1200)], charges)
     const { status, body } = await run()
     expect(status).toBe(200)
-    expect(body).toEqual({ late_fees_posted: 0, delinquent_count: 0, email: null })
+    expect(body).toEqual({ late_fees_posted: 0, delinquent_count: 0, payments_feed_absent: false, email: null })
   })
 
   it('(j) 23505 idempotency collision on insert -> no fee counted, lease still listed', async () => {
@@ -276,7 +286,7 @@ describe('POST /api/cron/delinquency-check — oldest-first overdue test (OI-234
     wire(rows, charges)
     const { status, body } = await run()
     expect(status).toBe(200)
-    expect(body).toEqual({ late_fees_posted: 0, delinquent_count: 0, email: null })
+    expect(body).toEqual({ late_fees_posted: 0, delinquent_count: 0, payments_feed_absent: false, email: null })
     // 3 chunks for the recent-charges query + 3 for the existing-fee guard.
     expect(charges.selects.length).toBe(6)
     for (const s of charges.selects) {
