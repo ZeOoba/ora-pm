@@ -11,21 +11,70 @@ import { checkRateLimit } from '../lib/rate-limit'
 // query per id (the O(leases) subrequest bug this whole file exists to avoid). Stops and surfaces
 // the error on the first failing chunk — never returns partial data silently, since a caller here
 // must be able to tell "some ids' state is unknown" from "confirmed empty."
+//
+// Row cap: PostgREST returns at most `max_rows` rows per request and truncates SILENTLY — no
+// error, no marker. A chunk that comes back with >= `maxRows` rows cannot be told apart from a
+// truncated one, so it is returned as an error (same fail-closed path as a query error) rather
+// than as data. `maxRows` is required, not defaulted: every caller must decide it, and a chunk
+// size small enough that real results stay well under the cap is what keeps this from tripping.
 async function fetchChunked<T>(
   ids: string[],
   chunkSize: number,
   // PromiseLike, not Promise: Supabase's un-awaited query builder is thenable (awaitable at
   // runtime) but doesn't structurally satisfy the full Promise interface (catch/finally/
   // Symbol.toStringTag) that TS requires for a bare Promise<...> parameter type.
-  fetchChunk: (chunk: string[]) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>
+  fetchChunk: (chunk: string[]) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>,
+  { maxRows }: { maxRows: number }
 ): Promise<{ data: T[]; error: { message: string } | null }> {
   const all: T[] = []
   for (let i = 0; i < ids.length; i += chunkSize) {
     const { data, error } = await fetchChunk(ids.slice(i, i + chunkSize))
     if (error) return { data: all, error }
+    if ((data?.length ?? 0) >= maxRows) {
+      return { data: all, error: { message: `chunk of ${Math.min(chunkSize, ids.length - i)} ids returned ${data!.length} rows: at the PostgREST row cap (${maxRows}), result may be truncated` } }
+    }
     all.push(...(data ?? []))
   }
   return { data: all, error: null }
+}
+
+// PostgREST `max_rows` (supabase/config.toml; the hosted default is the same). The guards below
+// assume the SERVER cap is >= this value: if it were lower, a truncated response would be shorter
+// than this and read as complete. tests/routes/cron-postgrest-max-rows-config.test.ts pins it to
+// the local config; the hosted project's setting is not visible from this repo.
+export const POSTGREST_MAX_ROWS = 1000
+
+// Keyset pagination for a query whose result set is NOT bounded by a chunk of ids (a whole-table
+// select). `fetchPage(after)` must filter `key > after` (when `after` is non-null), order by the
+// same unique key ascending, and `.limit(POSTGREST_MAX_ROWS)`. A page shorter than the limit is
+// the last one. Keyset rather than `.range()` offsets: a row whose filter state changes between
+// pages (e.g. a balance crossing 0) shifts every later offset and silently skips or repeats a row;
+// a key cursor cannot. Every page is checked to be strictly ascending and past the cursor — a page
+// that isn't (cursor ignored, wrong sort) would loop forever or double-count, so it fails closed.
+// Keys must be UUIDs: Postgres orders uuid bytewise, which for PostgREST's lowercase canonical
+// text form is the same order as JS string comparison. (A text key under a non-C collation is not.)
+async function fetchAllPages<T>(
+  fetchPage: (after: string | null) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>,
+  keyOf: (row: T) => string
+): Promise<{ data: T[]; error: { message: string } | null }> {
+  const all: T[] = []
+  let after: string | null = null
+  for (;;) {
+    const { data, error } = await fetchPage(after)
+    if (error) return { data: all, error }
+    const page = data ?? []
+    let prev: string | null = after
+    for (const row of page) {
+      const key = keyOf(row)
+      if (prev !== null && !(key > prev)) {
+        return { data: all, error: { message: `keyset page not strictly ascending past cursor ${after} (at ${key}): pagination unreliable, result may be incomplete` } }
+      }
+      prev = key
+    }
+    all.push(...page)
+    if (page.length < POSTGREST_MAX_ROWS) return { data: all, error: null }
+    after = prev
+  }
 }
 
 type Env = {
@@ -96,8 +145,10 @@ cronRouter.use('/*', async (c, next) => {
 //   - `chargesBulkFailed` / `priorAutopayCheckFailed` / `debitInputsBulkFailed` are whole-batch
 //     failures ("never debit blind") and return HTTP 500 — never look like a normal 200.
 //   - AUTOPAY_BATCH_LIMIT is MAX SAFE for this endpoint's subrequest budget, not "conservative."
-//     Fixed cost per invocation is `2 + ceil(eligible/100) + 3×ceil(notYetCollected/100)`
-//     (leases-select + charges-upsert + prior-check chunks + the three debit-input chunk sets),
+//     Fixed cost per invocation is
+//     `(floor(activeLeases/1000) + 1) + 1 + ceil(eligible/100) + 3×ceil(notYetCollected/100)`
+//     (keyset-paged leases select + charges-upsert + prior-check chunks + the three debit-input
+//     chunk sets — i.e. the same `2 + …` as before until the portfolio reaches 1000 active leases),
 //     plus 2 more if RATE_LIMIT_KV is ever provisioned (currently commented out in wrangler.toml,
 //     costs 0 today). Each Stripe call is 1-2 subrequests (`maxNetworkRetries: 1` in
 //     server/lib/stripe.ts) plus 1 for the payments insert. Raising the limit means recomputing
@@ -108,7 +159,11 @@ cronRouter.use('/*', async (c, next) => {
 //   - Every Stripe call carries a deterministic `idempotencyKey` (`autopay:<leaseId>:<period>`),
 //     so a retry — from `maxNetworkRetries`, a re-run, or the drain loop — is never itself a
 //     double-charge risk within Stripe's ~24h idempotency window.
-//   - KNOWN RESIDUAL (not fixed): `leases`/`needsDebit` have no explicit ordering, so a lease
+//   - Row cap: every read here is either keyset-paged (leases) or a `fetchChunked` call with
+//     `maxRows` — a response at PostgREST's silent `max_rows` cut is a whole-batch failure, never
+//     data (see fetchChunked/fetchAllPages at the top of this file for what each would break).
+//   - KNOWN RESIDUAL (not fixed): `leases`/`needsDebit` are ordered by lease id only (the keyset
+//     paging order — deterministic, not failure-aware), so a lease
 //     whose Stripe call fails DETERMINISTICALLY every attempt (bad payment method, revoked
 //     mandate, a bad STRIPE_SECRET_KEY failing all of them) can re-occupy the same batch slot on
 //     every drain-loop iteration, starving healthy leases behind it — the same failure shape the
@@ -139,10 +194,16 @@ cronRouter.post('/monthly-billing', async (c) => {
   const lastDay = new Date(year, month, 0).getDate()
   const periodEndStr = `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`
 
-  const { data: leases, error: leaseErr } = await db
-    .from('leases')
-    .select('id, tenant_id, base_rent_monthly, cam_estimate_monthly, start_date, autopay_enabled, autopay_payment_method_id, tenants(id, stripe_customer_id)')
-    .eq('status', 'active')
+  // Keyset-paged (fetchAllPages): a single select is cut at POSTGREST_MAX_ROWS with no error, and
+  // every active lease past the cap would silently get no rent charge and no autopay attempt.
+  const { data: leases, error: leaseErr } = await fetchAllPages((after) => {
+    let q = db
+      .from('leases')
+      .select('id, tenant_id, base_rent_monthly, cam_estimate_monthly, start_date, autopay_enabled, autopay_payment_method_id, tenants(id, stripe_customer_id)')
+      .eq('status', 'active')
+    if (after !== null) q = q.gt('id', after)
+    return q.order('id').limit(POSTGREST_MAX_ROWS)
+  }, (lease) => lease.id)
 
   if (leaseErr) return c.json({ error: leaseErr.message }, 500)
 
@@ -203,11 +264,17 @@ cronRouter.post('/monthly-billing', async (c) => {
     // index below. Chunked (via fetchChunked) at BULK_QUERY_CHUNK_SIZE ids per `.in()` call — an
     // unbounded single call risks a proxy URL-length limit once the eligible-lease count grows
     // past ~180-200.
+    //
+    // Row cap: payments_autopay_period_uniq bounds this at one row per lease, so a 100-id chunk
+    // can't legitimately reach it — but a dropped row here is the most dangerous truncation in the
+    // file: that lease reads as uncollected and is debited AGAIN (its autopay row is `processing`,
+    // so neither period-paid nor the ar_ledger balance below reflects it). Guarded regardless.
     const eligibleIds = eligibleLeases.map((l) => l.id)
     const { data: priorAutopay, error: priorErr } = await fetchChunked(
       eligibleIds,
       BULK_QUERY_CHUNK_SIZE,
-      (chunk) => db.from('payments').select('lease_id').in('lease_id', chunk).eq('autopay_period', periodStartStr)
+      (chunk) => db.from('payments').select('lease_id').in('lease_id', chunk).eq('autopay_period', periodStartStr),
+      { maxRows: POSTGREST_MAX_ROWS }
     )
 
     if (priorErr) {
@@ -245,19 +312,28 @@ cronRouter.post('/monthly-billing', async (c) => {
     // remaining=2 for 8 straight invocations). Fetching inputs for everyone lets zero-debit
     // leases resolve immediately regardless of position, and AUTOPAY_BATCH_LIMIT is applied only
     // to the leases that actually need a Stripe call below.
+    //
+    // Row cap — what a truncated chunk would do to the debit amount, min(period charges − period
+    // paid, ar balance), if it weren't failed closed into debitInputsBulkFailed:
+    //   - open-charges dropped  -> period total understated -> under-debit / resolved as zero (missed collection)
+    //   - period-paid dropped   -> a manual payment vanishes -> OVER-DEBIT up to the AR balance (wrong charge)
+    //   - ar_ledger row dropped -> balance reads 0 -> resolved as zero (missed collection)
     const [openChargesRes, periodPaymentsRes, arRes] = await Promise.all([
       fetchChunked(ids, BULK_QUERY_CHUNK_SIZE, (chunk) =>
-        db.from('charges').select('lease_id, amount').in('lease_id', chunk).gte('due_date', periodStartStr).lte('due_date', periodEndStr)),
+        db.from('charges').select('lease_id, amount').in('lease_id', chunk).gte('due_date', periodStartStr).lte('due_date', periodEndStr),
+        { maxRows: POSTGREST_MAX_ROWS }),
       // Period-paid: manual (check/wire/other) or succeeded ACH payments dated WITHIN this
       // period. Autopay is only authorized to collect THIS period's rent — it must never sweep
       // older, unrelated arrears via an automated ACH debit the tenant didn't specifically
       // authorize for that purpose.
       fetchChunked(ids, BULK_QUERY_CHUNK_SIZE, (chunk) =>
-        db.from('payments').select('lease_id, amount, method, stripe_status').in('lease_id', chunk).gte('payment_date', periodStartStr).lte('payment_date', periodEndStr)),
+        db.from('payments').select('lease_id, amount, method, stripe_status').in('lease_id', chunk).gte('payment_date', periodStartStr).lte('payment_date', periodEndStr),
+        { maxRows: POSTGREST_MAX_ROWS }),
       // Lifetime cap: never debit more than the lease's true outstanding AR balance — however
       // period-scoping above is what prevents re-debiting a tenant who already paid THIS period
       // and what prevents sweeping arrears from an earlier period into an unrelated autopay charge.
-      fetchChunked(ids, BULK_QUERY_CHUNK_SIZE, (chunk) => db.from('ar_ledger').select('lease_id, balance').in('lease_id', chunk)),
+      fetchChunked(ids, BULK_QUERY_CHUNK_SIZE, (chunk) => db.from('ar_ledger').select('lease_id, balance').in('lease_id', chunk),
+        { maxRows: POSTGREST_MAX_ROWS }),
     ])
 
     if (openChargesRes.error || periodPaymentsRes.error || arRes.error) {
@@ -517,11 +593,14 @@ cronRouter.post('/delinquency-check', async (c) => {
     return { subject, body: bodyText }
   }
 
-  // Fetch AR ledger rows with a positive balance
-  const { data: arRows, error: arErr } = await db
-    .from('ar_ledger')
-    .select('*')
-    .gt('balance', 0)
+  // Fetch AR ledger rows with a positive balance — keyset-paged on lease_id (ar_ledger is one row
+  // per lease). A single select is cut at POSTGREST_MAX_ROWS with no error: every positive-balance
+  // lease past the cap would silently get no late fee and be missing from the digest.
+  const { data: arRows, error: arErr } = await fetchAllPages((after) => {
+    let q = db.from('ar_ledger').select('*').gt('balance', 0)
+    if (after !== null) q = q.gt('lease_id', after)
+    return q.order('lease_id').limit(POSTGREST_MAX_ROWS)
+  }, (row) => row.lease_id)
 
   if (arErr) return c.json({ error: arErr.message }, 500)
   if (!arRows || arRows.length === 0) return c.json({ late_fees_posted: 0, delinquent_count: 0, payments_feed_absent: paymentsFeedAbsent, email: buildEmail([], 0) })
@@ -542,12 +621,23 @@ cronRouter.post('/delinquency-check', async (c) => {
   // Selecting `lease_id` only and testing set membership is behaviorally identical to the old
   // per-row `.limit(1)` existence check: both only ever tested "does at least one matching charge
   // exist for this lease," never used the row's own field values.
+  //
+  // Row cap (fail closed via fetchChunked's maxRows):
+  //   - overdue probe: returns EVERY charge dated <= cutoff, i.e. each lease's whole billing
+  //     history, so a 100-lease chunk reaches the cap at ~10 old charges per lease on average —
+  //     a real risk at current portfolio size, not a far-future one. A dropped row can only hide a
+  //     lease from overdueLeaseIds: a MISSED late fee and an under-reported digest.
+  //   - existing-fee guard: <= 1 row per lease per month (unique idempotency_key), so it can't
+  //     legitimately reach the cap; a dropped row would re-attempt a fee already posted (the
+  //     idempotency_key index and the 23505 branch below are the only backstop). Guarded anyway.
   const leaseIds = (arRows as ARRow[]).map((ar) => ar.lease_id)
   const [overdueRes, existingFeeRes] = await Promise.all([
     fetchChunked(leaseIds, BULK_QUERY_CHUNK_SIZE, (chunk) =>
-      db.from('charges').select('lease_id').in('lease_id', chunk).lte('due_date', cutoffStr)),
+      db.from('charges').select('lease_id').in('lease_id', chunk).lte('due_date', cutoffStr),
+      { maxRows: POSTGREST_MAX_ROWS }),
     fetchChunked(leaseIds, BULK_QUERY_CHUNK_SIZE, (chunk) =>
-      db.from('charges').select('lease_id').in('lease_id', chunk).eq('type', 'late_fee').gte('charge_date', periodStart)),
+      db.from('charges').select('lease_id').in('lease_id', chunk).eq('type', 'late_fee').gte('charge_date', periodStart),
+      { maxRows: POSTGREST_MAX_ROWS }),
   ])
 
   // Intentional behavior change from the pre-fix code, not just a mechanical batching swap: the

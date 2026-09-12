@@ -185,11 +185,7 @@ describe('POST /api/cron/delinquency-check', () => {
   it('returns email: null when no delinquent leases', async () => {
     mockFrom.mockImplementation((table: string) => {
       if (table === 'payments') return chainable([{ id: 'p' }]) // OI-278: feed live
-      return {
-        select: vi.fn().mockReturnValue({
-          gt: vi.fn().mockResolvedValue({ data: [], error: null }),
-        }),
-      }
+      return chainable([])
     })
 
     const res = await app.request('/api/cron/delinquency-check', {
@@ -206,14 +202,7 @@ describe('POST /api/cron/delinquency-check', () => {
     let chargesCall = 0
     mockFrom.mockImplementation((table: string) => {
       if (table === 'payments') return chainable([{ id: 'p' }]) // OI-278: feed live
-      if (table === 'ar_ledger') return {
-        select: vi.fn().mockReturnValue({
-          gt: vi.fn().mockResolvedValue({
-            data: [{ lease_id: 'lease_1', tenant_id: 't1', tenant_name: 'Acme', property_name: null, suite: '101', balance: 1200 }],
-            error: null,
-          }),
-        }),
-      }
+      if (table === 'ar_ledger') return chainable([{ lease_id: 'lease_1', tenant_id: 't1', tenant_name: 'Acme', property_name: null, suite: '101', balance: 1200 }])
       if (table === 'charges') {
         chargesCall++
         // Call 1: bulk overdue check -> lease_1 IS overdue. Call 2: bulk existing-fee check ->
@@ -242,14 +231,7 @@ describe('POST /api/cron/delinquency-check', () => {
   it('does not double-post when a late fee already exists this period', async () => {
     mockFrom.mockImplementation((table: string) => {
       if (table === 'payments') return chainable([{ id: 'p' }]) // OI-278: feed live
-      if (table === 'ar_ledger') return {
-        select: vi.fn().mockReturnValue({
-          gt: vi.fn().mockResolvedValue({
-            data: [{ lease_id: 'lease_1', tenant_id: 't1', tenant_name: 'Acme', property_name: null, suite: '101', balance: 1200 }],
-            error: null,
-          }),
-        }),
-      }
+      if (table === 'ar_ledger') return chainable([{ lease_id: 'lease_1', tenant_id: 't1', tenant_name: 'Acme', property_name: null, suite: '101', balance: 1200 }])
       // Both bulk lookups (overdue check, existing-fee check) report lease_1 as a hit — already
       // overdue AND already fee'd this period — so the insert branch (a 3rd `.from('charges')`
       // call) should never fire.
@@ -294,11 +276,7 @@ describe('POST /api/cron/delinquency-check', () => {
     let chargesFromCalls = 0
     mockFrom.mockImplementation((table: string) => {
       if (table === 'payments') return chainable([{ id: 'p' }]) // OI-278: feed live
-      if (table === 'ar_ledger') return {
-        select: vi.fn().mockReturnValue({
-          gt: vi.fn().mockResolvedValue({ data: arRows, error: null }),
-        }),
-      }
+      if (table === 'ar_ledger') return chainable(arRows)
       if (table === 'charges') {
         chargesFromCalls++
         // Every bulk lookup reports every lease as overdue AND already fee'd this period, so the
@@ -410,11 +388,7 @@ describe('POST /api/cron/delinquency-check', () => {
       let chargesCall = 0
       mockFrom.mockImplementation((table: string) => {
         if (table === 'payments') return paymentsTable(payments, paymentsError)
-        if (table === 'ar_ledger') return {
-          select: vi.fn().mockReturnValue({
-            gt: vi.fn().mockResolvedValue({ data: arRows, error: null }),
-          }),
-        }
+        if (table === 'ar_ledger') return chainable(arRows)
         if (table === 'charges') {
           chargesCall++
           if (chargesCall === 1) return chainable(overdue ? arRows.map((r) => ({ lease_id: r.lease_id })) : []) // overdue lookup
@@ -585,6 +559,148 @@ describe('POST /api/cron/delinquency-check', () => {
       expect(body.error).toContain('payments probe timeout')
       expect(body.email).toBeUndefined()
       expect(insertSpy).not.toHaveBeenCalled()
+    })
+  })
+
+  // PostgREST returns at most `max_rows` (supabase/config.toml, 1000) rows per request and
+  // truncates SILENTLY. Each test is built so the pre-fix handler does the wrong thing against a
+  // capped response — drops leases from the run, misses a late fee, or re-posts one — not merely
+  // so a length check trips.
+  describe('PostgREST max_rows truncation', () => {
+    const PG_MAX_ROWS = 1000
+    type Row = Record<string, unknown>
+    type Call = { method: string; args: unknown[] }
+
+    // Minimal PostgREST evaluator: records the chain, applies every filter/order/limit at `await`
+    // against `rows`, then applies the server row cap. `ignoreGt` simulates a broken keyset (a
+    // server that ignores the cursor) so the handler's non-advancing-page guard is exercised. A
+    // filter on a column the row doesn't carry throws, so a wrong column name can't pass silently.
+    function pgTable(rows: Row[], opts: { insert?: ReturnType<typeof vi.fn>; ignoreGt?: boolean } = {}) {
+      const pages: Call[][] = []
+      const table = {
+        pages,
+        insert: opts.insert ?? vi.fn().mockResolvedValue({ error: null }),
+        select() {
+          const calls: Call[] = []
+          pages.push(calls)
+          const b: Record<string, unknown> = {}
+          for (const m of ['in', 'eq', 'gt', 'gte', 'lt', 'lte', 'order', 'limit']) {
+            b[m] = (...args: unknown[]) => { calls.push({ method: m, args }); return b }
+          }
+          b.then = (resolve: (v: unknown) => void) => {
+            const col = (r: Row, c: string) => {
+              if (!(c in r)) throw new Error(`pgTable stub: filter on unknown column "${c}"`)
+              return r[c]
+            }
+            // Numbers numerically; everything else bytewise (like Postgres uuid/date ordering).
+            const cmp = (a: unknown, b2: unknown) => {
+              if (typeof a === 'number' && typeof b2 === 'number') return a - b2
+              const [x, y] = [String(a), String(b2)]
+              return x < y ? -1 : x > y ? 1 : 0
+            }
+            let out = rows
+            for (const { method, args } of calls) {
+              const [c, v] = args as [string, unknown]
+              if (method === 'in') out = out.filter(r => (v as unknown[]).includes(col(r, c)))
+              if (method === 'eq') out = out.filter(r => String(col(r, c)) === String(v))
+              if (method === 'gt' && !(opts.ignoreGt && c === 'lease_id')) out = out.filter(r => cmp(col(r, c), v) > 0)
+              if (method === 'gte') out = out.filter(r => cmp(col(r, c), v) >= 0)
+              if (method === 'lt') out = out.filter(r => cmp(col(r, c), v) < 0)
+              if (method === 'lte') out = out.filter(r => cmp(col(r, c), v) <= 0)
+            }
+            const order = calls.find(x => x.method === 'order')
+            if (order) out = [...out].sort((x, y) => cmp(col(x, order.args[0] as string), col(y, order.args[0] as string)))
+            const limit = calls.find(x => x.method === 'limit')
+            if (limit) out = out.slice(0, limit.args[0] as number)
+            return resolve({ data: out.slice(0, PG_MAX_ROWS), error: null })
+          }
+          return b
+        },
+      }
+      return table
+    }
+
+    const today = new Date().toISOString().slice(0, 10)
+    const OLD = '2020-01-15' // always past the 30-day grace cutoff
+    const arRow = (lease_id: string, balance = 100): Row => ({ lease_id, tenant_id: `t_${lease_id}`, tenant_name: `Tenant ${lease_id}`, property_name: 'Prop', suite: lease_id, balance })
+    const rentRow = (lease_id: string): Row => ({ lease_id, type: 'base_rent', amount: 100, due_date: OLD, charge_date: OLD })
+    const feeRow = (lease_id: string): Row => ({ lease_id, type: 'late_fee', amount: 50, due_date: today, charge_date: today })
+
+    function install(ar: ReturnType<typeof pgTable>, charges: ReturnType<typeof pgTable>) {
+      mockFrom.mockImplementation((table: string) => {
+        if (table === 'payments') return chainable([{ id: 'p' }]) // OI-278: feed live
+        if (table === 'ar_ledger') return ar
+        if (table === 'charges') return charges
+        return { select: vi.fn() }
+      })
+    }
+    function post() {
+      return app.request('/api/cron/delinquency-check', { method: 'POST', headers: { Authorization: 'Bearer test' } }, env)
+    }
+    type Body = { late_fees_posted: number; delinquent_count: number; error?: string }
+
+    it('evaluates EVERY positive-balance lease when the AR ledger exceeds one PostgREST page (paged, not truncated)', async () => {
+      // Direction: a truncated ar_ledger fetch drops leases from the run — their late fees are
+      // never posted and the digest under-reports, with a 200 and no error.
+      const ids = Array.from({ length: PG_MAX_ROWS + 1 }, (_, i) => `lease_${String(i).padStart(5, '0')}`)
+      const ar = pgTable(ids.map(id => arRow(id)))
+      // Every lease overdue AND already fee'd this period, so no inserts — isolates the read path.
+      const charges = pgTable([...ids.map(rentRow), ...ids.map(feeRow)])
+      install(ar, charges)
+
+      const res = await post()
+      expect(res.status).toBe(200)
+      const body = await res.json() as Body
+      expect(body.delinquent_count).toBe(ids.length)
+      for (const page of ar.pages) {
+        const limit = page.find(c => c.method === 'limit')
+        expect(limit).toBeDefined()
+        expect(limit!.args[0] as number).toBeLessThanOrEqual(PG_MAX_ROWS)
+      }
+    })
+
+    it('fails closed (500, nothing posted) if an AR ledger page does not advance the keyset cursor — never loops or double-counts', async () => {
+      const ids = Array.from({ length: PG_MAX_ROWS }, (_, i) => `lease_${String(i).padStart(5, '0')}`)
+      const insert = vi.fn().mockResolvedValue({ error: null })
+      const ar = pgTable(ids.map(id => arRow(id)), { ignoreGt: true })
+      install(ar, pgTable(ids.map(rentRow), { insert }))
+
+      const res = await post()
+      expect(res.status).toBe(500)
+      expect(insert).not.toHaveBeenCalled()
+      expect(ar.pages.length).toBeLessThanOrEqual(3)
+    })
+
+    it('fails closed (500, no fee) when the overdue-charges chunk reaches the row cap — never silently skips a delinquent lease', async () => {
+      // Direction: MISSED late fee. lease_a's 1000 historical charges fill the capped response, so
+      // lease_b's overdue charge (row 1001) is cut off and the pre-fix handler never fines lease_b
+      // while posting lease_a's fee and returning 200.
+      const insert = vi.fn().mockResolvedValue({ error: null })
+      const charges = pgTable([...Array.from({ length: PG_MAX_ROWS }, () => rentRow('lease_a')), rentRow('lease_b')], { insert })
+      install(pgTable([arRow('lease_a'), arRow('lease_b')]), charges)
+
+      const res = await post()
+      expect(res.status).toBe(500)
+      expect(insert).not.toHaveBeenCalled()
+      expect((await res.json() as Body).error).toMatch(/row cap/)
+    })
+
+    it('fails closed (500, no fee) when the existing-fee chunk reaches the row cap — never re-posts a fee whose row was cut off', async () => {
+      // Direction: DUPLICATE late fee attempt. lease_b was already fee'd this period, but its fee
+      // row sits past row 1000; truncated, the pre-fix handler inserts a second fee (only the
+      // idempotency_key unique index stands between that and a double charge).
+      const insert = vi.fn().mockResolvedValue({ error: null })
+      const charges = pgTable([
+        rentRow('lease_a'), rentRow('lease_b'),
+        ...Array.from({ length: PG_MAX_ROWS }, () => feeRow('lease_a')),
+        feeRow('lease_b'),
+      ], { insert })
+      install(pgTable([arRow('lease_a'), arRow('lease_b')]), charges)
+
+      const res = await post()
+      expect(insert).not.toHaveBeenCalled()
+      expect(res.status).toBe(500)
+      expect((await res.json() as Body).error).toMatch(/row cap/)
     })
   })
 })
