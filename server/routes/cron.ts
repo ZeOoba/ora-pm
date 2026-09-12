@@ -504,10 +504,24 @@ cronRouter.post('/delinquency-check', async (c) => {
   // such column; amount is NUMERIC(12,2) US dollars, CHECK >= 0), so no filter is applied here
   // either — only the due_date split. A late fee posted this month has due_date = today, so it
   // is always "recent" and can never make itself overdue.
+  //
+  // Row cap (PR #27 refute review): PostgREST returns at most `max_rows` (supabase/config.toml:18,
+  // 1000; hosted default is the same) per request and says nothing when it truncates. Before
+  // OI-234 a truncated existence probe could only MISS a fee; a truncated SUM understates recent_i,
+  // overstates overdue_i and FINES A CURRENT TENANT. A page that reaches the cap cannot be told
+  // apart from a complete one, so it fails the whole run closed (500, retried next run) rather
+  // than post from a possibly-partial sum. Scoped to this query only: the existing-fee guard is
+  // bounded at <= 1 row per lease per month by its unique idempotency_key.
+  const POSTGREST_MAX_ROWS = 1000
   const leaseIds = (arRows as ARRow[]).map((ar) => ar.lease_id)
   const [recentRes, existingFeeRes] = await Promise.all([
-    fetchChunked(leaseIds, BULK_QUERY_CHUNK_SIZE, (chunk) =>
-      db.from('charges').select('lease_id, amount').in('lease_id', chunk).gt('due_date', cutoffStr)),
+    fetchChunked(leaseIds, BULK_QUERY_CHUNK_SIZE, async (chunk) => {
+      const res = await db.from('charges').select('lease_id, amount').in('lease_id', chunk).gt('due_date', cutoffStr)
+      if (!res.error && (res.data?.length ?? 0) >= POSTGREST_MAX_ROWS) {
+        return { data: null, error: { message: `recent-charges chunk returned ${res.data!.length} rows: at the PostgREST row cap, sum may be truncated` } }
+      }
+      return res
+    }),
     fetchChunked(leaseIds, BULK_QUERY_CHUNK_SIZE, (chunk) =>
       db.from('charges').select('lease_id').in('lease_id', chunk).eq('type', 'late_fee').gte('charge_date', periodStart)),
   ])
