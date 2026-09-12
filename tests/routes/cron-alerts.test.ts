@@ -175,11 +175,14 @@ describe('POST /api/cron/delinquency-check', () => {
   })
 
   it('returns email: null when no delinquent leases', async () => {
-    mockFrom.mockImplementation(() => ({
-      select: vi.fn().mockReturnValue({
-        gt: vi.fn().mockResolvedValue({ data: [], error: null }),
-      }),
-    }))
+    mockFrom.mockImplementation((table: string) => {
+      if (table === 'payments') return chainable([{ id: 'p' }]) // OI-278: feed live
+      return {
+        select: vi.fn().mockReturnValue({
+          gt: vi.fn().mockResolvedValue({ data: [], error: null }),
+        }),
+      }
+    })
 
     const res = await app.request('/api/cron/delinquency-check', {
       method: 'POST',
@@ -194,6 +197,7 @@ describe('POST /api/cron/delinquency-check', () => {
   it('posts a late fee and returns a populated email digest, not a Resend call', async () => {
     let chargesCall = 0
     mockFrom.mockImplementation((table: string) => {
+      if (table === 'payments') return chainable([{ id: 'p' }]) // OI-278: feed live
       if (table === 'ar_ledger') return {
         select: vi.fn().mockReturnValue({
           gt: vi.fn().mockResolvedValue({
@@ -229,6 +233,7 @@ describe('POST /api/cron/delinquency-check', () => {
 
   it('does not double-post when a late fee already exists this period', async () => {
     mockFrom.mockImplementation((table: string) => {
+      if (table === 'payments') return chainable([{ id: 'p' }]) // OI-278: feed live
       if (table === 'ar_ledger') return {
         select: vi.fn().mockReturnValue({
           gt: vi.fn().mockResolvedValue({
@@ -280,6 +285,7 @@ describe('POST /api/cron/delinquency-check', () => {
 
     let chargesFromCalls = 0
     mockFrom.mockImplementation((table: string) => {
+      if (table === 'payments') return chainable([{ id: 'p' }]) // OI-278: feed live
       if (table === 'ar_ledger') return {
         select: vi.fn().mockReturnValue({
           gt: vi.fn().mockResolvedValue({ data: arRows, error: null }),
@@ -305,5 +311,131 @@ describe('POST /api/cron/delinquency-check', () => {
     // Pre-fix: 2 selects PER lease (overdue-check + existing-fee-check) -> scales with N (10 for
     // N=5). Post-fix: exactly 2 bulk `.in()` calls total, independent of N.
     expect(chargesFromCalls).toBeLessThanOrEqual(2)
+  })
+
+  // OI-278 (2026-09-12): the payments table had 0 rows EVER, so every ar_ledger balance was the
+  // lifetime charge total and the endpoint posted 68 $50 late fees against tenants who had simply
+  // never been recorded as paying. The handler must fail CLOSED when the payments feed is not
+  // live — no payment row dated inside PAYMENTS_FEED_LOOKBACK_DAYS (45) — posting zero fees while
+  // still reporting the delinquency counts, flagged `payments_feed_absent: true`.
+  describe('payments-feed guard (OI-278)', () => {
+    const FEED_ABSENT_LEAD = 'PAYMENTS FEED ABSENT — delinquency not reliable; no late fees posted'
+
+    function daysAgo(n: number): string {
+      const d = new Date()
+      d.setDate(d.getDate() - n)
+      return d.toISOString().slice(0, 10)
+    }
+
+    // `payments` stub that genuinely applies the handler's `.gte('payment_date', cutoff)` filter,
+    // so a stale-only fixture proves the lookback is enforced rather than just that a row exists.
+    function paymentsTable(rows: { payment_date: string }[], error: { message: string } | null = null) {
+      return {
+        select: vi.fn().mockReturnValue({
+          gte: vi.fn().mockImplementation((col: string, cutoff: string) => ({
+            limit: vi.fn().mockImplementation(async (n: number) => {
+              if (error) return { data: null, error }
+              return {
+                data: rows.filter(r => col === 'payment_date' && r.payment_date >= cutoff).slice(0, n).map(() => ({ id: 'p' })),
+                error: null,
+              }
+            }),
+          })),
+        }),
+      }
+    }
+
+    // One overdue, not-yet-fee'd AR row — the exact shape that posts a fee under a live feed.
+    function installDb(payments: { payment_date: string }[], insertSpy: ReturnType<typeof vi.fn>, paymentsError: { message: string } | null = null) {
+      let chargesCall = 0
+      mockFrom.mockImplementation((table: string) => {
+        if (table === 'payments') return paymentsTable(payments, paymentsError)
+        if (table === 'ar_ledger') return {
+          select: vi.fn().mockReturnValue({
+            gt: vi.fn().mockResolvedValue({
+              data: [{ lease_id: 'lease_1', tenant_id: 't1', tenant_name: 'Acme', property_name: null, suite: '101', balance: 1200 }],
+              error: null,
+            }),
+          }),
+        }
+        if (table === 'charges') {
+          chargesCall++
+          if (chargesCall === 1) return chainable([{ lease_id: 'lease_1' }]) // overdue
+          if (chargesCall === 2) return chainable([])                        // no fee yet this period
+          return { insert: insertSpy }
+        }
+        return { select: vi.fn() }
+      })
+    }
+
+    type Body = { late_fees_posted: number; delinquent_count: number; payments_feed_absent: boolean; email: { subject: string; body: string } | null }
+
+    function post() {
+      return app.request('/api/cron/delinquency-check', { method: 'POST', headers: { Authorization: 'Bearer test' } }, env)
+    }
+
+    it('posts ZERO late fees and flags payments_feed_absent when the payments table is empty', async () => {
+      const insertSpy = vi.fn().mockResolvedValue({ error: null })
+      installDb([], insertSpy)
+
+      const res = await post()
+      expect(res.status).toBe(200)
+      const body = await res.json() as Body
+      expect(body.payments_feed_absent).toBe(true)
+      expect(body.late_fees_posted).toBe(0)
+      expect(insertSpy).not.toHaveBeenCalled()
+      // Delinquency is still REPORTED — only the money-moving side effect is withheld.
+      expect(body.delinquent_count).toBe(1)
+      expect(body.email).not.toBeNull()
+      expect(body.email!.subject.startsWith(FEED_ABSENT_LEAD)).toBe(true)
+      expect(body.email!.body.startsWith(FEED_ABSENT_LEAD)).toBe(true)
+      expect(body.email!.subject).toContain('1 Delinquent Tenant')
+      expect(body.email!.body).toContain('Acme')
+      expect(body.email!.body).toContain('Late fees posted: 0')
+    })
+
+    it('treats a feed whose only payments are older than the lookback as absent', async () => {
+      const insertSpy = vi.fn().mockResolvedValue({ error: null })
+      installDb([{ payment_date: daysAgo(60) }, { payment_date: daysAgo(90) }], insertSpy)
+
+      const res = await post()
+      expect(res.status).toBe(200)
+      const body = await res.json() as Body
+      expect(body.payments_feed_absent).toBe(true)
+      expect(body.late_fees_posted).toBe(0)
+      expect(insertSpy).not.toHaveBeenCalled()
+      expect(body.delinquent_count).toBe(1)
+      expect(body.email!.subject.startsWith(FEED_ABSENT_LEAD)).toBe(true)
+      expect(body.email!.body.startsWith(FEED_ABSENT_LEAD)).toBe(true)
+    })
+
+    it('posts late fees per the existing rules when a payment inside the lookback exists', async () => {
+      const insertSpy = vi.fn().mockResolvedValue({ error: null })
+      installDb([{ payment_date: daysAgo(10) }], insertSpy)
+
+      const res = await post()
+      expect(res.status).toBe(200)
+      const body = await res.json() as Body
+      expect(body.payments_feed_absent).toBe(false)
+      expect(body.late_fees_posted).toBe(1)
+      expect(insertSpy).toHaveBeenCalledTimes(1)
+      expect(insertSpy).toHaveBeenCalledWith(expect.objectContaining({ type: 'late_fee', amount: 50, lease_id: 'lease_1' }))
+      expect(body.delinquent_count).toBe(1)
+      expect(body.email!.subject.startsWith('[ORA PM] 1 Delinquent Tenant')).toBe(true)
+      expect(body.email!.subject).not.toContain(FEED_ABSENT_LEAD)
+      expect(body.email!.body).not.toContain(FEED_ABSENT_LEAD)
+    })
+
+    it('fails closed (HTTP 500, no fees) when the payments-feed probe itself errors', async () => {
+      const insertSpy = vi.fn().mockResolvedValue({ error: null })
+      installDb([], insertSpy, { message: 'payments probe timeout' })
+
+      const res = await post()
+      expect(res.status).toBe(500)
+      const body = await res.json() as { error: string; email?: unknown }
+      expect(body.error).toContain('payments probe timeout')
+      expect(body.email).toBeUndefined()
+      expect(insertSpy).not.toHaveBeenCalled()
+    })
   })
 })

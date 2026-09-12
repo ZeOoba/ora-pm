@@ -466,6 +466,29 @@ cronRouter.post('/delinquency-check', async (c) => {
   const GRACE_DAYS = 30
   const LATE_FEE_AMOUNT = 50 // $50 flat late fee — adjust as needed
   const BULK_QUERY_CHUNK_SIZE = 100
+  // OI-278: a payment row dated inside this window is the evidence that the payments feed is live.
+  const PAYMENTS_FEED_LOOKBACK_DAYS = 45
+  const PAYMENTS_FEED_ABSENT_LEAD = 'PAYMENTS FEED ABSENT — delinquency not reliable; no late fees posted'
+
+  // OI-278 (2026-09-12): ar_ledger.balance = Σcharges − Σqualifying payments (migration 0010), so
+  // with NO payments recorded every lease's balance is its lifetime charge total and every lease
+  // past GRACE_DAYS looks delinquent — the live payments table had 0 rows ever, and this endpoint
+  // posted 68 $50 late fees against tenants who had never been recorded as paying. Fail CLOSED:
+  // if no payment is dated inside PAYMENTS_FEED_LOOKBACK_DAYS, post zero fees. The delinquency
+  // list is still computed and returned (flagged) so the digest shows what WOULD have fired.
+  // payment_date (indexed, the business date the period-paid lookup in monthly-billing also
+  // filters on) rather than created_at — a backfill of old payments is not a live feed.
+  const lookbackDate = new Date()
+  lookbackDate.setDate(lookbackDate.getDate() - PAYMENTS_FEED_LOOKBACK_DAYS)
+  const lookbackStr = lookbackDate.toISOString().slice(0, 10)
+  const { data: recentPayments, error: payErr } = await db
+    .from('payments')
+    .select('id')
+    .gte('payment_date', lookbackStr)
+    .limit(1)
+  // A failed probe is unknown feed state, not "absent" — same fail-the-request convention as arErr.
+  if (payErr) return c.json({ error: payErr.message }, 500)
+  const paymentsFeedAbsent = !recentPayments || recentPayments.length === 0
 
   // Fetch AR ledger rows with a positive balance
   const { data: arRows, error: arErr } = await db
@@ -474,7 +497,7 @@ cronRouter.post('/delinquency-check', async (c) => {
     .gt('balance', 0)
 
   if (arErr) return c.json({ error: arErr.message }, 500)
-  if (!arRows || arRows.length === 0) return c.json({ late_fees_posted: 0, delinquent_count: 0, email: null })
+  if (!arRows || arRows.length === 0) return c.json({ late_fees_posted: 0, delinquent_count: 0, payments_feed_absent: paymentsFeedAbsent, email: null })
 
   type ARRow = { lease_id: string; tenant_id: string; tenant_name: string; property_name: string | null; suite: string | null; balance: number }
 
@@ -518,7 +541,8 @@ cronRouter.post('/delinquency-check', async (c) => {
   for (const ar of arRows as ARRow[]) {
     if (!overdueLeaseIds.has(ar.lease_id)) continue
 
-    if (existingFeeLeaseIds.has(ar.lease_id)) {
+    // OI-278: with the payments feed absent, report the lease but never post the fee.
+    if (existingFeeLeaseIds.has(ar.lease_id) || paymentsFeedAbsent) {
       delinquentLeases.push({ tenant_name: ar.tenant_name, property: [ar.property_name, ar.suite].filter(Boolean).join(' '), balance: ar.balance })
       continue
     }
@@ -561,10 +585,14 @@ cronRouter.post('/delinquency-check', async (c) => {
   let email: { subject: string; body: string } | null = null
   if (delinquentLeases.length > 0) {
     const lines = delinquentLeases.map(d => `  • ${d.tenant_name} | ${d.property} | Balance: $${d.balance.toFixed(2)}`)
-    const bodyText = `ORA PM — Delinquency Report\n${today}\n\n${lines.join('\n')}\n\nLate fees posted: ${lateFeesPosted}\nhttps://ora-pm.pages.dev/ar`
-    const subject = `[ORA PM] ${delinquentLeases.length} Delinquent Tenant${delinquentLeases.length > 1 ? 's' : ''} — ${today}`
+    // OI-278: when the feed is absent, subject and body both LEAD with the warning so the
+    // digest can't be read as a real delinquency list (the balances are unreliable by construction).
+    const lead = paymentsFeedAbsent ? `${PAYMENTS_FEED_ABSENT_LEAD}\n\n` : ''
+    const bodyText = `${lead}ORA PM — Delinquency Report\n${today}\n\n${lines.join('\n')}\n\nLate fees posted: ${lateFeesPosted}\nhttps://ora-pm.pages.dev/ar`
+    const baseSubject = `[ORA PM] ${delinquentLeases.length} Delinquent Tenant${delinquentLeases.length > 1 ? 's' : ''} — ${today}`
+    const subject = paymentsFeedAbsent ? `${PAYMENTS_FEED_ABSENT_LEAD} — ${baseSubject}` : baseSubject
     email = { subject, body: bodyText }
   }
 
-  return c.json({ late_fees_posted: lateFeesPosted, delinquent_count: delinquentLeases.length, email })
+  return c.json({ late_fees_posted: lateFeesPosted, delinquent_count: delinquentLeases.length, payments_feed_absent: paymentsFeedAbsent, email })
 })
