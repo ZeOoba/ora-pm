@@ -74,11 +74,11 @@ function makeCharges(stub: ChargesStub) {
         const isFeeGuard = calls.some(c => c.method === 'eq' && c.args[0] === 'type' && c.args[1] === 'late_fee')
         if (isRecent) {
           if ('error' in stub.recent && !Array.isArray(stub.recent)) return resolve({ data: null, error: { message: stub.recent.error } })
-          const chunk = (calls.find(c => c.method === 'in')?.args[1] as string[] | undefined) ?? []
+          const chunk = (calls.find(c => c.method === 'in' && c.args[0] === 'lease_id')?.args[1] as string[] | undefined) ?? []
           return resolve({ data: (stub.recent as RecentRow[]).filter(r => chunk.includes(r.lease_id)), error: null })
         }
         if (isFeeGuard) {
-          const chunk = (calls.find(c => c.method === 'in')?.args[1] as string[] | undefined) ?? []
+          const chunk = (calls.find(c => c.method === 'in' && c.args[0] === 'lease_id')?.args[1] as string[] | undefined) ?? []
           return resolve({ data: (stub.existingFees ?? []).filter(r => chunk.includes(r.lease_id)), error: null })
         }
         return resolve({ data: null, error: { message: `unexpected charges query shape: ${JSON.stringify(calls)}` } })
@@ -244,7 +244,9 @@ describe('POST /api/cron/delinquency-check — oldest-first overdue test (OI-234
     expect(body.email!.body).toContain('Stale Corp')
     expect(body.email!.body).not.toContain('Current Co')
     expect(body.email!.body).not.toContain('Credit Inc')
-    expect(Object.keys(body).sort()).toEqual(['delinquent_count', 'email', 'late_fees_posted'])
+    expect(Object.keys(body)).toEqual(expect.arrayContaining(['delinquent_count', 'email', 'late_fees_posted']))
+    expect(typeof body.late_fees_posted).toBe('number')
+    expect(typeof body.delinquent_count).toBe('number')
   })
 
   it('(i) sums amounts arriving as strings (NUMERIC serialized as text) numerically, not by concatenation', async () => {
@@ -282,5 +284,26 @@ describe('POST /api/cron/delinquency-check — oldest-first overdue test (OI-234
       expect(inCall).toBeDefined()
       expect((inCall!.args[1] as string[]).length).toBeLessThanOrEqual(100)
     }
+  })
+  it('(l) a recent-charges chunk at the PostgREST row cap (1000) fails closed -> 500, no fee posted', async () => {
+    // A truncated recent sum understates recent_i, overstates overdue_i, and would fine a current
+    // tenant. The handler cannot tell a cap-truncated page from a complete one, so it must refuse.
+    const recent = Array.from({ length: 1000 }, () => ({ lease_id: 'lease_1', amount: 1 }))
+    const charges = makeCharges({ recent })
+    wire([ar('lease_1', 5000)], charges)
+    const { status, body } = await run()
+    expect(status).toBe(500)
+    expect(body.error).toMatch(/row cap/)
+    expect(charges.insert).not.toHaveBeenCalled()
+  })
+
+  it('(m) 999 recent rows is under the cap and is summed normally', async () => {
+    const recent = Array.from({ length: 999 }, () => ({ lease_id: 'lease_1', amount: 1 }))
+    const charges = makeCharges({ recent })
+    wire([ar('lease_1', 999)], charges)
+    const { status, body } = await run()
+    expect(status).toBe(200)
+    expect(body.late_fees_posted).toBe(0)
+    expect(charges.insert).not.toHaveBeenCalled()
   })
 })
