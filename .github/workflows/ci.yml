@@ -11,8 +11,8 @@ on:
 #   - main: never cancel a run mid-deploy. GitHub keeps at most one pending
 #     run per group and cancels an older pending run when a newer one queues.
 #   - PRs: cancel superseded runs on the same PR (refs/pull/N/merge).
-# FIFO order within a group is not guaranteed and re-runs of old commits
-# re-enter the group, so the deploy step also checks it is still main's tip.
+# Re-runs of old commits re-enter the group, and queue order is not relied
+# on, so the deploy step also checks the commit is still main's tip.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -49,7 +49,8 @@ jobs:
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         run: |
           set -euo pipefail
-          tip="$(git ls-remote origin refs/heads/main | cut -f1)"
+          # ls-remote patterns tail-match (refs/heads/x/refs/heads/main), so filter exactly.
+          tip="$(git ls-remote --exit-code origin refs/heads/main | awk '$2 == "refs/heads/main" { print $1 }')"
           if [ -z "$tip" ]; then
             echo "::error::Could not resolve origin/main; refusing to deploy"
             exit 1
@@ -57,7 +58,8 @@ jobs:
           if [ "$tip" = "$GITHUB_SHA" ]; then
             echo "deploy=true" >> "$GITHUB_OUTPUT"
           else
-            echo "::notice::Skipping deploy: $GITHUB_SHA is no longer the tip of main ($tip); the newer run deploys"
+            # Warning, not notice: if the newer commit has no CI run ([skip ci], cancelled), nothing deploys.
+            echo "::warning::Skipping deploy: $GITHUB_SHA is no longer the tip of main ($tip); the newer commit's run must deploy"
             echo "deploy=false" >> "$GITHUB_OUTPUT"
           fi
 
