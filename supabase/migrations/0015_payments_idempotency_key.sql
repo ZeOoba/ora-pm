@@ -11,24 +11,50 @@
 -- silently understated the tenant's balance — and that balance is what
 -- stripe.ts's amount cap and cron.ts's autopay lifetime cap both read.
 --
--- PRE-FLIGHT (run against the LIVE database BEFORE applying; every check must
--- return zero rows — if any returns rows, STOP and investigate, do not apply):
+-- PRE-FLIGHT (run against the LIVE database BEFORE applying; checks 1a/1b are
+-- a data-hygiene gate for a human to adjudicate, not an apply-safety gate —
+-- the backfill in section 2 is per-row unique on the immutable id, so this
+-- migration cannot fail to apply over pre-existing duplicates. Check 2 IS an
+-- apply-safety gate and must return zero rows):
 --
---   1. Pre-existing duplicate manual payments. This migration does NOT dedupe
---      (unlike 0011 section 1) because two manual rows with identical
---      lease/date/amount/method can be legitimate — e.g. two checks of the
---      same amount on the same day. A human must adjudicate each group
---      against the deposit records before applying, deleting only the
---      confirmed double-entries:
---        SELECT lease_id, payment_date, amount, method, count(*) FROM payments
+--   1a. Pre-existing duplicate manual payments, same lease/date/amount/method.
+--      This migration does NOT dedupe (unlike 0011 section 1) because two
+--      such rows can be legitimate — e.g. two checks of the same amount on
+--      the same day. Columns beyond the grouping key are included so a human
+--      can adjudicate each group against the deposit records without a
+--      second query; delete only the confirmed double-entries:
+--        SELECT id, lease_id, payment_date, amount, method, check_number,
+--               notes, created_at
+--        FROM payments p
 --        WHERE method IN ('check','wire','other')
---        GROUP BY lease_id, payment_date, amount, method HAVING count(*) > 1;
+--          AND EXISTS (
+--            SELECT 1 FROM payments d
+--            WHERE d.lease_id = p.lease_id AND d.payment_date = p.payment_date
+--              AND d.amount = p.amount AND d.method = p.method AND d.id <> p.id
+--          )
+--        ORDER BY lease_id, payment_date, amount;
+--
+--   1b. The same-check-number shape check 1a's grouping key can miss — e.g. a
+--      duplicate check entered under two different payment_date values.
+--      check_number is nullable (not every method carries one), so this is
+--      scoped to rows that have it:
+--        SELECT id, lease_id, payment_date, amount, method, check_number,
+--               notes, created_at
+--        FROM payments p
+--        WHERE check_number IS NOT NULL
+--          AND EXISTS (
+--            SELECT 1 FROM payments d
+--            WHERE d.lease_id = p.lease_id AND d.check_number = p.check_number
+--              AND d.id <> p.id
+--          )
+--        ORDER BY lease_id, check_number;
 --
 --   2. Backfill-value collision for payments.idempotency_key (astronomically
 --      unlikely since id is a uuid, and the column doesn't exist yet so this
 --      can only collide if a partial apply left it behind — check anyway):
 --        SELECT column_name FROM information_schema.columns
---        WHERE table_name = 'payments' AND column_name = 'idempotency_key';
+--        WHERE table_schema = 'public' AND table_name = 'payments'
+--          AND column_name = 'idempotency_key';
 --      (must return zero rows; if it returns one, this migration — or a
 --      concurrent workstream's — was already partially applied)
 
@@ -48,12 +74,7 @@ UPDATE payments
   WHERE idempotency_key IS NULL;
 
 -- ---------------------------------------------------------------------------
--- 3) NOT NULL: TEXT UNIQUE alone is useless while NULLs are allowed (Postgres
---    treats NULLs as distinct) — the exact 0011 section 3 lesson.
-ALTER TABLE payments ALTER COLUMN idempotency_key SET NOT NULL;
-
--- ---------------------------------------------------------------------------
--- 4) DB default for the insert paths that do NOT set idempotency_key —
+-- 3) DB default for the insert paths that do NOT set idempotency_key —
 --    stripe.ts (/portal/pay PaymentIntent recording) and cron.ts (autopay
 --    collection). This is a deliberate divergence from charges (0011 gave
 --    charges.idempotency_key no default; charges.ts / billing.ts / cron.ts
@@ -74,6 +95,20 @@ ALTER TABLE payments ALTER COLUMN idempotency_key SET NOT NULL;
 --    payments.ts's manual:<uuid> route default.
 ALTER TABLE payments ALTER COLUMN idempotency_key
   SET DEFAULT ('auto:' || gen_random_uuid()::text);
+
+-- ---------------------------------------------------------------------------
+-- 4) NOT NULL: TEXT UNIQUE alone is useless while NULLs are allowed (Postgres
+--    treats NULLs as distinct) — the exact 0011 section 3 lesson. Ordered
+--    after the DEFAULT (3) rather than before it: both apply paths this repo
+--    supports (the Supabase CLI's `db push`, and the dashboard-paste script's
+--    single wrapping transaction) run this whole file atomically, so there is
+--    no live window either way — but placing DEFAULT first means an insert
+--    racing a HYPOTHETICAL future non-transactional apply between these two
+--    statements would still succeed (falling back to the not-yet-set default)
+--    rather than fail NOT NULL on a payment whose Stripe/ACH side already
+--    confirmed (stripe.ts:223 confirms before this insert). Costs nothing to
+--    order this way; removes a dependency that cost something to reason about.
+ALTER TABLE payments ALTER COLUMN idempotency_key SET NOT NULL;
 
 -- ---------------------------------------------------------------------------
 -- 5) The unique index. Named (not the implicit <table>_<col>_key from a
