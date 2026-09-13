@@ -592,6 +592,9 @@ describe('POST /api/cron/delinquency-check', () => {
         select() {
           const calls: Call[] = []
           pages.push(calls)
+          // A handler whose keyset never advances must fail here, immediately and attributably —
+          // the stub resolves synchronously, so an unbounded loop would starve vitest's timeout.
+          if (pages.length > 50) throw new Error('pgTable stub: more than 50 selects on one table — pagination is not terminating')
           const b: Record<string, unknown> = {}
           for (const m of ['in', 'eq', 'gt', 'gte', 'lt', 'lte', 'order', 'limit']) {
             b[m] = (...args: unknown[]) => { calls.push({ method: m, args }); return b }
