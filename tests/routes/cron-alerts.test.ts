@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { createApp } from '../../server/index'
+import { pgTable, PG_MAX_ROWS, type Row, type Call } from '../fixtures/pg-table'
 
 const mockFrom = vi.hoisted(() => vi.fn())
 vi.mock('@supabase/supabase-js', () => ({ createClient: () => ({ from: mockFrom }) }))
@@ -24,61 +25,6 @@ beforeEach(() => {
   vi.clearAllMocks()
   vi.stubGlobal('fetch', vi.fn())
 })
-
-const PG_MAX_ROWS = 1000
-type Row = Record<string, unknown>
-type Call = { method: string; args: unknown[] }
-
-// Minimal PostgREST evaluator: records the chain, applies every filter/order/limit at `await`
-// against `rows`, then applies the server row cap. `ignoreGt` simulates a broken keyset (a
-// server that ignores the cursor) so the handler's non-advancing-page guard is exercised. A
-// filter on a column the row doesn't carry throws, so a wrong column name can't pass silently.
-// `error` makes every select resolve with that error instead of data.
-function pgTable(rows: Row[], opts: { insert?: ReturnType<typeof vi.fn>; ignoreGt?: string; error?: { message: string } } = {}) {
-  const pages: Call[][] = []
-  const table = {
-    pages,
-    insert: opts.insert ?? vi.fn().mockResolvedValue({ error: null }),
-    select() {
-      const calls: Call[] = []
-      pages.push(calls)
-      const b: Record<string, unknown> = {}
-      for (const m of ['in', 'eq', 'gt', 'gte', 'lt', 'lte', 'order', 'limit']) {
-        b[m] = (...args: unknown[]) => { calls.push({ method: m, args }); return b }
-      }
-      b.then = (resolve: (v: unknown) => void) => {
-        if (opts.error) return resolve({ data: null, error: opts.error })
-        const col = (r: Row, c: string) => {
-          if (!(c in r)) throw new Error(`pgTable stub: filter on unknown column "${c}"`)
-          return r[c]
-        }
-        // Numbers numerically; everything else bytewise (like Postgres uuid/date ordering).
-        const cmp = (a: unknown, b2: unknown) => {
-          if (typeof a === 'number' && typeof b2 === 'number') return a - b2
-          const [x, y] = [String(a), String(b2)]
-          return x < y ? -1 : x > y ? 1 : 0
-        }
-        let out = rows
-        for (const { method, args } of calls) {
-          const [c, v] = args as [string, unknown]
-          if (method === 'in') out = out.filter(r => (v as unknown[]).includes(col(r, c)))
-          if (method === 'eq') out = out.filter(r => String(col(r, c)) === String(v))
-          if (method === 'gt' && !(opts.ignoreGt === c)) out = out.filter(r => cmp(col(r, c), v) > 0)
-          if (method === 'gte') out = out.filter(r => cmp(col(r, c), v) >= 0)
-          if (method === 'lt') out = out.filter(r => cmp(col(r, c), v) < 0)
-          if (method === 'lte') out = out.filter(r => cmp(col(r, c), v) <= 0)
-        }
-        const order = calls.find(x => x.method === 'order')
-        if (order) out = [...out].sort((x, y) => cmp(col(x, order.args[0] as string), col(y, order.args[0] as string)))
-        const limit = calls.find(x => x.method === 'limit')
-        if (limit) out = out.slice(0, limit.args[0] as number)
-        return resolve({ data: out.slice(0, PG_MAX_ROWS), error: null })
-      }
-      return b
-    },
-  }
-  return table
-}
 
 describe('POST /api/cron/critical-dates-alerts', () => {
   const RECIPIENT = 'ggoldberg@oxfordra.net'
