@@ -478,6 +478,38 @@ describe('POST /api/stripe/payment-intent', () => {
     expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
   })
 
+  // Review follow-up (OI-065/223/233): description now reaches reserve_payment_intent() — a real
+  // DB write to payments.notes — BEFORE Stripe's own 1000-char cap would have rejected an oversized
+  // value. Must be rejected here, before any write, not discovered downstream as a Stripe error on
+  // an already-'pending' row.
+  it('10. returns 400 when description exceeds 500 characters, before reserving anything', async () => {
+    supabaseMocks.tenantSelectResult = { data: { id: 'tenant-1', stripe_customer_id: 'cus_test123' }, error: null }
+
+    const res = await post('/api/stripe/payment-intent', { ...validPayload, description: 'x'.repeat(501) })
+    expect(res.status).toBe(400)
+    const body = await res.json() as { error: string }
+    expect(body.error).toMatch(/description/i)
+    expect(mockDb.rpc).not.toHaveBeenCalled()
+    expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
+  })
+
+  it('11. accepts a description at exactly the 500-character boundary', async () => {
+    supabaseMocks.tenantSelectResult = { data: { id: 'tenant-1', stripe_customer_id: 'cus_test123' }, error: null }
+    mockStripe.paymentIntents.create.mockResolvedValue({ id: 'pi_boundary', status: 'processing' })
+
+    const res = await post('/api/stripe/payment-intent', { ...validPayload, description: 'x'.repeat(500) })
+    expect(res.status).toBe(200)
+  })
+
+  it('12. accepts a request with no description at all', async () => {
+    supabaseMocks.tenantSelectResult = { data: { id: 'tenant-1', stripe_customer_id: 'cus_test123' }, error: null }
+    mockStripe.paymentIntents.create.mockResolvedValue({ id: 'pi_no_desc', status: 'processing' })
+
+    const { description: _omit, ...payloadNoDescription } = validPayload
+    const res = await post('/api/stripe/payment-intent', payloadNoDescription)
+    expect(res.status).toBe(200)
+  })
+
   it('10. returns 404 when tenant not found in DB', async () => {
     supabaseMocks.tenantSelectResult = { data: null, error: { message: 'not found' } }
 

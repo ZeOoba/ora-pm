@@ -137,6 +137,16 @@ stripeRouter.post('/payment-intent', requireAal2, async (c) => {
   }
   const clientRequestIdCheck = PaymentIntentClientRequestIdSchema.safeParse(client_request_id)
   if (!clientRequestIdCheck.success) return c.json({ error: 'client_request_id must be a valid UUID' }, 400)
+  // OI-065/223/233 review follow-up: description used to reach Stripe (which enforces its own
+  // 1000-char cap) before anything else touched it, so an oversized value was rejected before any
+  // DB write. Now reserve_payment_intent() persists it to payments.notes BEFORE the Stripe call —
+  // an unvalidated value would sit in a 'pending' row (then a 'failed' one, on Stripe's rejection)
+  // rather than being rejected outright. Cap it here, before the reservation.
+  if (description !== undefined && description !== null) {
+    if (typeof description !== 'string' || description.length > 500) {
+      return c.json({ error: 'description must be a string of 500 characters or fewer' }, 400)
+    }
+  }
   if (!Number.isInteger(amount_cents)) return c.json({ error: 'amount_cents must be an integer' }, 400)
   if (amount_cents < 50) return c.json({ error: 'Minimum payment is $0.50' }, 400)
   if (amount_cents > MAX_PAYMENT_CENTS) return c.json({ error: 'Amount exceeds maximum payment of $50,000' }, 422)
@@ -330,9 +340,13 @@ function formatUsd(cents: number): string {
 }
 
 // A pending reservation whose Stripe call is younger than this is treated as
-// still in flight (double-submit) rather than abandoned. stripe-node's
-// default request timeout is 80s; the write-back after it is one DB call.
-const IN_FLIGHT_WINDOW_SECONDS = 120
+// still in flight (double-submit) rather than abandoned. server/lib/stripe.ts
+// sets maxNetworkRetries: 1, so a single request can legitimately take up to
+// ~2x the 80s default timeout (one retry) before stripe-node gives up; the
+// write-back after it is one DB call. 180s, not 120s, covers that worst case
+// (review follow-up, OI-065/223/233 — 120s could enter the resume path while
+// the original attempt was still genuinely in flight).
+const IN_FLIGHT_WINDOW_SECONDS = 180
 
 // Stripe replays the original result for an idempotency key for ~24h. Past
 // that, the same key would create a NEW PaymentIntent — so a reservation
