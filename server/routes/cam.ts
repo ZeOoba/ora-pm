@@ -1,8 +1,9 @@
 import { Hono } from 'hono'
 import { getDb } from '../db/client'
 import { calculateCAMTrueUp } from '../lib/cam'
-import { CamCalculateSchema } from '../lib/schemas'
+import { CamCalculateSchema, CamRecoverableQuerySchema } from '../lib/schemas'
 import { dbError } from '../lib/api-error'
+import { fetchAllPages, POSTGREST_MAX_ROWS } from '../lib/postgrest-paging'
 
 type Env = { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string }
 
@@ -16,6 +17,36 @@ camRouter.get('/', async (c) => {
     .order('reconciliation_year', { ascending: false })
   if (error) return dbError(c, error, 'Failed to load CAM reconciliations')
   return c.json({ data })
+})
+
+// Total recoverable expenses for a property/year — the figure the CAM page sends to /calculate as
+// total_property_recoverable_expenses. Computed here, not in the browser: GET /expenses returns one
+// PaginationSchema page (50 rows by default), so a client-side sum silently dropped every expense
+// past it, and a browser `getFullYear()` on a DATE shifted Jan 1 into the prior year. Keyset-paged
+// on expenses.id (uuid PK) so the total is complete regardless of PostgREST's max_rows cap; the
+// year is an inclusive DATE range compared in Postgres.
+camRouter.get('/recoverable-expenses', async (c) => {
+  const parsed = CamRecoverableQuerySchema.safeParse({
+    property_id: c.req.query('property_id'),
+    year: c.req.query('year'),
+  })
+  if (!parsed.success) return c.json({ error: parsed.error.flatten().fieldErrors }, 400)
+  const { property_id, year } = parsed.data
+
+  const db = getDb(c.env)
+  const { data: rows, error } = await fetchAllPages<{ id: string; amount: number }>((after) => {
+    let q = db.from('expenses').select('id, amount')
+      .eq('property_id', property_id)
+      .eq('recoverable', true)
+      .gte('expense_date', `${year}-01-01`).lte('expense_date', `${year}-12-31`)
+    if (after !== null) q = q.gt('id', after)
+    return q.order('id').limit(POSTGREST_MAX_ROWS)
+  }, (e) => e.id)
+  if (error) return dbError(c, error, 'Failed to load recoverable expenses')
+
+  // Summed in integer cents: thousands of float additions can drift before a final round.
+  const total = rows.reduce((cents, e) => cents + Math.round(Number(e.amount) * 100), 0) / 100
+  return c.json({ data: { total, count: rows.length } })
 })
 
 // Calculate and save CAM reconciliation for a lease/year
