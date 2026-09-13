@@ -1,6 +1,20 @@
 import { portalSupabase } from './supabase-portal'
 import type { Charge as DBCharge, Lease as DBLease } from '../../types'
 
+// OI-064 follow-up: a bare Error discarded the HTTP status, so a caller
+// couldn't tell a deterministic 4xx rejection (rate limit, balance cap,
+// validation — the charge never reached Stripe) from a network drop or a
+// server 5xx (genuinely unknown whether it went through). pay-attempt.ts's
+// retry-softening relies on this distinction — see runPayAttempt.
+export class PortalApiError extends Error {
+  readonly status: number
+  constructor(message: string, status: number) {
+    super(message)
+    this.name = 'PortalApiError'
+    this.status = status
+  }
+}
+
 async function portalFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const { data: { session } } = await portalSupabase.auth.getSession()
   const jwt = session?.access_token
@@ -15,7 +29,7 @@ async function portalFetch<T>(path: string, init?: RequestInit): Promise<T> {
   })
   if (!res.ok) {
     const body = await res.json().catch(() => ({})) as { error?: string }
-    throw new Error(body.error ?? `HTTP ${res.status}`)
+    throw new PortalApiError(body.error ?? `HTTP ${res.status}`, res.status)
   }
   return res.json() as Promise<T>
 }
@@ -34,7 +48,7 @@ async function stripeFetch<T>(path: string, init?: RequestInit): Promise<T> {
   })
   if (!res.ok) {
     const body = await res.json().catch(() => ({})) as { error?: string }
-    throw new Error(body.error ?? `HTTP ${res.status}`)
+    throw new PortalApiError(body.error ?? `HTTP ${res.status}`, res.status)
   }
   return res.json() as Promise<T>
 }

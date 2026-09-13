@@ -29,6 +29,9 @@ import { UnitsPage } from './pages/units/UnitsPage'
 import { RentRoll } from './pages/reports/RentRoll'
 import { StyleGuide } from './pages/StyleGuide'
 
+// Layout is route glue local to this file; `router` (a non-component export) is the real export,
+// so Fast Refresh already treats this module as non-refreshable — nothing to gain by splitting it.
+// eslint-disable-next-line react-refresh/only-export-components
 function Layout({ children }: { children: React.ReactNode }) {
   return (
     <AdminAuthGuard>

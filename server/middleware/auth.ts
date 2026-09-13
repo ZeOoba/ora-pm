@@ -1,4 +1,4 @@
-import { Context, Next } from 'hono'
+import type { Context, Next } from 'hono'
 
 // Validates the Bearer token for protected cron endpoints
 export async function cronAuthMiddleware(c: Context, next: Next): Promise<Response | void> {
