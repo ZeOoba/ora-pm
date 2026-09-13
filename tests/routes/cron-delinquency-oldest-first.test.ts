@@ -66,7 +66,7 @@ function makeCharges(stub: ChargesStub) {
       const calls: Call[] = []
       selects.push({ cols, calls })
       const b: Record<string, unknown> = {}
-      for (const m of ['in', 'gt', 'gte', 'lt', 'lte', 'eq', 'neq', 'limit', 'order']) {
+      for (const m of ['in', 'gt', 'gte', 'lt', 'lte', 'eq', 'neq', 'is', 'limit', 'order']) {
         b[m] = (...args: unknown[]) => { calls.push({ method: m, args }); return b }
       }
       b.then = (resolve: (v: unknown) => void) => {
@@ -311,6 +311,41 @@ describe('POST /api/cron/delinquency-check — oldest-first overdue test (OI-234
     expect(status).toBe(500)
     expect(body.error).toMatch(/row cap/)
     expect(charges.insert).not.toHaveBeenCalled()
+  })
+
+  // OI-278 / migration 0014: ar_ledger.balance now excludes voided charges (`voided_at IS NULL`), so
+  // recent_i must be summed over that SAME population or overdue_i = balance − recent_i drifts:
+  // a voided recent charge counted here would UNDER-state overdue (missed fee); the inverse
+  // (recent excludes, balance includes) can never happen because the view is the source. Pinned on
+  // the query shape because the stub cannot see the DB — the predicate IS the behavior.
+  it('(n) the recent-charges sum is restricted to non-voided rows (.is("voided_at", null)) — same population as ar_ledger', async () => {
+    const charges = makeCharges({ recent: [{ lease_id: 'lease_1', amount: 1200 }] })
+    wire([ar('lease_1', 1200)], charges)
+    const { status } = await run()
+    expect(status).toBe(200)
+    const recentSelects = charges.selects.filter(s => s.calls.some(c => c.method === 'gt' && c.args[0] === 'due_date'))
+    expect(recentSelects.length).toBeGreaterThan(0)
+    for (const s of recentSelects) {
+      expect(s.calls).toContainEqual({ method: 'is', args: ['voided_at', null] })
+    }
+  })
+
+  // Deliberate: the existing-fee guard does NOT exclude voided fees. A voided fee for a lease-month
+  // still occupies the unique idempotency_key `late_fee_<lease>_<year>_<month>`, so re-posting that
+  // month would 23505 anyway; keeping voided rows in the guard means a month whose fee was voided
+  // is treated as "already handled" — the conservative choice (never re-fee a voided month).
+  it('(o) the existing-fee guard still counts voided fees (a voided month is never re-fee\'d)', async () => {
+    const charges = makeCharges({ recent: [], existingFees: [{ lease_id: 'lease_1' }] })
+    wire([ar('lease_1', 1200, 'Acme')], charges)
+    const { status, body } = await run()
+    expect(status).toBe(200)
+    expect(body.late_fees_posted).toBe(0)
+    expect(charges.insert).not.toHaveBeenCalled()
+    const feeGuards = charges.selects.filter(s => s.calls.some(c => c.method === 'eq' && c.args[0] === 'type' && c.args[1] === 'late_fee'))
+    expect(feeGuards.length).toBeGreaterThan(0)
+    for (const s of feeGuards) {
+      expect(s.calls.some(c => c.method === 'is' && c.args[0] === 'voided_at')).toBe(false)
+    }
   })
 
   it('(m) 999 recent rows is under the cap and is summed normally', async () => {

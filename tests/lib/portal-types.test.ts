@@ -26,6 +26,8 @@ describe('portal-api Charge/Lease — schema-derived, no reintroduced field drif
       source: 'auto',
       idempotency_key: null,
       created_at: '2026-07-01T00:00:00Z',
+      voided_at: null,
+      void_reason: null,
     }
     expect(charge.type).toBe('rent')
   })

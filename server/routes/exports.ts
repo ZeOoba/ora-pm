@@ -64,13 +64,15 @@ exportsRouter.get('/qb-iif', async (c) => {
     { maxRows: Infinity })
   if (leaseErr) return dbError(c, leaseErr, 'Failed to load leases')
 
-  // Sum charges posted for this property in this period (accrual basis)
+  // Sum charges posted for this property in this period (accrual basis). OI-278 / migration 0014:
+  // voided charges never reach the journal — this file is what gets imported into QuickBooks.
   const totals = { rent: 0, cam: 0, utility: 0, fees: 0 }
 
   const { data: charges, error: chargeErr } = await fetchChunked(leaseRows.map(l => l.id), BULK_QUERY_CHUNK_SIZE, (chunk) =>
     fetchAllPages<{ id: string; amount: number; type: string }>((after) => {
       let q = db.from('charges').select('id, amount, type')
         .in('lease_id', chunk)
+        .is('voided_at', null)
         .gte('charge_date', startStr)
         .lte('charge_date', endStr)
       if (after !== null) q = q.gt('id', after)

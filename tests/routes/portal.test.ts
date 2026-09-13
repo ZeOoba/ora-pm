@@ -82,7 +82,19 @@ describe('GET /api/portal/me', () => {
 })
 
 describe('GET /api/portal/charges', () => {
-  it('returns charges for active leases', async () => {
+  // The charges chain the route builds: .select().in('lease_id', …).is('voided_at', null).order(…).
+  // OI-278 / migration 0014: a tenant must never see (or be able to select for Pay Now) a voided
+  // charge, so `.is('voided_at', null)` is part of the query and is asserted on below.
+  function chargesTable(result: { data: unknown; error: unknown }) {
+    const isSpy = vi.fn().mockReturnValue({ order: vi.fn().mockResolvedValue(result) })
+    return {
+      table: { select: vi.fn().mockReturnValue({ in: vi.fn().mockReturnValue({ is: isSpy }) }) },
+      isSpy,
+    }
+  }
+
+  it('returns charges for active leases, filtered to non-voided rows', async () => {
+    const charges = chargesTable({ data: [{ id: 'charge_1', amount: 1200 }], error: null })
     mockFrom.mockImplementation((table: string) => {
       if (table === 'tenants') return {
         select: vi.fn().mockReturnValue({
@@ -98,13 +110,7 @@ describe('GET /api/portal/charges', () => {
           }),
         }),
       }
-      if (table === 'charges') return {
-        select: vi.fn().mockReturnValue({
-          in: vi.fn().mockReturnValue({
-            order: vi.fn().mockResolvedValue({ data: [{ id: 'charge_1', amount: 1200 }], error: null }),
-          }),
-        }),
-      }
+      if (table === 'charges') return charges.table
       return { select: vi.fn() }
     })
 
@@ -114,6 +120,7 @@ describe('GET /api/portal/charges', () => {
     expect(res.status).toBe(200)
     const body = await res.json() as { data: { id: string }[] }
     expect(body.data).toHaveLength(1)
+    expect(charges.isSpy).toHaveBeenCalledWith('voided_at', null)
   })
 
   // RED 5 (OI-042 portal slice, site portal.ts:50) — the charges query failure
@@ -135,16 +142,10 @@ describe('GET /api/portal/charges', () => {
           }),
         }),
       }
-      if (table === 'charges') return {
-        select: vi.fn().mockReturnValue({
-          in: vi.fn().mockReturnValue({
-            order: vi.fn().mockResolvedValue({
-              data: null,
-              error: { message: 'relation "charges" violates row-level security policy tenant_own_charges', code: '42501' },
-            }),
-          }),
-        }),
-      }
+      if (table === 'charges') return chargesTable({
+        data: null,
+        error: { message: 'relation "charges" violates row-level security policy tenant_own_charges', code: '42501' },
+      }).table
       return { select: vi.fn() }
     })
 

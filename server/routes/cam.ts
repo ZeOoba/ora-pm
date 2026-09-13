@@ -68,12 +68,14 @@ camRouter.post('/calculate', async (c) => {
 
   const tenantSF: number = (lease as { units: { sf: number } } | null)?.units?.sf ?? 0
 
-  // Sum all CAM estimate charges billed this year
+  // Sum all CAM estimate charges billed this year. OI-278 / migration 0014: a voided estimate was
+  // never really billed, so it must not count as CAM paid (that would understate the true-up).
   const { data: camCharges } = await db
     .from('charges')
     .select('amount')
     .eq('lease_id', lease_id)
     .eq('type', 'cam_estimate')
+    .is('voided_at', null)
     .gte('period_start', `${reconciliation_year}-01-01`)
     .lte('period_end', `${reconciliation_year}-12-31`)
 

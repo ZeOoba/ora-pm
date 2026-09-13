@@ -49,10 +49,13 @@ portalRouter.get('/charges', async (c) => {
   const leaseIds = (leases ?? []).map((l: { id: string }) => l.id)
   if (!leaseIds.length) return c.json({ data: [] })
 
+  // OI-278 / migration 0014: voided charges are audit rows — never shown to (or payable by) the
+  // tenant, and never part of the balance ar_ledger reports.
   const { data, error } = await db
     .from('charges')
     .select('*, leases(units(properties(name,address)))')
     .in('lease_id', leaseIds)
+    .is('voided_at', null)
     .order('due_date', { ascending: false })
 
   if (error) return dbError(c, error, 'Failed to load charges')
