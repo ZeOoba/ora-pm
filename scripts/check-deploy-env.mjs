@@ -20,6 +20,11 @@
 // the code reads must appear here; tests/scripts/check-deploy-env.test.ts
 // fails on an unclassified one.
 //
+// Limitation: the Cloudflare API never returns secret_text values, so a secret
+// that exists but holds "" (or "," for a list like ADMIN_EMAILS) still counts
+// as present. This catches unset vars, not bad values; a post-deploy request to
+// an admin route is the only way to prove the value works.
+//
 // Exit codes: 0 ok · 1 required var missing · 2 could not check (fail closed).
 // --warn-only (pull-request runs) reports every problem as ::warning:: and
 // exits 0, so PRs surface misconfiguration without being blocked by it.

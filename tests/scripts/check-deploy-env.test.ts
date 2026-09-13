@@ -202,22 +202,43 @@ function walk(dir: string, exts: string[]): string[] {
 }
 
 describe('drift guard — every env var the code reads is classified', () => {
-  it('server Env interface keys are all in RUNTIME_ENV or RUNTIME_BINDINGS', () => {
-    const src = readFileSync(join(ROOT, 'server/index.ts'), 'utf-8')
-    const block = src.match(/export interface Env \{([\s\S]*?)\n\}/)
-    expect(block, 'export interface Env not found in server/index.ts').not.toBeNull()
-    const keys = [...block![1].matchAll(/^\s*([A-Z][A-Z0-9_]*)\??:/gm)].map((m) => m[1])
-    expect(keys.length).toBeGreaterThan(5)
-    for (const k of keys) expect(k in RUNTIME_ENV || RUNTIME_BINDINGS.includes(k), `Env.${k} unclassified`).toBe(true)
+  const serverFiles = () => [
+    ...walk(join(ROOT, 'server'), ['.ts', '.tsx', '.js', '.mjs']),
+    ...walk(join(ROOT, 'functions'), ['.ts', '.tsx', '.js', '.mjs']),
+  ]
+
+  // Every server-side env-name source this repo uses: `...Env` interface/type
+  // members (server/index.ts plus route-local ones like cron.ts and
+  // admin-auth.ts), dotted reads (`c.env.X`, `env?.X`, and cast reads such as
+  // auth.ts's `(c.env as { CRON_SECRET?: string })?.CRON_SECRET`), bracket
+  // reads (`c.env['X']`), and destructuring (`const { X } = c.env`).
+  function serverEnvNames() {
+    const names = new Set<string>()
+    for (const f of serverFiles()) {
+      const src = readFileSync(f, 'utf-8')
+      for (const block of src.matchAll(/(?:interface\s+\w*Env\w*|type\s+\w*Env\w*\s*=)\s*\{([\s\S]*?)\n\}/g)) {
+        for (const m of block[1].matchAll(/^\s*([A-Z][A-Z0-9_]*)\??:/gm)) names.add(m[1])
+      }
+      for (const m of src.matchAll(/\benv\b[^;\n]{0,80}?\??\.([A-Z][A-Z0-9_]{2,})\b/g)) names.add(m[1])
+      for (const m of src.matchAll(/\benv\??\.?\[\s*['"`]([A-Z][A-Z0-9_]*)['"`]\s*\]/g)) names.add(m[1])
+      for (const m of src.matchAll(/\{([^}]*)\}\s*=\s*\w*\.?env\b/g)) {
+        for (const k of m[1].matchAll(/\b([A-Z][A-Z0-9_]{2,})\b/g)) names.add(k[1])
+      }
+    }
+    return names
+  }
+
+  it('finds env names through every access pattern the server uses today', () => {
+    const names = serverEnvNames()
+    expect(names.has('ADMIN_EMAILS')).toBe(true) // c.env.ADMIN_EMAILS + admin-auth.ts local AdminEnv
+    expect(names.has('CRON_SECRET')).toBe(true) // auth.ts cast read + cron.ts local Env
+    expect(names.has('RATE_LIMIT_KV')).toBe(true)
   })
 
-  it('every c.env.X / env.X read under server/ and functions/ is classified', () => {
-    const names = new Set<string>()
-    for (const f of [...walk(join(ROOT, 'server'), ['.ts']), ...walk(join(ROOT, 'functions'), ['.ts'])]) {
-      for (const m of readFileSync(f, 'utf-8').matchAll(/\benv\)?\??\.([A-Z][A-Z0-9_]{2,})\b/g)) names.add(m[1])
+  it('every env name the server declares or reads is in RUNTIME_ENV or RUNTIME_BINDINGS', () => {
+    for (const n of serverEnvNames()) {
+      expect(n in RUNTIME_ENV || RUNTIME_BINDINGS.includes(n), `server uses env ${n} but it is unclassified`).toBe(true)
     }
-    expect(names.has('ADMIN_EMAILS')).toBe(true)
-    for (const n of names) expect(n in RUNTIME_ENV || RUNTIME_BINDINGS.includes(n), `server reads ${n} but it is unclassified`).toBe(true)
   })
 
   it('every import.meta.env.VITE_* read under src/ is in BUILD_ENV', () => {
