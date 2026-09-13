@@ -150,7 +150,11 @@ export function PortalPayNow() {
                   checked={selected.has(ch.id)}
                   onChange={() => {
                     const next = new Set(selected)
-                    next.has(ch.id) ? next.delete(ch.id) : next.add(ch.id)
+                    if (next.has(ch.id)) {
+                      next.delete(ch.id)
+                    } else {
+                      next.add(ch.id)
+                    }
                     setSelected(next)
                   }}
                   className="rounded"
