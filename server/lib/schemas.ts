@@ -96,16 +96,22 @@ export const PaymentInsertSchema = z.object({
 // after a network timeout can't mint a second PaymentIntent (OI-035).
 export const PaymentIntentClientRequestIdSchema = z.string().uuid('client_request_id must be a valid UUID')
 
-// Expense
+// Expense — ExpensesList.tsx handleSubmit is the sole write path (create only;
+// no admin-UI page issues PUT /expenses/:id yet). Keys match the `expenses`
+// columns in 0002_financial_tables.sql exactly; the form sends null for blank
+// vendor/invoice_ref/description. `.strict()` per OI-041 — the previous
+// non-strict schema named a nonexistent `is_cam_recoverable` column and
+// silently stripped the real `recoverable`, so every insert failed PGRST204.
 export const ExpenseInsertSchema = z.object({
   property_id: z.string().uuid(),
   expense_date: isoDate,
   amount: positiveAmount,
   category: z.enum(['taxes', 'insurance', 'maintenance', 'utilities', 'management', 'capital', 'other']),
-  vendor: z.string().optional(),
-  description: z.string().optional(),
-  is_cam_recoverable: z.boolean().default(false),
-})
+  vendor: z.string().nullish(),
+  description: z.string().nullish(),
+  recoverable: z.boolean().default(false),
+  invoice_ref: z.string().nullish(),
+}).strict()
 export const ExpenseUpdateSchema = ExpenseInsertSchema.partial()
 
 // CAM reconciliation calculate/save (OI-041 slice)
