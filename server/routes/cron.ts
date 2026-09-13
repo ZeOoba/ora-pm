@@ -457,34 +457,55 @@ cronRouter.post('/critical-dates-alerts', async (c) => {
   // writes dedup rows for an address that never gets mail.
   const RECIPIENTS = ['ggoldberg@oxfordra.net']
   const HORIZON_DAYS = 90
+  // Per `.in('reference_id', chunk)` call on the dedup read. The read is also filtered to this
+  // notification_type and RECIPIENTS, so a chunk returns at most chunk × RECIPIENTS.length rows
+  // (UNIQUE(notification_type, reference_id, recipient)) — keep that product under
+  // POSTGREST_MAX_ROWS or fetchChunked fails every run closed.
+  const BULK_QUERY_CHUNK_SIZE = 100
 
   // Query critical dates within horizon
   const horizonDate = new Date()
   horizonDate.setDate(horizonDate.getDate() + HORIZON_DAYS)
   const horizonStr = horizonDate.toISOString().slice(0, 10)
 
-  const { data: criticalDates, error: cdErr } = await db
-    .from('critical_dates')
-    .select('*')
-    .lte('critical_date', horizonStr)
+  type CritRow = { date_type: string; reference_id: string; tenant_name: string; property_name: string | null; suite: string | null; critical_date: string; days_until: number; urgency: string }
+
+  // Keyset-paged (fetchAllPages) on reference_id: the view has no lower date bound, so overdue
+  // history accumulates and a single select is cut at POSTGREST_MAX_ROWS with no error — every
+  // alert past the cap would silently never go out. reference_id is leases.id / insurance_certificates.id
+  // (both uuid PKs, one view row each — 0004_views_and_rls.sql), so it is a unique uuid key; the
+  // explicit order replaces the view's `ORDER BY days_until`, restored in the digest sort below.
+  const { data: criticalDates, error: cdErr } = await fetchAllPages<CritRow>((after) => {
+    let q = db.from('critical_dates').select('*').lte('critical_date', horizonStr)
+    if (after !== null) q = q.gt('reference_id', after)
+    return q.order('reference_id').limit(POSTGREST_MAX_ROWS)
+  }, (r) => r.reference_id)
 
   if (cdErr) return c.json({ error: cdErr.message }, 500)
-  if (!criticalDates || criticalDates.length === 0) {
+  if (criticalDates.length === 0) {
     return c.json({ new_alerts: 0, skipped: 0, email: null })
   }
 
-  // Dedup: check which reference_ids already notified this recipient
-  const refIds = criticalDates.map((r: { reference_id: string }) => r.reference_id)
-  const { data: alreadySent } = await db
-    .from('sent_notifications')
-    .select('reference_id, recipient')
-    .in('reference_id', refIds)
+  // Dedup: check which reference_ids already notified this recipient. Chunked (fetchChunked) so
+  // the `.in()` URL stays bounded, and fails closed on an error or a capped chunk: a truncated or
+  // failed read makes sent alerts look unsent, the insert below then hits the UNIQUE constraint,
+  // and the run 500s — permanently, since the same rows re-truncate every run.
+  const refIds = criticalDates.map(r => r.reference_id)
+  const { data: alreadySent, error: sentErr } = await fetchChunked<{ reference_id: string; recipient: string }>(
+    refIds, BULK_QUERY_CHUNK_SIZE,
+    (chunk) => db.from('sent_notifications')
+      .select('reference_id, recipient')
+      .eq('notification_type', 'critical_date_alert')
+      .in('recipient', RECIPIENTS)
+      .in('reference_id', chunk),
+    { maxRows: POSTGREST_MAX_ROWS }
+  )
+  if (sentErr) return c.json({ error: `Failed to read sent notifications: ${sentErr.message}` }, 500)
 
-  const sentSet = new Set((alreadySent ?? []).map((s: { reference_id: string; recipient: string }) => `${s.reference_id}:${s.recipient}`))
+  const sentSet = new Set(alreadySent.map(s => `${s.reference_id}:${s.recipient}`))
 
   // Determine new alerts (items not yet sent to at least one recipient)
-  type CritRow = { date_type: string; reference_id: string; tenant_name: string; property_name: string | null; suite: string | null; critical_date: string; days_until: number; urgency: string }
-  const newAlerts: CritRow[] = (criticalDates as CritRow[]).filter(r =>
+  const newAlerts: CritRow[] = criticalDates.filter(r =>
     RECIPIENTS.some(rec => !sentSet.has(`${r.reference_id}:${rec}`))
   )
 
@@ -510,7 +531,7 @@ cronRouter.post('/critical-dates-alerts', async (c) => {
 
   // Build email digest
   const urgencyOrder: Record<string, number> = { overdue: 0, urgent: 1, warning: 2, notice: 3 }
-  const sorted = [...newAlerts].sort((a, b) => (urgencyOrder[a.urgency] ?? 9) - (urgencyOrder[b.urgency] ?? 9))
+  const sorted = [...newAlerts].sort((a, b) => ((urgencyOrder[a.urgency] ?? 9) - (urgencyOrder[b.urgency] ?? 9)) || (a.days_until - b.days_until))
 
   const urgencyLabel: Record<string, string> = { overdue: '🔴 OVERDUE', urgent: '🟠 URGENT (≤30d)', warning: '🟡 WARNING (≤60d)', notice: '⚪ NOTICE (≤90d)' }
 
