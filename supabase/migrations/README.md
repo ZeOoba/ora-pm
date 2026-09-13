@@ -96,6 +96,15 @@ about — see OI-048/OI-073/OI-074 in `~/.claude` memory
 (`open-items-tracker.md`) for the full incident history and root-cause
 writeup.
 
+## Migration history log
+
+| File | Item | What it does | Pre-flight before applying to prod |
+|------|------|--------------|-----------------------------------|
+| `0011_appsec_idempotency_and_scale.sql` | OI-034/035/039/046 | `payments_stripe_pi_uniq` + `payments_autopay_period_uniq` partial unique indexes, `charges.idempotency_key` NOT NULL, money columns to `NUMERIC(12,2)` | Three checks in the file header — duplicate PaymentIntents, backfill collisions, sub-cent precision. Hit `42P16` on first apply (see History above). |
+| `0012_view_security_invoker.sql` | OI-079 | `security_invoker = true` on the views so RLS applies through them | None. |
+| `0013_enable_rls_remaining_tables.sql` | OI-078/081 | RLS on the remaining tables; `tests/db/rls-inventory-remaining-tables.test.ts` manifest | None; run `scripts/verify-rls.sql` after. |
+| `0015_payments_idempotency_key.sql` | OI-082 | `payments.idempotency_key` TEXT NOT NULL, `legacy:<id>` backfill, `auto:<uuid>` DB default for the stripe.ts/cron.ts insert paths, `payments_idempotency_key_uniq` unique index. Closes the gap 0011 left: its two partial indexes never covered manual check/wire/other rows, so a double-submitted form inserted twice and `ar_ledger` summed both. Number 0015 (0014 reserved for a concurrent workstream). | **Run the duplicate-manual-payment query in the file header against the LIVE database first** — `SELECT lease_id, payment_date, amount, method, count(*) FROM payments WHERE method IN ('check','wire','other') GROUP BY lease_id, payment_date, amount, method HAVING count(*) > 1;` — and adjudicate every group against deposit records before applying. The migration deliberately does NOT auto-dedupe: two same-day same-amount checks can be legitimate. `tests/db/payments-idempotency-migration-0015.test.ts` applies the real SQL under pg-mem. |
+
 ## Keeping this claim honest as migrations change
 
 - `tests/db/rls-inventory.test.ts` parses this directory's SQL and asserts
