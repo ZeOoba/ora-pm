@@ -11,21 +11,36 @@
 -- a void marker is the only non-destructive mechanism.
 --
 -- 0015_void_oi278_pre_guard_late_fees.sql is the DATA half (the guarded UPDATE
--- of exactly those 103 rows). Apply 0014 first; 0015 is a separate,
--- separately-confirmed step.
+-- of exactly those 103 rows). ORDERING, stated as it really runs:
+--   * The "DB Migrate (manual)" workflow (`supabase db push`) applies EVERY
+--     untracked migration in filename order in one run — 0014 and 0015 land
+--     together unless 0015 is deliberately held out of the tree for that run.
+--   * The Dashboard path (scripts/prepare-migration-for-dashboard.mjs) applies
+--     one file per paste — 0014 first, then 0015.
+--   Either way 0014 always precedes 0015 (0015 needs these columns), and 0015
+--   is self-guarding: it RAISEs unless the population is exactly the ruled
+--   census, and RETURNs with a NOTICE when there is nothing to do (already
+--   applied, or a DB with no such fees), so it is safe in a combined push.
+--   Deploy the application AFTER 0014 is live: the app's `voided_at IS NULL`
+--   filters 400 (42703) against the old schema.
 --
 -- Application code (server/routes/cron.ts, portal.ts, exports.ts, reports.ts,
 -- cam.ts) filters `voided_at IS NULL` wherever it sums or lists charges as
 -- money, so balances agree with ar_ledger; the admin list (charges.ts GET)
 -- still returns voided rows and the UI marks them.
+--
+-- RE-RUNNABLE: every statement here is safe to run again on a partially
+-- applied database (IF NOT EXISTS / DROP IF EXISTS-then-ADD / OR REPLACE), so
+-- a Dashboard paste that failed midway can simply be re-pasted whole.
 
 -- ---------------------------------------------------------------------------
 -- 1) Void columns. Both NULL = live charge. Both set = voided. A half-void
 --    (one set, one NULL) or a blank reason is rejected at the DB, so a void
 --    can never be silent about why.
-ALTER TABLE charges ADD COLUMN voided_at TIMESTAMPTZ;
-ALTER TABLE charges ADD COLUMN void_reason TEXT;
+ALTER TABLE charges ADD COLUMN IF NOT EXISTS voided_at TIMESTAMPTZ;
+ALTER TABLE charges ADD COLUMN IF NOT EXISTS void_reason TEXT;
 
+ALTER TABLE charges DROP CONSTRAINT IF EXISTS charges_void_pair_check;
 ALTER TABLE charges ADD CONSTRAINT charges_void_pair_check CHECK (
   (voided_at IS NULL AND void_reason IS NULL)
   OR (voided_at IS NOT NULL AND void_reason IS NOT NULL AND btrim(void_reason) <> '')

@@ -59,18 +59,23 @@ camRouter.post('/calculate', async (c) => {
   const { lease_id, reconciliation_year, total_property_recoverable_expenses, total_leased_sf } =
     parsed.data
 
-  // Get tenant's SF from their unit
-  const { data: lease } = await db
+  // Get tenant's SF from their unit. Both reads below FAIL CLOSED (PR #42 refute): they used to
+  // discard `error`, so a failed query read as SF 0 / estimated_cam_paid 0 and SAVED a draft with
+  // a wrong pro-rata or an overstated true_up_amount that /approve would then post. A genuinely
+  // missing lease is PGRST116 (no row) and stays a 404-class input error, not a DB failure.
+  const { data: lease, error: leaseErr } = await db
     .from('leases')
     .select('units(sf)')
     .eq('id', lease_id)
     .single()
+  if (leaseErr && leaseErr.code !== 'PGRST116') return dbError(c, leaseErr, 'Failed to load lease')
 
   const tenantSF: number = (lease as { units: { sf: number } } | null)?.units?.sf ?? 0
 
   // Sum all CAM estimate charges billed this year. OI-278 / migration 0014: a voided estimate was
   // never really billed, so it must not count as CAM paid (that would understate the true-up).
-  const { data: camCharges } = await db
+  // Fail closed on a read error — including 42703 while the app runs ahead of migration 0014.
+  const { data: camCharges, error: camChargesErr } = await db
     .from('charges')
     .select('amount')
     .eq('lease_id', lease_id)
@@ -78,6 +83,7 @@ camRouter.post('/calculate', async (c) => {
     .is('voided_at', null)
     .gte('period_start', `${reconciliation_year}-01-01`)
     .lte('period_end', `${reconciliation_year}-12-31`)
+  if (camChargesErr) return dbError(c, camChargesErr, 'Failed to load CAM estimate charges')
 
   const estimatedCamPaid = (camCharges ?? []).reduce(
     (s: number, ch: { amount: number }) => s + ch.amount,

@@ -16,7 +16,7 @@
 // has no plpgsql, so 0015's DO block is verified textually AND by extracting its UPDATE/predicate
 // and running that against seeded rows.
 import { describe, it, expect, beforeEach } from 'vitest'
-import { freshMigratedDb, readMigration, splitSqlStatements, statementBody } from '../fixtures/migrations'
+import { PG_MEM_SKIP, freshMigratedDb, readMigration, splitSqlStatements, statementBody } from '../fixtures/migrations'
 
 const FILE_0014 = '0014_charges_void.sql'
 const FILE_0015 = '0015_void_oi278_pre_guard_late_fees.sql'
@@ -124,6 +124,30 @@ describe('migration 0014 — text pins (what pg-mem cannot execute)', () => {
     expect(sql).not.toMatch(/CREATE OR REPLACE VIEW (rent_roll|critical_dates)/)
   })
 
+  // PR #42 refute (Minor 4): a partially-applied Dashboard run must be re-runnable — the column
+  // adds are IF NOT EXISTS and the CHECK is dropped-if-exists before it is added.
+  it('is re-runnable: ADD COLUMN IF NOT EXISTS for both columns, DROP CONSTRAINT IF EXISTS before ADD CONSTRAINT', () => {
+    expect(sql).toMatch(/ALTER TABLE charges ADD COLUMN IF NOT EXISTS voided_at TIMESTAMPTZ;/)
+    expect(sql).toMatch(/ALTER TABLE charges ADD COLUMN IF NOT EXISTS void_reason TEXT;/)
+    const drop = sql.search(/^ALTER TABLE charges DROP CONSTRAINT IF EXISTS charges_void_pair_check;/m)
+    const add = sql.search(/^ALTER TABLE charges ADD CONSTRAINT charges_void_pair_check CHECK/m)
+    expect(drop).toBeGreaterThan(-1)
+    expect(add).toBeGreaterThan(-1)
+    expect(drop).toBeLessThan(add)
+  })
+
+  it('applies cleanly a SECOND time on an already-migrated database (runtime, every executable statement)', () => {
+    const db = freshMigratedDb()
+    seedLease(db)
+    for (const stmt of splitSqlStatements(sql)) {
+      const body = statementBody(stmt)
+      if (PG_MEM_SKIP.some((re) => re.test(body))) continue
+      expect(() => db.none(stmt), `re-applying: ${body.slice(0, 80)}`).not.toThrow()
+    }
+    // The CHECK is still enforced after the re-apply (the drop/add pair really re-created it).
+    expect(() => insertCharge(db, { voidedAt: '2026-09-13T12:00:00Z', voidReason: null })).toThrow(/check constraint/)
+  })
+
   it('carries a commented rollback block that drops the pair CHECK and both columns', () => {
     expect(sql).toMatch(/--\s*Rollback/i)
     expect(sql).toMatch(/--\s*ALTER TABLE charges DROP CONSTRAINT IF EXISTS charges_void_pair_check/)
@@ -152,6 +176,46 @@ describe('migration 0015 — guarded void of the OI-278 pre-guard late fees', ()
   it(`RAISEs EXCEPTION unless the pre-count is exactly ${EXPECTED_COUNT} and the pre-sum exactly $${EXPECTED_SUM}`, () => {
     const b = block()
     expect(b).toMatch(new RegExp(String.raw`IF v_count <> ${EXPECTED_COUNT} OR v_sum <> ${escapeRe(EXPECTED_SUM)} THEN\s+RAISE EXCEPTION`))
+  })
+
+  // PR #42 refute (Important 2): the block must be REPLAYABLE. `supabase db push` applies every
+  // untracked migration in order, `db reset` / a branch DB / a fresh project replay all of them,
+  // and a second Dashboard paste re-runs it — on none of those is the population at census state,
+  // and an unconditional RAISE at count=0 would block every later migration. Two, and only two,
+  // count=0 shapes are benign and RETURN with a NOTICE; everything else still RAISEs.
+  describe('replay branches (NOTICE + RETURN, before the exact-count assertion)', () => {
+    const alreadyRe = new RegExp(String.raw`IF v_count = 0 AND v_already = ${EXPECTED_COUNT} THEN\s+RAISE NOTICE '[^']*already applied[^']*';\s+RETURN;\s+END IF;`)
+    const nothingRe = /IF v_count = 0 AND v_already = 0 THEN\s+RAISE NOTICE '[^']*no pre-guard late fees present; nothing to void[^']*';\s+RETURN;\s+END IF;/
+
+    it('counts rows already carrying the exact OI-278 void_reason into v_already before deciding', () => {
+      expect(block()).toMatch(new RegExp(String.raw`SELECT count\(\*\)\s+INTO v_already\s+FROM charges\s+WHERE void_reason = '${escapeRe(VOID_REASON)}'`))
+    })
+
+    it('count=0 AND exactly 103 already voided with the OI-278 reason -> NOTICE "already applied", RETURN', () => {
+      expect(block()).toMatch(alreadyRe)
+    })
+
+    it('count=0 AND zero rows carry the OI-278 reason (fresh / non-prod DB) -> NOTICE "nothing to void", RETURN', () => {
+      expect(block()).toMatch(nothingRe)
+    })
+
+    it('both benign branches precede the exact 103 / 5150.00 assertion, which is unchanged for the real apply', () => {
+      const b = block()
+      const exact = b.search(new RegExp(String.raw`IF v_count <> ${EXPECTED_COUNT} OR v_sum <> ${escapeRe(EXPECTED_SUM)} THEN`))
+      expect(exact).toBeGreaterThan(-1)
+      expect(b.search(alreadyRe)).toBeLessThan(exact)
+      expect(b.search(nothingRe)).toBeLessThan(exact)
+      expect(b.search(alreadyRe)).toBeGreaterThan(-1)
+      expect(b.search(nothingRe)).toBeGreaterThan(-1)
+    })
+
+    it('no other count=0 shape returns early — a partial prior void (0 < v_already <> 103) falls through to the RAISE', () => {
+      // Only the two pinned `IF v_count = 0 AND v_already = <n>` guards may RETURN.
+      const returns = block().match(/RETURN;/g) ?? []
+      expect(returns).toHaveLength(2)
+      const guards = block().match(/IF v_count = 0 AND v_already = (\d+) THEN/g) ?? []
+      expect(guards.map((g) => /(\d+) THEN/.exec(g)![1]).sort()).toEqual(['0', String(EXPECTED_COUNT)])
+    })
   })
 
   it('the RAISE message names the expected and actual figures so drift is diagnosable from the error alone', () => {
@@ -191,6 +255,15 @@ describe('migration 0015 — guarded void of the OI-278 pre-guard late fees', ()
   it('carries a commented rollback that un-voids ONLY rows carrying this exact void_reason', () => {
     expect(sql).toMatch(/--\s*Rollback/i)
     expect(sql).toMatch(new RegExp(String.raw`--\s*UPDATE charges SET voided_at = NULL, void_reason = NULL\s*\n?\s*--?\s*WHERE void_reason = '${escapeRe(VOID_REASON)}'`))
+  })
+
+  // PR #42 refute (Minor 5): a commented post-apply verification block the operator runs after
+  // the real apply — no live auto late fee from the pre-guard window, and exactly 103 / 5150.00
+  // voided under the exact reason.
+  it('carries a commented post-apply verification block', () => {
+    expect(sql).toMatch(/--\s*POST-APPLY/i)
+    expect(sql).toMatch(/--\s*SELECT count\(\*\) FROM charges WHERE type = 'late_fee' AND voided_at IS NULL;\s*--\s*expect 0/)
+    expect(sql).toMatch(new RegExp(String.raw`--\s*SELECT count\(\*\), SUM\(amount\) FROM charges\s*\n?\s*--\s*WHERE void_reason = '${escapeRe(VOID_REASON)}';\s*--\s*expect 103 \| 5150\.00`))
   })
 
   describe('the predicate and UPDATE, run for real against seeded rows (pg-mem, post-0014 schema)', () => {
@@ -248,7 +321,10 @@ describe('migration 0015 — guarded void of the OI-278 pre-guard late fees', ()
       expect(db.many(`SELECT count(*) AS n FROM charges`)[0].n).toBe(5)
     })
 
-    it('is idempotent — a second run matches zero rows (voided_at IS NULL is part of the predicate)', () => {
+    // A second run of the UPDATE alone touches nothing because `voided_at IS NULL` is in the
+    // predicate; the DO block around it does not re-void either — it takes the "already applied"
+    // NOTICE branch (pinned textually above, pg-mem cannot execute plpgsql).
+    it('the UPDATE re-run matches zero rows — already-voided rows are never re-stamped', () => {
       insertCharge(db, { createdAt: '2026-08-04T15:00:00Z' })
       db.none(updateStmt())
       const [again] = db.many(`SELECT count(*) AS n FROM charges WHERE ${predicateFromUpdate()}`)
