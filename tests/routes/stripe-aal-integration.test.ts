@@ -23,10 +23,16 @@ const mockGetUser = vi.hoisted(() => vi.fn())
 const mockGetAal = vi.hoisted(() => vi.fn())
 const mockFrom = vi.hoisted(() => vi.fn())
 
+// OI-065/223/233: /payment-intent now reserves its ledger row through the
+// reserve_payment_intent() RPC before calling Stripe — stub it as a plain
+// successful reservation so the happy path can still reach Stripe.
+const mockRpc = vi.hoisted(() => vi.fn())
+
 vi.mock('@supabase/supabase-js', () => ({
   createClient: () => ({
     auth: { getUser: mockGetUser, mfa: { getAuthenticatorAssuranceLevel: mockGetAal } },
     from: mockFrom,
+    rpc: mockRpc,
   }),
 }))
 
@@ -90,9 +96,22 @@ function armDbHappyPath() {
       }
     }
     if (table === 'payments') {
-      return { insert: vi.fn().mockResolvedValue({ error: null }) }
+      const written = { data: [{ id: 'pay_1' }], error: null }
+      return {
+        insert: vi.fn().mockResolvedValue({ error: null }),
+        update: vi.fn().mockReturnValue({
+          eq: vi.fn().mockReturnValue({
+            in: vi.fn().mockReturnValue({ select: vi.fn().mockResolvedValue(written) }),
+            eq: vi.fn().mockReturnValue({ select: vi.fn().mockResolvedValue(written) }),
+          }),
+        }),
+      }
     }
     return { select: vi.fn() }
+  })
+  mockRpc.mockResolvedValue({
+    data: { outcome: 'reserved', payment_id: 'pay_1', outstanding_balance_cents: 50000, in_flight_cents: 0, available_cents: 50000 },
+    error: null,
   })
 }
 
