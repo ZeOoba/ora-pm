@@ -122,6 +122,13 @@ export const CamCalculateSchema = z.object({
   total_leased_sf: positiveAmount,
 })
 
+// GET /cam/recoverable-expenses query — uuid-checked so a malformed id is a 400, not a Postgres
+// 22P02 500; year bounds match the CAM page's year input (min 2000).
+export const CamRecoverableQuerySchema = z.object({
+  property_id: z.string().uuid(),
+  year: z.coerce.number().int().min(2000).max(2100),
+})
+
 // ---------------------------------------------------------------------------
 // Remaining CRUD mass-assignment schemas (OI-041 remainder — Task 9).
 // All `.strict()` — an unexpected field (including `id`/`created_at`) surfaces
