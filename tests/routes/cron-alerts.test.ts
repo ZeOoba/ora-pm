@@ -25,69 +25,113 @@ beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn())
 })
 
+const PG_MAX_ROWS = 1000
+type Row = Record<string, unknown>
+type Call = { method: string; args: unknown[] }
+
+// Minimal PostgREST evaluator: records the chain, applies every filter/order/limit at `await`
+// against `rows`, then applies the server row cap. `ignoreGt` simulates a broken keyset (a
+// server that ignores the cursor) so the handler's non-advancing-page guard is exercised. A
+// filter on a column the row doesn't carry throws, so a wrong column name can't pass silently.
+// `error` makes every select resolve with that error instead of data.
+function pgTable(rows: Row[], opts: { insert?: ReturnType<typeof vi.fn>; ignoreGt?: string; error?: { message: string } } = {}) {
+  const pages: Call[][] = []
+  const table = {
+    pages,
+    insert: opts.insert ?? vi.fn().mockResolvedValue({ error: null }),
+    select() {
+      const calls: Call[] = []
+      pages.push(calls)
+      // A handler whose keyset never advances must fail here, immediately and attributably —
+      // the stub resolves synchronously, so an unbounded loop would starve vitest's timeout.
+      if (pages.length > 50) throw new Error('pgTable stub: more than 50 selects on one table — pagination is not terminating')
+      const b: Record<string, unknown> = {}
+      for (const m of ['in', 'eq', 'gt', 'gte', 'lt', 'lte', 'order', 'limit']) {
+        b[m] = (...args: unknown[]) => { calls.push({ method: m, args }); return b }
+      }
+      b.then = (resolve: (v: unknown) => void) => {
+        if (opts.error) return resolve({ data: null, error: opts.error })
+        const col = (r: Row, c: string) => {
+          if (!(c in r)) throw new Error(`pgTable stub: filter on unknown column "${c}"`)
+          return r[c]
+        }
+        // Numbers numerically; everything else bytewise (like Postgres uuid/date ordering).
+        const cmp = (a: unknown, b2: unknown) => {
+          if (typeof a === 'number' && typeof b2 === 'number') return a - b2
+          const [x, y] = [String(a), String(b2)]
+          return x < y ? -1 : x > y ? 1 : 0
+        }
+        let out = rows
+        for (const { method, args } of calls) {
+          const [c, v] = args as [string, unknown]
+          if (method === 'in') out = out.filter(r => (v as unknown[]).includes(col(r, c)))
+          if (method === 'eq') out = out.filter(r => String(col(r, c)) === String(v))
+          if (method === 'gt' && !(opts.ignoreGt === c)) out = out.filter(r => cmp(col(r, c), v) > 0)
+          if (method === 'gte') out = out.filter(r => cmp(col(r, c), v) >= 0)
+          if (method === 'lt') out = out.filter(r => cmp(col(r, c), v) < 0)
+          if (method === 'lte') out = out.filter(r => cmp(col(r, c), v) <= 0)
+        }
+        const order = calls.find(x => x.method === 'order')
+        if (order) out = [...out].sort((x, y) => cmp(col(x, order.args[0] as string), col(y, order.args[0] as string)))
+        const limit = calls.find(x => x.method === 'limit')
+        if (limit) out = out.slice(0, limit.args[0] as number)
+        return resolve({ data: out.slice(0, PG_MAX_ROWS), error: null })
+      }
+      return b
+    },
+  }
+  return table
+}
+
 describe('POST /api/cron/critical-dates-alerts', () => {
+  const RECIPIENT = 'ggoldberg@oxfordra.net'
+  const critRow = (reference_id: string, over: Row = {}): Row => ({
+    date_type: 'lease_expiration', reference_id, tenant_name: 'Acme', property_name: '9050 Red Branch', suite: '101',
+    critical_date: '2026-07-01', days_until: 26, urgency: 'urgent', ...over,
+  })
+  const sentRow = (reference_id: string, recipient = RECIPIENT, notification_type = 'critical_date_alert'): Row =>
+    ({ notification_type, reference_id, recipient })
+  // Enforces UNIQUE(notification_type, reference_id, recipient) (0003_operations_tables.sql) against
+  // `existing`, so a handler that re-inserts an already-sent row gets the production error back.
+  const uniqueInsert = (existing: Row[]) => vi.fn().mockImplementation((rows: Row[]) => {
+    const key = (r: Row) => `${r.notification_type}|${r.reference_id}|${r.recipient}`
+    const have = new Set(existing.map(key))
+    const dup = rows.find(r => have.has(key(r)))
+    return Promise.resolve({ error: dup ? { message: `duplicate key value violates unique constraint (${key(dup)})` } : null })
+  })
+  function install(crit: ReturnType<typeof pgTable>, sent: ReturnType<typeof pgTable>) {
+    mockFrom.mockImplementation((table: string) => {
+      if (table === 'critical_dates') return crit
+      if (table === 'sent_notifications') return sent
+      return { select: vi.fn() }
+    })
+  }
+  function post() {
+    return app.request('/api/cron/critical-dates-alerts', { method: 'POST', headers: { Authorization: 'Bearer test' } }, env)
+  }
+  type Body = { new_alerts: number; skipped: number; email: { subject: string; body: string } | null; error?: string }
+
   it('returns 401 without cron secret', async () => {
     const res = await app.request('/api/cron/critical-dates-alerts', { method: 'POST' }, env)
     expect(res.status).toBe(401)
   })
 
   it('queries critical_dates and returns email: null when no alerts due', async () => {
-    mockFrom.mockImplementation((table: string) => {
-      if (table === 'critical_dates') return {
-        select: vi.fn().mockReturnValue({
-          lte: vi.fn().mockResolvedValue({ data: [], error: null }),
-        }),
-      }
-      if (table === 'sent_notifications') return {
-        select: vi.fn().mockReturnValue({
-          in: vi.fn().mockResolvedValue({ data: [], error: null }),
-        }),
-        insert: vi.fn().mockResolvedValue({ error: null }),
-      }
-      return { select: vi.fn() }
-    })
-
-    const res = await app.request('/api/cron/critical-dates-alerts', {
-      method: 'POST',
-      headers: { Authorization: 'Bearer test' },
-    }, env)
+    install(pgTable([]), pgTable([]))
+    const res = await post()
     expect(res.status).toBe(200)
-    const body = await res.json() as { new_alerts: number; email: unknown }
+    const body = await res.json() as Body
     expect(body.new_alerts).toBe(0)
     expect(body.email).toBeNull()
   })
 
   it('records new alerts and returns a populated email digest, not a Resend call', async () => {
-    let insertedBefore: unknown = null
-    mockFrom.mockImplementation((table: string) => {
-      if (table === 'critical_dates') return {
-        select: vi.fn().mockReturnValue({
-          lte: vi.fn().mockResolvedValue({
-            data: [
-              { date_type: 'lease_expiration', reference_id: 'lease_1', tenant_name: 'Acme', property_name: '9050 Red Branch', suite: '101', critical_date: '2026-07-01', days_until: 26, urgency: 'urgent' },
-            ],
-            error: null,
-          }),
-        }),
-      }
-      if (table === 'sent_notifications') return {
-        select: vi.fn().mockReturnValue({
-          in: vi.fn().mockResolvedValue({ data: [], error: null }),
-        }),
-        insert: vi.fn().mockImplementation((rows: unknown[]) => {
-          insertedBefore = rows
-          return Promise.resolve({ error: null })
-        }),
-      }
-      return { select: vi.fn() }
-    })
+    const sent = pgTable([])
+    install(pgTable([critRow('lease_1')]), sent)
 
-    const res = await app.request('/api/cron/critical-dates-alerts', {
-      method: 'POST',
-      headers: { Authorization: 'Bearer test' },
-    }, env)
+    const res = await post()
     expect(res.status).toBe(200)
-    const body = await res.json() as { new_alerts: number; skipped: number; email: { subject: string; body: string } | null }
+    const body = await res.json() as Body
     expect(body.new_alerts).toBe(1)
     expect(body.skipped).toBe(0)
     // Proves the handler called insert with the right dedup rows before
@@ -95,8 +139,8 @@ describe('POST /api/cron/critical-dates-alerts', () => {
     // resolved before the digest was built (that ordering is proven by the
     // separate "never returns email content when the dedup write fails"
     // test below, which shows no digest is returned when the insert fails).
-    expect(insertedBefore).toEqual([
-      { notification_type: 'critical_date_alert', reference_id: 'lease_1', recipient: 'ggoldberg@oxfordra.net' },
+    expect(sent.insert).toHaveBeenCalledWith([
+      { notification_type: 'critical_date_alert', reference_id: 'lease_1', recipient: RECIPIENT },
     ])
     expect(body.email).not.toBeNull()
     expect(body.email!.subject).toContain('1 Critical Date')
@@ -107,72 +151,122 @@ describe('POST /api/cron/critical-dates-alerts', () => {
   })
 
   it('skips alerts already sent to the (single) recipient', async () => {
-    mockFrom.mockImplementation((table: string) => {
-      if (table === 'critical_dates') return {
-        select: vi.fn().mockReturnValue({
-          lte: vi.fn().mockResolvedValue({
-            data: [
-              { date_type: 'lease_expiration', reference_id: 'lease_1', tenant_name: 'Acme', property_name: '9050 Red Branch', suite: '101', critical_date: '2026-07-01', days_until: 26, urgency: 'urgent' },
-            ],
-            error: null,
-          }),
-        }),
-      }
-      if (table === 'sent_notifications') return {
-        select: vi.fn().mockReturnValue({
-          in: vi.fn().mockResolvedValue({
-            data: [
-              { reference_id: 'lease_1', recipient: 'ggoldberg@oxfordra.net' },
-            ],
-            error: null,
-          }),
-        }),
-        insert: vi.fn().mockResolvedValue({ error: null }),
-      }
-      return { select: vi.fn() }
-    })
-
-    const res = await app.request('/api/cron/critical-dates-alerts', {
-      method: 'POST',
-      headers: { Authorization: 'Bearer test' },
-    }, env)
+    install(pgTable([critRow('lease_1')]), pgTable([sentRow('lease_1')]))
+    const res = await post()
     expect(res.status).toBe(200)
-    const body = await res.json() as { new_alerts: number; skipped: number; email: unknown }
+    const body = await res.json() as Body
     expect(body.new_alerts).toBe(0)
     expect(body.skipped).toBe(1)
     expect(body.email).toBeNull()
   })
 
-  it('never returns email content when the dedup write fails', async () => {
-    mockFrom.mockImplementation((table: string) => {
-      if (table === 'critical_dates') return {
-        select: vi.fn().mockReturnValue({
-          lte: vi.fn().mockResolvedValue({
-            data: [
-              { date_type: 'lease_expiration', reference_id: 'lease_1', tenant_name: 'Acme', property_name: '9050 Red Branch', suite: '101', critical_date: '2026-07-01', days_until: 26, urgency: 'urgent' },
-            ],
-            error: null,
-          }),
-        }),
-      }
-      if (table === 'sent_notifications') return {
-        select: vi.fn().mockReturnValue({
-          in: vi.fn().mockResolvedValue({ data: [], error: null }),
-        }),
-        insert: vi.fn().mockResolvedValue({ error: { message: 'boom' } }),
-      }
-      return { select: vi.fn() }
-    })
+  it('does not treat a different notification_type for the same reference as already sent', async () => {
+    // UNIQUE is (notification_type, reference_id, recipient): an insurance_expiry row for this id
+    // neither blocks the insert nor means a critical-date alert went out.
+    const sent = pgTable([sentRow('lease_1', RECIPIENT, 'insurance_expiry')])
+    install(pgTable([critRow('lease_1')]), sent)
+    const res = await post()
+    expect(res.status).toBe(200)
+    expect((await res.json() as Body).new_alerts).toBe(1)
+    expect(sent.insert).toHaveBeenCalledTimes(1)
+  })
 
-    const res = await app.request('/api/cron/critical-dates-alerts', {
-      method: 'POST',
-      headers: { Authorization: 'Bearer test' },
-    }, env)
+  it('digest lists alerts by urgency, then soonest first within an urgency', async () => {
+    install(pgTable([
+      critRow('ref_a', { tenant_name: 'Later', days_until: 50, urgency: 'warning' }),
+      critRow('ref_b', { tenant_name: 'Sooner', days_until: 35, urgency: 'warning' }),
+      critRow('ref_c', { tenant_name: 'Overdue', days_until: -3, urgency: 'overdue' }),
+    ]), pgTable([]))
+    const body = await (await post()).json() as Body
+    const text = body.email!.body
+    expect(text.indexOf('Overdue')).toBeLessThan(text.indexOf('Sooner'))
+    expect(text.indexOf('Sooner')).toBeLessThan(text.indexOf('Later'))
+  })
+
+  it('never returns email content when the dedup write fails', async () => {
+    install(pgTable([critRow('lease_1')]), pgTable([], { insert: vi.fn().mockResolvedValue({ error: { message: 'boom' } }) }))
+    const res = await post()
     expect(res.status).toBe(500)
     const body = await res.json() as { error: string; email?: unknown }
     expect(body.error).toContain('boom')
     expect(body.email).toBeUndefined()
     expect(fetch).not.toHaveBeenCalled()
+  })
+
+  // PostgREST returns at most `max_rows` (supabase/config.toml, 1000) rows per request and
+  // truncates SILENTLY. Each test is built so the pre-fix handler does the wrong thing against a
+  // capped response — drops alerts, or re-inserts a dedup row and 500s — not merely so a length
+  // check trips.
+  describe('PostgREST max_rows truncation', () => {
+    const refId = (i: number) => `ref_${String(i).padStart(5, '0')}`
+
+    it('alerts on EVERY critical date when the view exceeds one PostgREST page (keyset-paged on reference_id, not truncated)', async () => {
+      // Direction: DROPPED alerts. critical_dates has no lower date bound, so overdue history
+      // accumulates; past row 1000 the pre-fix handler never alerts on the rest, with a 200.
+      const ids = Array.from({ length: PG_MAX_ROWS + 1 }, (_, i) => refId(i))
+      const crit = pgTable(ids.map(id => critRow(id)))
+      const sent = pgTable([])
+      install(crit, sent)
+
+      const res = await post()
+      expect(res.status).toBe(200)
+      const body = await res.json() as Body
+      expect(body.new_alerts).toBe(ids.length)
+      const inserted = sent.insert.mock.calls.flatMap(c => c[0] as Row[]).map(r => r.reference_id)
+      expect(new Set(inserted)).toEqual(new Set(ids))
+      expect(crit.pages).toHaveLength(2)
+      for (const page of crit.pages) {
+        expect(page.find(c => c.method === 'order')?.args[0]).toBe('reference_id')
+        expect(page.find(c => c.method === 'limit')?.args[0] as number).toBeLessThanOrEqual(PG_MAX_ROWS)
+      }
+    })
+
+    it('fails closed (500, nothing recorded) if a critical_dates page does not advance the reference_id cursor', async () => {
+      const crit = pgTable(Array.from({ length: PG_MAX_ROWS }, (_, i) => critRow(refId(i))), { ignoreGt: 'reference_id' })
+      const sent = pgTable([])
+      install(crit, sent)
+
+      const res = await post()
+      expect(res.status).toBe(500)
+      expect((await res.json() as Body).error).toMatch(/keyset page/)
+      expect(sent.insert).not.toHaveBeenCalled()
+      expect(crit.pages.length).toBeLessThanOrEqual(3)
+    })
+
+    it('never re-inserts an already-sent dedup row when sent_notifications for the batch exceeds one page', async () => {
+      // Direction: PERMANENT 500. 600 dates already alerted, but each id also carries a row for a
+      // retired recipient, so the unfiltered pre-fix read returns 1200 rows, capped at 1000. The
+      // current recipient's rows past the cap read as unsent -> re-inserted -> UNIQUE violation ->
+      // 500 on every run from then on.
+      const ids = Array.from({ length: 600 }, (_, i) => refId(i))
+      const sentRows = [...ids.map(id => sentRow(id, 'retired@oxfordra.net')), ...ids.map(id => sentRow(id))]
+      const sent = pgTable(sentRows, { insert: uniqueInsert(sentRows) })
+      install(pgTable(ids.map(id => critRow(id))), sent)
+
+      const res = await post()
+      expect(res.status).toBe(200)
+      const body = await res.json() as Body
+      expect(body.new_alerts).toBe(0)
+      expect(body.skipped).toBe(ids.length)
+      expect(sent.insert).not.toHaveBeenCalled()
+      // Chunked: no single `.in('reference_id', ...)` carries an unbounded id list (URL length).
+      const idLists = sent.pages.map(p => p.find(c => c.method === 'in' && c.args[0] === 'reference_id')?.args[1] as unknown[])
+      expect(idLists.length).toBeGreaterThan(1)
+      for (const list of idLists) expect(list.length).toBeLessThanOrEqual(100)
+    })
+
+    it('fails closed (500, nothing recorded, no email) when the sent_notifications dedup read errors', async () => {
+      // Pre-fix the error was never checked: every alert read as unsent and was re-inserted.
+      const sent = pgTable([], { error: { message: 'dedup read failed' } })
+      install(pgTable([critRow('lease_1')]), sent)
+
+      const res = await post()
+      expect(res.status).toBe(500)
+      const body = await res.json() as { error: string; email?: unknown }
+      expect(body.error).toContain('dedup read failed')
+      expect(body.email).toBeUndefined()
+      expect(sent.insert).not.toHaveBeenCalled()
+    })
   })
 })
 
@@ -576,62 +670,6 @@ describe('POST /api/cron/delinquency-check', () => {
   // capped response — drops leases from the run, misses a late fee, or re-posts one — not merely
   // so a length check trips.
   describe('PostgREST max_rows truncation', () => {
-    const PG_MAX_ROWS = 1000
-    type Row = Record<string, unknown>
-    type Call = { method: string; args: unknown[] }
-
-    // Minimal PostgREST evaluator: records the chain, applies every filter/order/limit at `await`
-    // against `rows`, then applies the server row cap. `ignoreGt` simulates a broken keyset (a
-    // server that ignores the cursor) so the handler's non-advancing-page guard is exercised. A
-    // filter on a column the row doesn't carry throws, so a wrong column name can't pass silently.
-    function pgTable(rows: Row[], opts: { insert?: ReturnType<typeof vi.fn>; ignoreGt?: string } = {}) {
-      const pages: Call[][] = []
-      const table = {
-        pages,
-        insert: opts.insert ?? vi.fn().mockResolvedValue({ error: null }),
-        select() {
-          const calls: Call[] = []
-          pages.push(calls)
-          // A handler whose keyset never advances must fail here, immediately and attributably —
-          // the stub resolves synchronously, so an unbounded loop would starve vitest's timeout.
-          if (pages.length > 50) throw new Error('pgTable stub: more than 50 selects on one table — pagination is not terminating')
-          const b: Record<string, unknown> = {}
-          for (const m of ['in', 'eq', 'gt', 'gte', 'lt', 'lte', 'order', 'limit']) {
-            b[m] = (...args: unknown[]) => { calls.push({ method: m, args }); return b }
-          }
-          b.then = (resolve: (v: unknown) => void) => {
-            const col = (r: Row, c: string) => {
-              if (!(c in r)) throw new Error(`pgTable stub: filter on unknown column "${c}"`)
-              return r[c]
-            }
-            // Numbers numerically; everything else bytewise (like Postgres uuid/date ordering).
-            const cmp = (a: unknown, b2: unknown) => {
-              if (typeof a === 'number' && typeof b2 === 'number') return a - b2
-              const [x, y] = [String(a), String(b2)]
-              return x < y ? -1 : x > y ? 1 : 0
-            }
-            let out = rows
-            for (const { method, args } of calls) {
-              const [c, v] = args as [string, unknown]
-              if (method === 'in') out = out.filter(r => (v as unknown[]).includes(col(r, c)))
-              if (method === 'eq') out = out.filter(r => String(col(r, c)) === String(v))
-              if (method === 'gt' && !(opts.ignoreGt === c)) out = out.filter(r => cmp(col(r, c), v) > 0)
-              if (method === 'gte') out = out.filter(r => cmp(col(r, c), v) >= 0)
-              if (method === 'lt') out = out.filter(r => cmp(col(r, c), v) < 0)
-              if (method === 'lte') out = out.filter(r => cmp(col(r, c), v) <= 0)
-            }
-            const order = calls.find(x => x.method === 'order')
-            if (order) out = [...out].sort((x, y) => cmp(col(x, order.args[0] as string), col(y, order.args[0] as string)))
-            const limit = calls.find(x => x.method === 'limit')
-            if (limit) out = out.slice(0, limit.args[0] as number)
-            return resolve({ data: out.slice(0, PG_MAX_ROWS), error: null })
-          }
-          return b
-        },
-      }
-      return table
-    }
-
     const today = new Date().toISOString().slice(0, 10)
     const OLD = '2020-01-15' // always past the 30-day grace cutoff
     const arRow = (lease_id: string, balance = 100): Row => ({ lease_id, tenant_id: `t_${lease_id}`, tenant_name: `Tenant ${lease_id}`, property_name: 'Prop', suite: lease_id, balance })
