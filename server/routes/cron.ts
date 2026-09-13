@@ -176,7 +176,7 @@ cronRouter.post('/monthly-billing', async (c) => {
     return Boolean(lease.autopay_enabled && lease.autopay_payment_method_id && tenant?.stripe_customer_id)
   })
 
-  let alreadyCollected = new Set<string>()
+  const alreadyCollected = new Set<string>()
   let priorAutopayCheckFailed = false
 
   // Round-5 review finding #2: a failed charge upsert must stop autopay here too, not just
