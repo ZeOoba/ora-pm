@@ -7,7 +7,7 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { POSTGREST_MAX_ROWS } from '../../server/routes/cron'
+import { POSTGREST_MAX_ROWS } from '../../server/lib/postgrest-paging'
 
 describe('POSTGREST_MAX_ROWS matches supabase/config.toml max_rows', () => {
   it('is equal to the [api] max_rows setting', () => {

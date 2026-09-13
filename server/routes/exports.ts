@@ -2,6 +2,11 @@ import { Hono } from 'hono'
 import { getDb } from '../db/client'
 import { buildPropertyJournalEntry, generateIIF } from '../lib/iif-export'
 import { endOfMonth, format } from 'date-fns'
+import { dbError } from '../lib/api-error'
+import { fetchChunked, fetchAllPages, POSTGREST_MAX_ROWS } from '../lib/postgrest-paging'
+
+// Ids per `.in()` call — keeps the request URL bounded however many units/leases a property has.
+const BULK_QUERY_CHUNK_SIZE = 100
 
 type Env = { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string }
 
@@ -30,43 +35,55 @@ exportsRouter.get('/qb-iif', async (c) => {
   const startStr    = format(periodStart, 'yyyy-MM-dd')
   const endStr      = format(periodEnd, 'yyyy-MM-dd')
 
-  const { data: property } = await db
+  // Every read below checks its error and returns before any file is built: this IIF is imported
+  // into QuickBooks, and an unread error used to download a well-formed $0 journal entry.
+  // Row cap: responses are cut at POSTGREST_MAX_ROWS with no error, so each read is keyset-paged
+  // on its uuid PK (fetchAllPages) and each `.in()` id list is chunked (fetchChunked) to bound the
+  // URL; `maxRows: Infinity` because a paged chunk is legitimately unbounded.
+  const { data: property, error: propErr } = await db
     .from('properties')
     .select('name, entity_llc')
     .eq('id', propertyId)
     .single()
+  if (propErr?.code === 'PGRST116') return c.json({ error: 'Property not found' }, 404)
+  if (propErr) return dbError(c, propErr, 'Failed to load property')
 
-  const { data: unitRows } = await db
-    .from('units')
-    .select('id')
-    .eq('property_id', propertyId)
+  const { data: unitRows, error: unitErr } = await fetchAllPages<{ id: string }>((after) => {
+    let q = db.from('units').select('id').eq('property_id', propertyId)
+    if (after !== null) q = q.gt('id', after)
+    return q.order('id').limit(POSTGREST_MAX_ROWS)
+  }, (u) => u.id)
+  if (unitErr) return dbError(c, unitErr, 'Failed to load units')
 
-  const unitIds = (unitRows ?? []).map((u: { id: string }) => u.id)
-
-  const { data: leaseRows } = unitIds.length > 0
-    ? await db.from('leases').select('id').eq('status', 'active').in('unit_id', unitIds)
-    : { data: [] }
-
-  const leaseIds = (leaseRows ?? []).map((l: { id: string }) => l.id)
+  const { data: leaseRows, error: leaseErr } = await fetchChunked(unitRows.map(u => u.id), BULK_QUERY_CHUNK_SIZE, (chunk) =>
+    fetchAllPages<{ id: string }>((after) => {
+      let q = db.from('leases').select('id').eq('status', 'active').in('unit_id', chunk)
+      if (after !== null) q = q.gt('id', after)
+      return q.order('id').limit(POSTGREST_MAX_ROWS)
+    }, (l) => l.id),
+    { maxRows: Infinity })
+  if (leaseErr) return dbError(c, leaseErr, 'Failed to load leases')
 
   // Sum charges posted for this property in this period (accrual basis)
   const totals = { rent: 0, cam: 0, utility: 0, fees: 0 }
 
-  if (leaseIds.length > 0) {
-    const { data: charges } = await db
-      .from('charges')
-      .select('amount, type')
-      .in('lease_id', leaseIds)
-      .gte('charge_date', startStr)
-      .lte('charge_date', endStr)
+  const { data: charges, error: chargeErr } = await fetchChunked(leaseRows.map(l => l.id), BULK_QUERY_CHUNK_SIZE, (chunk) =>
+    fetchAllPages<{ id: string; amount: number; type: string }>((after) => {
+      let q = db.from('charges').select('id, amount, type')
+        .in('lease_id', chunk)
+        .gte('charge_date', startStr)
+        .lte('charge_date', endStr)
+      if (after !== null) q = q.gt('id', after)
+      return q.order('id').limit(POSTGREST_MAX_ROWS)
+    }, (ch) => ch.id),
+    { maxRows: Infinity })
+  if (chargeErr) return dbError(c, chargeErr, 'Failed to load charges')
 
-    for (const ch of (charges ?? [])) {
-      const charge = ch as { amount: number; type: string }
-      if (charge.type === 'rent')                                    totals.rent    += charge.amount
-      else if (['cam_estimate','cam_true_up'].includes(charge.type)) totals.cam     += charge.amount
-      else if (charge.type.startsWith('utility'))                    totals.utility += charge.amount
-      else if (charge.type === 'late_fee')                           totals.fees    += charge.amount
-    }
+  for (const charge of charges) {
+    if (charge.type === 'rent')                                    totals.rent    += charge.amount
+    else if (['cam_estimate','cam_true_up'].includes(charge.type)) totals.cam     += charge.amount
+    else if (charge.type.startsWith('utility'))                    totals.utility += charge.amount
+    else if (charge.type === 'late_fee')                           totals.fees    += charge.amount
   }
 
   const entry = buildPropertyJournalEntry({
