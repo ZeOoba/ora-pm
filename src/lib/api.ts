@@ -1,4 +1,5 @@
 import { supabase } from './supabase'
+import { apiErrorMessage } from './api-error'
 
 const BASE = '/api'
 
@@ -18,8 +19,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     },
   })
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: res.statusText }))
-    throw new Error((err as { error: string }).error ?? res.statusText)
+    const err = await res.json().catch(() => null)
+    throw new Error(apiErrorMessage(err, res.statusText))
   }
   return res.json() as Promise<T>
 }
@@ -36,8 +37,8 @@ async function download(
     headers: jwt ? { Authorization: `Bearer ${jwt}` } : {},
   })
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: res.statusText }))
-    throw new Error((err as { error: string }).error ?? res.statusText)
+    const err = await res.json().catch(() => null)
+    throw new Error(apiErrorMessage(err, res.statusText))
   }
   const blob = await res.blob()
   const filename =
