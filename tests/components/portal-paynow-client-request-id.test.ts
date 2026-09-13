@@ -34,7 +34,7 @@ describe('PortalPayNow — client_request_id generation (OI-035)', () => {
   })
 
   it('resets the ref when the charge selection changes, so a genuinely different attempt gets a fresh id', () => {
-    expect(source).toMatch(/useEffect\(\(\) => \{\s*clientRequestIdRef\.current = null\s*\}, \[selected\]\)/)
+    expect(source).toMatch(/useEffect\(\(\) => \{\s*paymentMethodIdRef\.current = null\s*clientRequestIdRef\.current = null\s*\}, \[selected\]\)/)
   })
 
   it('resets the ref after a successful payment, so the next payment gets its own fresh id', () => {
@@ -47,11 +47,52 @@ describe('PortalPayNow — client_request_id generation (OI-035)', () => {
     expect(source).toMatch(/clientRequestIdRef\.current = null(?:[ \t]*\/\/[^\n]*)?\n\s*setStep\('done'\)/)
   })
 
-  it('sends client_request_id on the createPaymentIntent call', () => {
-    expect(source).toMatch(/client_request_id:\s*clientRequestIdRef\.current/)
+  it('passes the id through to runPayAttempt as clientRequestId (verified end-to-end in portal-pay-attempt.test.ts)', () => {
+    expect(source).toMatch(/clientRequestId:\s*clientRequestIdRef\.current/)
   })
 
   it('portal-api.ts requires client_request_id on the createPaymentIntent request body type', () => {
     expect(apiSource).toMatch(/createPaymentIntent:\s*\(body:\s*\{[\s\S]*?client_request_id:\s*string[\s\S]*?\}\)/)
+  })
+})
+
+// OI-064: payment_method_id must be a first-class part of the same one-per-attempt unit as
+// client_request_id — never reset independently, never re-derived on a retry. A drift between the
+// two (e.g. a future edit resets one but not the other) silently reintroduces the idempotency-key/
+// parameter mismatch this fix closes.
+describe('PortalPayNow — payment_method_id persists across retries (OI-064)', () => {
+  const source = readFileSync(
+    join(__dirname, '../../src/portal/pages/PortalPayNow.tsx'),
+    'utf-8'
+  )
+
+  it('declares paymentMethodIdRef as a ref, not state', () => {
+    expect(source).toMatch(/const paymentMethodIdRef = useRef<string \| null>\(null\)/)
+  })
+
+  it('resets paymentMethodIdRef immediately before clientRequestIdRef on every reset site (pairing invariant)', () => {
+    const pmResets = source.match(/paymentMethodIdRef\.current = null/g) ?? []
+    const crResets = source.match(/clientRequestIdRef\.current = null/g) ?? []
+    expect(pmResets.length).toBeGreaterThan(0)
+    expect(pmResets.length).toBe(crResets.length)
+
+    // Every clientRequestIdRef reset must be immediately preceded by a paymentMethodIdRef reset
+    // (only whitespace/an inline comment between) — this is what makes the two structurally
+    // impossible to drift apart, rather than merely coincidentally matching in count.
+    const pairedPattern = /paymentMethodIdRef\.current = null\s*\n\s*clientRequestIdRef\.current = null/g
+    const paired = source.match(pairedPattern) ?? []
+    expect(paired.length).toBe(crResets.length)
+  })
+
+  it('does not call the Stripe bank-linking sequence directly — delegates to runPayAttempt', () => {
+    expect(source).not.toMatch(/collectBankAccountForSetup/)
+    expect(source).not.toMatch(/confirmUsBankAccountSetup/)
+    expect(source).not.toMatch(/portalApi\.createSetupIntent/)
+  })
+
+  it('imports and calls runPayAttempt, passing paymentMethodIdRef through', () => {
+    expect(source).toMatch(/import \{ runPayAttempt \} from '\.\.\/lib\/pay-attempt'/)
+    expect(source).toMatch(/runPayAttempt\(\s*\{\s*stripe,\s*api:\s*portalApi\s*\},/)
+    expect(source).toMatch(/paymentMethodIdRef\s*\)/)
   })
 })
