@@ -96,6 +96,32 @@ about — see OI-048/OI-073/OI-074 in `~/.claude` memory
 (`open-items-tracker.md`) for the full incident history and root-cause
 writeup.
 
+## Migration history (0011 onward — earlier files predate this log)
+
+- `0011_appsec_idempotency_and_scale.sql` — appsec sweep 2026-08 (OI-034 /
+  OI-035 / OI-039 / OI-046): `payments_stripe_pi_uniq` (one row per
+  PaymentIntent), `payments.autopay_period` + `payments_autopay_period_uniq`,
+  `charges.idempotency_key NOT NULL`, all money columns re-typed
+  `NUMERIC(12,2)` with unit comments (ar_ledger dropped/recreated verbatim
+  around the re-types). Its apply is what surfaced the untracked 0008-0010
+  history above.
+- `0012_view_security_invoker.sql` — OI-079: `ar_ledger`, `rent_roll`,
+  `critical_dates` set `security_invoker = true` so a direct PostgREST caller
+  is bound by the underlying tables' RLS. Additive; no logic change.
+- `0013_enable_rls_remaining_tables.sql` — OI-078: `ENABLE ROW LEVEL SECURITY`
+  on the 17 tables that had none, deliberately with no policies (default-deny
+  for the anon key; the service-role API is unaffected).
+- `0014_payment_intent_pending_row.sql` — OI-065 / OI-223 / OI-233 payment-
+  intent hardening: `payments.client_request_id` +
+  `payments_client_request_id_uniq`, and the `reserve_payment_intent()`
+  plpgsql function that takes a per-lease `pg_advisory_xact_lock`, subtracts
+  in-flight (`pending`/`processing`) ACH from `ar_ledger.balance`, and inserts
+  the `'pending'` ledger row BEFORE `server/routes/stripe.ts` calls Stripe.
+  `ar_ledger` itself is untouched. Executable by `service_role` only. Ships
+  with a reconciliation query for reservations whose Stripe result was never
+  written back. Apply BEFORE deploying the matching `server/` change — the
+  new route fails closed (500, no Stripe call) if the function is missing.
+
 ## Keeping this claim honest as migrations change
 
 - `tests/db/rls-inventory.test.ts` parses this directory's SQL and asserts
