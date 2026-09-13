@@ -22,6 +22,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history: the REFUTE gate below diffs the PR against its base ref
+          # (origin/main...HEAD needs a merge base a shallow clone cannot supply).
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -34,6 +38,10 @@ jobs:
       - name: Type check
         run: npm run typecheck
 
+      # OI-255: `lint` was aliased to `tsc --noEmit` — this is now real ESLint (eslint.config.js).
+      - name: Lint
+        run: npm run lint
+
       - name: Run tests
         run: npm test
 
@@ -43,6 +51,22 @@ jobs:
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
           VITE_STRIPE_PUBLISHABLE_KEY: ${{ secrets.VITE_STRIPE_PUBLISHABLE_KEY }}
+
+      # OI-255 REFUTE gate: a change to a financial-decision file (autopay debits + late fees in
+      # server/routes/cron.ts, ACH PaymentIntents in server/routes/stripe.ts, webhook state
+      # transitions, CAM true-up, manual charge/payment posting, the charge/payment schemas, or a
+      # migration touching charges/payments/ar_ledger) must carry a `Refute-Reviewed:` or
+      # `Refute-Skip:` commit trailer attesting an adversarial review ran.
+      # PR-only: it diffs the PR against its base; a direct push to main has no diff base, so it is
+      # skipped there. It sits in this job ahead of the deploy steps, so a failing gate fails the
+      # job before anything ships — make this workflow a REQUIRED check via branch protection to
+      # hard-enforce it at merge. Fails OPEN on git/tooling gaps (scripts/check-refute-required.ts).
+      - name: REFUTE gate (financial-decision paths)
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "${{ github.base_ref }}"
+          npm run check:refute -- --strict --base="origin/${{ github.base_ref }}"
 
       - name: Check commit is still the tip of main
         id: tip
