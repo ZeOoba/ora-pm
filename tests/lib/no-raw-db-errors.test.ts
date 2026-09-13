@@ -59,7 +59,9 @@ const ALLOWLIST: Record<string, string[]> = {
   // delinquency-check) — same rationale, the fail-closed probe's own error.
   // overdueRes -> recentRes 2026-09-12 (OI-234: the overdue existence probe
   // became a recent-charges sum; same operator-only surface, same rationale).
-  'cron.ts': ["leaseErr.message", "cdErr.message", "insErr.message", "arErr.message", "recentRes.error.message", "existingFeeRes.error.message", "payErr.message"],
+  // sentErr added 2026-09-12 (critical-dates-alerts max_rows fix) — same
+  // rationale, the now-checked sent_notifications dedup read's error.
+  'cron.ts': ["leaseErr.message", "cdErr.message", "insErr.message", "arErr.message", "recentRes.error.message", "existingFeeRes.error.message", "payErr.message", "sentErr.message"],
 
   // OI-063 closed 2026-08-04: all 5 files now route through dbError(); no
   // allowlist entries remain (see the "OI-063 scope files" assertion below).
