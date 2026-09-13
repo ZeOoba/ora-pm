@@ -660,8 +660,9 @@ cronRouter.post('/delinquency-check', async (c) => {
   // that one lease — under-reporting delinquency without surfacing it. These bulk checks fail the
   // whole request closed instead, matching this function's own top-level `arErr` convention above
   // (never report a delinquency digest built from partially-unknown data).
-  if (recentRes.error) return c.json({ error: recentRes.error.message }, 500)
-  if (existingFeeRes.error) return c.json({ error: existingFeeRes.error.message }, 500)
+  // Prefixed with the lookup name: fetchChunked's row-cap message is the same for both queries.
+  if (recentRes.error) return c.json({ error: `recent-charges: ${recentRes.error.message}` }, 500)
+  if (existingFeeRes.error) return c.json({ error: `existing-fee: ${existingFeeRes.error.message}` }, 500)
 
   // Σ recent charges per lease, in memory. `Number(...)` because PostgREST may serialize NUMERIC
   // as a JSON string depending on client/config — a string here would concatenate, not add. A
