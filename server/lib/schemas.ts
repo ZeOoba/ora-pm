@@ -6,28 +6,33 @@ const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Must be YYYY-MM-DD')
 const positiveAmount = z.number().positive('Amount must be positive')
 const nonNegativeAmount = z.number().min(0, 'Amount cannot be negative')
 
-// Property
+// Property — PropertyForm.tsx handleSubmit is the sole API write path (POST
+// create, PUT edit; scripts/import-from-pipeline.mjs writes the DB directly).
+// Keys match that payload exactly; the form sends null for blank optional
+// fields. zip is nullable since 0005_relax_property_zip_and_unit_sf.sql.
 export const PropertyInsertSchema = z.object({
   name: z.string().min(1),
   address: z.string().min(1),
   city: z.string().min(1),
   state: z.string().length(2),
-  zip: z.string().regex(/^\d{5}(-\d{4})?$/, 'Invalid zip').optional(),
-  total_sf: z.number().positive().optional(),
+  zip: z.string().regex(/^\d{5}(-\d{4})?$/, 'Invalid zip').nullish(),
+  total_sf: z.number().positive().nullish(),
   property_type: z.enum(['commercial', 'industrial', 'retail', 'multifamily', 'office', 'other']),
-  entity_llc: z.string().optional(),
-  notes: z.string().optional(),
-})
+  entity_llc: z.string().nullish(),
+  notes: z.string().nullish(),
+}).strict()
 export const PropertyUpdateSchema = PropertyInsertSchema.partial()
 
-// Tenant
+// Tenant — TenantForm.tsx handleSubmit is the sole API write path (POST/PUT).
+// auth_user_id and stripe_customer_id are server-owned (portal-auth.ts,
+// stripe.ts) and deliberately excluded; `.strict()` turns them into a 422.
 export const TenantInsertSchema = z.object({
   name: z.string().min(1),
-  contact_name: z.string().optional(),
-  contact_email: z.string().email().optional(),
-  contact_phone: z.string().optional(),
-  notes: z.string().optional(),
-})
+  contact_name: z.string().nullish(),
+  contact_email: z.string().email().nullish(),
+  contact_phone: z.string().nullish(),
+  notes: z.string().nullish(),
+}).strict()
 export const TenantUpdateSchema = TenantInsertSchema.partial()
 
 // Lease
@@ -70,15 +75,20 @@ export const ChargeInsertSchema = z.object({
   idempotency_key: z.string().min(1).optional(),
 })
 
-// Payment
+// Payment — manual (check/wire/other) entry from PaymentsList.tsx only. ACH
+// rows are written by the Stripe webhook (stripe.ts) and autopay cron
+// (cron.ts) straight to the DB, never through this schema. A client-supplied
+// stripe_payment_intent_id would occupy payments_stripe_pi_uniq (0011) and
+// make the real webhook insert look like a duplicate, so neither it nor
+// method 'ach_stripe' is accepted here.
 export const PaymentInsertSchema = z.object({
   lease_id: z.string().uuid(),
   payment_date: isoDate,
   amount: positiveAmount,
-  method: z.enum(['ach_stripe', 'check', 'wire', 'other']),
-  stripe_payment_intent_id: z.string().optional(),
-  notes: z.string().optional(),
-})
+  method: z.enum(['check', 'wire', 'other']),
+  check_number: z.string().nullish(),
+  notes: z.string().nullish(),
+}).strict()
 
 // Stripe payment-intent client-generated idempotency token — one per pay
 // attempt, reused verbatim by the client on retry. Echoed into the Stripe

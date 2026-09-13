@@ -49,7 +49,8 @@ function validate(f: FormState): FormErrors {
   if (!f.city.trim()) e.city = 'Required'
   if (!f.state.trim()) e.state = 'Required'
   else if (f.state.trim().length !== 2) e.state = 'Must be 2-character state code'
-  if (!f.zip.trim()) e.zip = 'Required'
+  // ZIP is optional (0005): the system of record carries no ZIP for most properties.
+  if (f.zip.trim() && !/^\d{5}(-\d{4})?$/.test(f.zip.trim())) e.zip = 'Must be 12345 or 12345-6789'
   if (!f.property_type) e.property_type = 'Required'
   return e
 }
@@ -114,7 +115,7 @@ export function PropertyForm() {
       address: form.address.trim(),
       city: form.city.trim(),
       state: form.state.trim().toUpperCase(),
-      zip: form.zip.trim(),
+      zip: form.zip.trim() || null,
       property_type: form.property_type,
       total_sf: form.total_sf === '' ? null : Number(form.total_sf),
       entity_llc: form.entity_llc.trim() || null,
@@ -170,7 +171,7 @@ export function PropertyForm() {
               </Field>
             </div>
             <div className="col-span-1">
-              <Field label="ZIP" htmlFor="zip" required error={errors.zip}>
+              <Field label="ZIP" htmlFor="zip" error={errors.zip}>
                 <TextInput
                   id="zip"
                   value={form.zip}
