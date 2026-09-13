@@ -95,4 +95,25 @@ describe('PortalPayNow — payment_method_id persists across retries (OI-064)', 
     expect(source).toMatch(/runPayAttempt\(\s*\{\s*stripe,\s*api:\s*portalApi\s*\},/)
     expect(source).toMatch(/paymentMethodIdRef\s*\)/)
   })
+
+  // The pairing-count test above only checks that reset-count matches paired-count — it does NOT
+  // rule out an EXTRA, unguarded assignment somewhere else in the file (e.g. a `catch` block that
+  // regenerates clientRequestIdRef without touching paymentMethodIdRef, reintroducing the exact
+  // idempotency-key/parameter mismatch this fix closes). Total-assignment-count closes that gap:
+  // clientRequestIdRef may only ever be touched at its two resets plus the one guarded lazy-generate
+  // (never a bare, unconditional regeneration); paymentMethodIdRef may ONLY ever be reset in this
+  // file — its non-null value is assigned exclusively inside runPayAttempt via the ref object, never
+  // by a direct `paymentMethodIdRef.current = <something>` in the component.
+  it('touches each ref only at its known sites — no stray extra assignment (closes a gap the pairing-count test alone would miss)', () => {
+    const assignPattern = (name: string) => new RegExp(`${name}\\.current\\s*=\\s*(?!=)`, 'g')
+    const crAssignments = source.match(assignPattern('clientRequestIdRef')) ?? []
+    const pmAssignments = source.match(assignPattern('paymentMethodIdRef')) ?? []
+    const crResets = source.match(/clientRequestIdRef\.current = null/g) ?? []
+    const pmResets = source.match(/paymentMethodIdRef\.current = null/g) ?? []
+
+    // clientRequestIdRef: N resets + exactly 1 guarded lazy-generate.
+    expect(crAssignments.length).toBe(crResets.length + 1)
+    // paymentMethodIdRef: N resets, nothing else.
+    expect(pmAssignments.length).toBe(pmResets.length)
+  })
 })
