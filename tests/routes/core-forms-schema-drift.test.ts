@@ -16,8 +16,11 @@
 // Same fix shape as PR #33 (expenses): nullable columns `.nullish()`, missing
 // real columns added, `.strict()` per OI-041 once each schema's key set equals
 // the form payload exactly. VALID_* bodies below are the literal shapes the
-// forms send; the drift guards re-derive those key sets from the component
-// source and the migrations so a rename on either side fails here first.
+// forms send; the drift guards re-derive the sent key sets from the component
+// source, so a form/schema rename fails here first, and check every schema key
+// against the CREATE TABLE / ADD COLUMN statements in 0001, 0002 and 0011. A
+// later migration that renames or drops one of these columns must be added to
+// tableColumns() below — that guard does not read RENAME/DROP.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { readFileSync } from 'node:fs'
