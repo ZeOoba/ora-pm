@@ -6,7 +6,7 @@ import { StatusBadge } from '../../components/StatusBadge'
 import { Field } from '../../components/form/Field'
 import { NumberInput, Select } from '../../components/form/inputs'
 import { formatCurrency } from '../../lib/format'
-import type { CAMReconciliation, Expense, Property, RentRollRow } from '../../types'
+import type { CAMReconciliation, Property, RentRollRow } from '../../types'
 
 type CAMRow = CAMReconciliation & {
   leases: {
@@ -40,12 +40,18 @@ export function CAMList() {
     enabled: !!propertyId,
   })
 
-  // ── Expenses for selected property (to compute recoverable total) ──────────
-  const { data: expenses } = useQuery({
-    queryKey: ['expenses', propertyId],
+  // ── Recoverable expense total for selected property/year ───────────────────
+  // Computed server-side over EVERY matching expense: GET /expenses returns one 50-row page, so a
+  // browser-side sum silently under-stated this figure for every tenant's true-up. Keyed under
+  // 'expenses' so ExpensesList's invalidateQueries(['expenses']) refreshes it after an edit.
+  const yearValid = Number.isInteger(year) && year >= 2000 && year <= currentYear
+  const recoverable = useQuery({
+    queryKey: ['expenses', 'cam-recoverable', propertyId, year],
     queryFn: () =>
-      api.get<{ data: Expense[] }>(`/expenses?property_id=${propertyId}`).then(r => r.data),
-    enabled: !!propertyId,
+      api.get<{ data: { total: number; count: number } }>(
+        `/cam/recoverable-expenses?property_id=${encodeURIComponent(propertyId)}&year=${year}`
+      ).then(r => r.data),
+    enabled: !!propertyId && yearValid,
   })
 
   // ── All CAM reconciliations ────────────────────────────────────────────────
@@ -58,9 +64,9 @@ export function CAMList() {
   const activeLeases = (rentRoll ?? []).filter(r => r.lease_status === 'active')
   const totalLeasedSF = activeLeases.reduce((s, r) => s + (r.sf ?? 0), 0)
 
-  const recoverableTotal = (expenses ?? [])
-    .filter(e => e.recoverable && new Date(e.expense_date).getFullYear() === year)
-    .reduce((s, e) => s + e.amount, 0)
+  // Only a loaded, current total may be sent to /cam/calculate — never a loading/failed/stale one.
+  const recoverableReady = recoverable.isSuccess && !recoverable.isFetching
+  const recoverableTotal = recoverable.data?.total ?? 0
 
   // ── Filtered table rows ────────────────────────────────────────────────────
   const filteredRows = (camRows ?? []).filter(row => {
@@ -74,7 +80,7 @@ export function CAMList() {
 
   // ── Calculate reconciliation ───────────────────────────────────────────────
   async function handleCalculate() {
-    if (!propertyId || activeLeases.length === 0 || totalLeasedSF === 0) return
+    if (!propertyId || !recoverableReady || activeLeases.length === 0 || totalLeasedSF === 0) return
     setCalcError(null)
     setCalculating(true)
     try {
@@ -117,7 +123,7 @@ export function CAMList() {
   }
 
   // ── Render ─────────────────────────────────────────────────────────────────
-  const canCalculate = !!propertyId && totalLeasedSF > 0 && !calculating
+  const canCalculate = !!propertyId && recoverableReady && totalLeasedSF > 0 && !calculating
 
   return (
     <div>
@@ -157,7 +163,7 @@ export function CAMList() {
           <div className="mb-4">
             <p className="text-sm text-gray-700">
               <span className="font-medium">Total recoverable expenses ({year}):</span>{' '}
-              <span className="font-mono">{formatCurrency(recoverableTotal)}</span>
+              <span className="font-mono">{recoverableReady ? formatCurrency(recoverableTotal) : '…'}</span>
               {' · '}
               <span className="font-medium">Total leased SF:</span>{' '}
               <span className="font-mono">{totalLeasedSF.toLocaleString()}</span>
@@ -166,7 +172,13 @@ export function CAMList() {
               <span className="font-mono">{activeLeases.length}</span>
             </p>
 
-            {recoverableTotal === 0 && (
+            {recoverable.isError && (
+              <p className="text-xs text-red-600 mt-1">
+                Could not load recoverable expenses — calculation is disabled until they load.
+              </p>
+            )}
+
+            {recoverableReady && recoverableTotal === 0 && (
               <p className="text-xs text-amber-600 mt-1">
                 No recoverable expenses logged for this property/year — add them in Expenses (mark "Recoverable via CAM").
               </p>
