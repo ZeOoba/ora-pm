@@ -6,6 +6,17 @@ on:
   pull_request:
     branches: [main]
 
+# Serialize runs per ref so two merges minutes apart cannot race their
+# Cloudflare deploys (the last wrangler upload to finish wins production).
+#   - main: never cancel a run mid-deploy. GitHub keeps at most one pending
+#     run per group and cancels an older pending run when a newer one queues.
+#   - PRs: cancel superseded runs on the same PR (refs/pull/N/merge).
+# FIFO order within a group is not guaranteed and re-runs of old commits
+# re-enter the group, so the deploy step also checks it is still main's tip.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   ci:
     runs-on: ubuntu-latest
@@ -33,8 +44,25 @@ jobs:
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
           VITE_STRIPE_PUBLISHABLE_KEY: ${{ secrets.VITE_STRIPE_PUBLISHABLE_KEY }}
 
-      - name: Deploy to Cloudflare Pages
+      - name: Check commit is still the tip of main
+        id: tip
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          set -euo pipefail
+          tip="$(git ls-remote origin refs/heads/main | cut -f1)"
+          if [ -z "$tip" ]; then
+            echo "::error::Could not resolve origin/main; refusing to deploy"
+            exit 1
+          fi
+          if [ "$tip" = "$GITHUB_SHA" ]; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Skipping deploy: $GITHUB_SHA is no longer the tip of main ($tip); the newer run deploys"
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Deploy to Cloudflare Pages
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push' && steps.tip.outputs.deploy == 'true'
         run: npx wrangler pages deploy ./dist --project-name ora-pm --commit-dirty=true
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
