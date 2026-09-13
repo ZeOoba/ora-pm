@@ -1,5 +1,5 @@
 import { supabase } from './supabase'
-import { apiErrorMessage } from './api-error'
+import { apiErrorMessage, ApiError } from './api-error'
 
 const BASE = '/api'
 
@@ -20,7 +20,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   })
   if (!res.ok) {
     const err = await res.json().catch(() => null)
-    throw new Error(apiErrorMessage(err, res.statusText))
+    throw new ApiError(apiErrorMessage(err, res.statusText), res.status, err)
   }
   return res.json() as Promise<T>
 }

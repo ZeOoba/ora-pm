@@ -139,18 +139,27 @@ describe('migration 0015 — payments.idempotency_key (OI-082)', () => {
         .join(' ')
         .replace(/\s+/g, ' ')
       expect(header).toContain(
-        "SELECT lease_id, payment_date, amount, method, count(*) FROM payments WHERE method IN ('check','wire','other') GROUP BY lease_id, payment_date, amount, method HAVING count(*) > 1;",
+        "SELECT id, lease_id, payment_date, amount, method, check_number, notes, created_at FROM payments p WHERE method IN ('check','wire','other') AND EXISTS ( SELECT 1 FROM payments d WHERE d.lease_id = p.lease_id AND d.payment_date = p.payment_date AND d.amount = p.amount AND d.method = p.method AND d.id <> p.id ) ORDER BY lease_id, payment_date, amount;",
+      )
+      // 1b — the check_number-keyed shape 1a's grouping key can miss.
+      expect(header).toContain(
+        "SELECT id, lease_id, payment_date, amount, method, check_number, notes, created_at FROM payments p WHERE check_number IS NOT NULL AND EXISTS ( SELECT 1 FROM payments d WHERE d.lease_id = p.lease_id AND d.check_number = p.check_number AND d.id <> p.id ) ORDER BY lease_id, check_number;",
       )
     })
 
-    it('adds the column, backfills legacy NULLs per-row-unique, then forbids NULL, then indexes — in that order', () => {
+    it('adds the column, backfills legacy NULLs per-row-unique, defaults, then forbids NULL, then indexes — in that order', () => {
       const add = file.search(/ALTER TABLE payments ADD COLUMN idempotency_key TEXT;/)
       const backfill = file.search(/UPDATE payments\s+SET idempotency_key = 'legacy:' \|\| id::text\s+WHERE idempotency_key IS NULL;/)
+      const defaultStmt = file.search(/ALTER TABLE payments ALTER COLUMN idempotency_key\s+SET DEFAULT/)
       const notNull = file.search(/ALTER TABLE payments ALTER COLUMN idempotency_key SET NOT NULL;/)
       const index = file.search(/CREATE UNIQUE INDEX payments_idempotency_key_uniq\s+ON payments\s*\(idempotency_key\);/)
       expect(add).toBeGreaterThan(-1)
       expect(backfill).toBeGreaterThan(add)
-      expect(notNull).toBeGreaterThan(backfill)
+      // DEFAULT before NOT NULL (deliberately swapped from the naive order):
+      // a value is always available for a not-yet-visible row before the
+      // NOT NULL constraint that would otherwise reject it.
+      expect(defaultStmt).toBeGreaterThan(backfill)
+      expect(notNull).toBeGreaterThan(defaultStmt)
       expect(index).toBeGreaterThan(notNull)
     })
 

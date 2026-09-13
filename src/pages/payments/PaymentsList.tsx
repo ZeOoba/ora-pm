@@ -1,6 +1,7 @@
 import { useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../../lib/api'
+import { isDedupedConflict } from '../../lib/api-error'
 import { useSaveMutation } from '../../lib/mutations'
 import { PageHeader } from '../../components/PageHeader'
 import { Field } from '../../components/form/Field'
@@ -75,10 +76,20 @@ function validate(f: FormState): FormErrors {
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export function PaymentsList() {
+  const qc = useQueryClient()
   const [showForm, setShowForm] = useState(false)
   const [form, setForm] = useState<FormState>(EMPTY)
   const [errors, setErrors] = useState<FormErrors>({})
   const [idempotencyKey, setIdempotencyKey] = useState<string>(newIdempotencyKey)
+  // OI-082 follow-up: a 409 `deduped: true` means this payment is ALREADY
+  // recorded (from an earlier click of this same form session) — it is not a
+  // failure to show as a sticky red error. Left unhandled, the form would
+  // keep the now-stale idempotencyKey after the 409, so if the admin then
+  // edited the amount/date to enter a genuinely DIFFERENT second payment and
+  // resubmitted, that different payment would hit the SAME key and ALSO come
+  // back "already recorded" — silently never inserting it. Treating deduped
+  // as settled (reset form, fresh key, refetch the lists) closes that gap.
+  const [infoMessage, setInfoMessage] = useState<string | null>(null)
 
   // Payment history
   const paymentsQ = useQuery({
@@ -98,9 +109,26 @@ export function PaymentsList() {
     path: '/payments',
     invalidate: [['payments'], ['ar-aging']],
     onSuccess: () => {
+      setInfoMessage(null)
       setForm(EMPTY)
       setIdempotencyKey(newIdempotencyKey())
       setShowForm(false)
+    },
+    onError: (err) => {
+      if (!isDedupedConflict(err)) return
+      // Already recorded — not a failure. Refetch (the earlier attempt's row
+      // is real and won't show up otherwise), clear the mutation's error
+      // state so it doesn't also render as a red banner below, arm a fresh
+      // key so a NEXT submission (same content or edited) can actually
+      // insert, and tell the admin plainly rather than leaving the form
+      // looking broken.
+      qc.invalidateQueries({ queryKey: ['payments'] })
+      qc.invalidateQueries({ queryKey: ['ar-aging'] })
+      mutation.reset()
+      setForm(EMPTY)
+      setIdempotencyKey(newIdempotencyKey())
+      setShowForm(false)
+      setInfoMessage('This payment was already recorded — see it in the list below.')
     },
   })
 
@@ -134,6 +162,7 @@ export function PaymentsList() {
     setForm(EMPTY)
     setIdempotencyKey(newIdempotencyKey())
     setErrors({})
+    setInfoMessage(null)
   }
 
   // Build sorted lease options
@@ -158,7 +187,7 @@ export function PaymentsList() {
           !showForm ? (
             <button
               type="button"
-              onClick={() => setShowForm(true)}
+              onClick={() => { setInfoMessage(null); setShowForm(true) }}
               className="bg-blue-600 hover:bg-blue-700 text-white text-sm px-3 py-1.5 rounded"
             >
               + Record Payment
@@ -166,6 +195,12 @@ export function PaymentsList() {
           ) : undefined
         }
       />
+
+      {infoMessage && (
+        <p className="text-sm text-blue-700 bg-blue-50 border border-blue-200 rounded p-2 mb-4 max-w-2xl">
+          {infoMessage}
+        </p>
+      )}
 
       {/* Inline Record Payment Form */}
       {showForm && (
