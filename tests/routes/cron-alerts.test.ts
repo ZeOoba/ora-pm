@@ -242,9 +242,10 @@ describe('POST /api/cron/delinquency-check', () => {
       if (table === 'ar_ledger') return chainable([{ lease_id: 'lease_1', tenant_id: 't1', tenant_name: 'Acme', property_name: null, suite: '101', balance: 1200 }])
       if (table === 'charges') {
         chargesCall++
-        // Call 1: bulk overdue check -> lease_1 IS overdue. Call 2: bulk existing-fee check ->
-        // no fee posted yet this period. Call 3: the insert itself.
-        if (chargesCall === 1) return chainable([{ lease_id: 'lease_1' }])
+        // Call 1: bulk recent-charges sum (OI-234) -> no charges newer than the grace cutoff, so
+        // the whole 1200 balance is overdue. Call 2: bulk existing-fee check -> no fee posted yet
+        // this period. Call 3: the insert itself.
+        if (chargesCall === 1) return chainable([])
         if (chargesCall === 2) return chainable([])
         return { insert: vi.fn().mockResolvedValue({ error: null }) }
       }
@@ -266,13 +267,18 @@ describe('POST /api/cron/delinquency-check', () => {
   })
 
   it('does not double-post when a late fee already exists this period', async () => {
+    let chargesCall = 0
     mockFrom.mockImplementation((table: string) => {
       if (table === 'payments') return chainable([{ id: 'p' }]) // OI-278: feed live
       if (table === 'ar_ledger') return chainable([{ lease_id: 'lease_1', tenant_id: 't1', tenant_name: 'Acme', property_name: null, suite: '101', balance: 1200 }])
-      // Both bulk lookups (overdue check, existing-fee check) report lease_1 as a hit — already
-      // overdue AND already fee'd this period — so the insert branch (a 3rd `.from('charges')`
-      // call) should never fire.
-      if (table === 'charges') return chainable([{ lease_id: 'lease_1' }])
+      // Call 1 (OI-234 recent-charges sum): only this month's $50 fee is newer than the cutoff, so
+      // 1150 of the 1200 balance is overdue. Call 2 (existing-fee check): lease_1 already fee'd
+      // this period — so the insert branch (a 3rd `.from('charges')` call) should never fire.
+      if (table === 'charges') {
+        chargesCall++
+        if (chargesCall === 1) return chainable([{ lease_id: 'lease_1', amount: 50 }])
+        return chainable([{ lease_id: 'lease_1' }])
+      }
       return { select: vi.fn() }
     })
 
@@ -316,10 +322,10 @@ describe('POST /api/cron/delinquency-check', () => {
       if (table === 'ar_ledger') return chainable(arRows)
       if (table === 'charges') {
         chargesFromCalls++
-        // Every bulk lookup reports every lease as overdue AND already fee'd this period, so the
+        // Every bulk lookup reports every lease as overdue (a $0 recent charge leaves the full
+        // 1000 balance overdue under OI-234's recent-sum) AND already fee'd this period, so the
         // insert branch is never reached — isolates the SELECT-side N+1 fix from insert-call count.
-        // `id`: the overdue probe is keyset-paged on charges.id, which must be ascending.
-        return chainable(arRows.map((r, i) => ({ id: `c_${String(i).padStart(7, '0')}`, lease_id: r.lease_id })))
+        return chainable(arRows.map((r) => ({ lease_id: r.lease_id, amount: 0 })))
       }
       return { select: vi.fn() }
     })
@@ -417,7 +423,7 @@ describe('POST /api/cron/delinquency-check', () => {
       paymentsError?: { message: string } | null
       // Default: one overdue, not-yet-fee'd AR row — the exact shape that posts a fee under a live feed.
       arRows?: ARRow[]
-      overdue?: boolean // whether the bulk overdue lookup reports the AR row(s) as past GRACE_DAYS
+      overdue?: boolean // whether the AR row(s) are overdue under OI-234's oldest-first rule (recent charges < balance)
     }
     const ACME: ARRow = { lease_id: 'lease_1', tenant_id: 't1', tenant_name: 'Acme', property_name: null, suite: '101', balance: 1200 }
 
@@ -429,7 +435,9 @@ describe('POST /api/cron/delinquency-check', () => {
         if (table === 'ar_ledger') return chainable(arRows)
         if (table === 'charges') {
           chargesCall++
-          if (chargesCall === 1) return chainable(overdue ? arRows.map((r, i) => ({ id: `c_${String(i).padStart(7, '0')}`, lease_id: r.lease_id })) : []) // overdue lookup
+          // recent-charges sum (OI-234 oldest-first): no recent charges -> the whole balance is overdue;
+          // recent charges equal to the balance -> nothing overdue.
+          if (chargesCall === 1) return chainable(overdue ? [] : arRows.map((r) => ({ lease_id: r.lease_id, amount: r.balance })))
           if (chargesCall === 2) return chainable([])                                                           // no fee yet this period
           return { insert: insertSpy }
         }
@@ -665,48 +673,19 @@ describe('POST /api/cron/delinquency-check', () => {
       expect(ar.pages.length).toBeLessThanOrEqual(3)
     })
 
-    it('pages the overdue-charges probe inside a chunk — a lease whose overdue charge is past row 1000 is still fined, not skipped and not a 500', async () => {
-      // Direction: MISSED late fee. lease_a's 1000 historical charges fill the capped response, so
-      // lease_b's overdue charge (row 1001) is cut off and the pre-fix handler never fines lease_b
-      // while posting lease_a's fee and returning 200. Long billing histories are NORMAL (every
-      // charge dated <= cutoff matches), so this probe must be complete, not merely fail closed.
-      const insert = vi.fn().mockResolvedValue({ error: null })
-      const charges = pgTable([...Array.from({ length: PG_MAX_ROWS }, () => rentRow('lease_a')), rentRow('lease_b')], { insert })
-      install(pgTable([arRow('lease_a'), arRow('lease_b')]), charges)
-
-      const res = await post()
-      expect(res.status).toBe(200)
-      const body = await res.json() as Body
-      expect(body.late_fees_posted).toBe(2)
-      expect(insert).toHaveBeenCalledWith(expect.objectContaining({ lease_id: 'lease_b', type: 'late_fee' }))
-      const overduePages = charges.pages.filter(p => p.some(c => c.method === 'lte' && c.args[0] === 'due_date'))
-      expect(overduePages).toHaveLength(2)
-      expectKeysetPages(overduePages, 'id')
-    })
-
-    it('fails closed (500, no fee) if an overdue-charges page does not advance the charges.id cursor', async () => {
-      // The paged probe's own failure path: a cursor-ignoring page must surface as a 500 through
-      // fetchChunked, never be swallowed into "no overdue charges" (which would fine nobody, 200).
-      const insert = vi.fn().mockResolvedValue({ error: null })
-      const charges = pgTable([...Array.from({ length: PG_MAX_ROWS }, () => rentRow('lease_a')), rentRow('lease_b')], { insert, ignoreGt: 'id' })
-      install(pgTable([arRow('lease_a'), arRow('lease_b')]), charges)
-
-      const res = await post()
-      expect(res.status).toBe(500)
-      expect(insert).not.toHaveBeenCalled()
-      expect((await res.json() as Body).error).toMatch(/keyset page/)
-      expect(charges.pages.length).toBeLessThanOrEqual(4)
-    })
-
     it('fails closed (500, no fee) when the existing-fee chunk reaches the row cap — never re-posts a fee whose row was cut off', async () => {
       // Direction: DUPLICATE late fee attempt. lease_b was already fee'd this period, but its fee
       // row sits past row 1000; truncated, the pre-fix handler inserts a second fee (only the
       // idempotency_key unique index stands between that and a double charge).
+      // The fee rows are dated so they are NOT "recent" (due_date past the cutoff): only the
+      // existing-fee query can reach the cap, so the 500 is proven to come from its guard rather
+      // than from the OI-234 recent-charges guard.
       const insert = vi.fn().mockResolvedValue({ error: null })
+      const staleDueFee = (lease_id: string): Row => ({ ...feeRow(lease_id), due_date: OLD })
       const charges = pgTable([
         rentRow('lease_a'), rentRow('lease_b'),
-        ...Array.from({ length: PG_MAX_ROWS }, () => feeRow('lease_a')),
-        feeRow('lease_b'),
+        ...Array.from({ length: PG_MAX_ROWS }, () => staleDueFee('lease_a')),
+        staleDueFee('lease_b'),
       ], { insert })
       install(pgTable([arRow('lease_a'), arRow('lease_b')]), charges)
 
@@ -714,6 +693,8 @@ describe('POST /api/cron/delinquency-check', () => {
       expect(insert).not.toHaveBeenCalled()
       expect(res.status).toBe(500)
       expect((await res.json() as Body).error).toMatch(/row cap/)
+      const recentSelects = charges.pages.filter(p => p.some(c => c.method === 'gt' && c.args[0] === 'due_date'))
+      expect(recentSelects.length).toBeGreaterThan(0) // the recent query ran and did not trip first
     })
   })
 })

@@ -1,0 +1,48 @@
+name: Delinquency check (off-host backup trigger)
+
+# Off-host backup for the laptop-bound `ora-pm-daily-crons` fleet task (CC/MCP
+# registry, 09:40 ET daily, runs C:\Users\Owner\ora-pm-cron\ping-crons.ps1).
+# That task only fires while Claude Desktop is open on the ORA laptop; during
+# the 2026-08-29 -> 09-01 host outage late-fee posting was silent for four days
+# (OI-229). This workflow re-fires ONLY the money-moving endpoint,
+# /api/cron/delinquency-check, daily at 16:10 UTC = 12:10 EDT / 11:10 EST
+# (1.5-2.5h after the laptop slot):
+#   - laptop already ran -> posts 0 (one fee per lease per month, idempotency_key)
+#   - laptop was closed  -> this month's fees post the same day
+# critical-dates-alerts is intentionally excluded -- see scripts/delinquency-backup.sh.
+# This job never sends the digest; the laptop run still does, at next app open.
+#
+# workflow_dispatch has no inputs: the endpoint derives its period from the
+# server clock, so a manual run cannot target any month but the current one
+# (OI-235's concern with the monthly-billing dispatch inputs does not apply).
+#
+# Required repo secret: ORA_PM_CRON_SECRET (same value as the Cloudflare Pages
+# CRON_SECRET). The job refuses to run without it.
+
+on:
+  schedule:
+    - cron: '10 16 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: delinquency-backup
+  cancel-in-progress: false
+
+jobs:
+  delinquency-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts
+      - name: Self-test (no network)
+        run: bash scripts/delinquency-backup.test.sh
+      - name: POST /api/cron/delinquency-check
+        env:
+          CRON_SECRET: ${{ secrets.ORA_PM_CRON_SECRET }}
+          BASE_URL: https://ora-pm.pages.dev
+        run: bash scripts/delinquency-backup.sh
