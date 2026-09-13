@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+import type Stripe from 'stripe'
 import { getStripe } from '../lib/stripe'
 import { getDb } from '../db/client'
 import { handleStripeEvent } from '../lib/stripe-events'
@@ -14,7 +15,7 @@ webhookRouter.post('/stripe', async (c) => {
   const rawBody = await c.req.text()
   const stripe = getStripe(c.env.STRIPE_SECRET_KEY)
 
-  let event: import('stripe').default.Event
+  let event: Stripe.Event
   try {
     event = await stripe.webhooks.constructEventAsync(rawBody, sig, c.env.STRIPE_WEBHOOK_SECRET)
   } catch (err) {
