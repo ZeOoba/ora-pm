@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../../lib/api'
 import { useSaveMutation } from '../../lib/mutations'
+import { isValidEmail } from '../../lib/validation'
 import { PageHeader } from '../../components/PageHeader'
 import { Field } from '../../components/form/Field'
 import { TextInput, Textarea } from '../../components/form/inputs'
@@ -33,7 +34,7 @@ interface FormErrors {
 function validate(f: FormState): FormErrors {
   const e: FormErrors = {}
   if (!f.name.trim()) e.name = 'Required'
-  if (f.contact_email.trim() && !f.contact_email.includes('@')) {
+  if (f.contact_email.trim() && !isValidEmail(f.contact_email.trim())) {
     e.contact_email = 'Must be a valid email address'
   }
   return e
