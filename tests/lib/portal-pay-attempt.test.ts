@@ -1,10 +1,22 @@
 import { describe, it, expect, vi } from 'vitest'
+
+// portal-api.ts imports portalSupabase, whose module creates a real Supabase
+// client at import time (needs VITE_SUPABASE_URL) — mocked here purely so
+// importing PortalApiError (a plain class, no Supabase dependency of its
+// own) doesn't drag that in, matching the established pattern in
+// portal-insurance-rls-folder-key.test.ts.
+vi.mock('../../src/portal/lib/supabase-portal', () => ({
+  portalSupabase: { auth: { getSession: vi.fn() } },
+}))
+
 import {
   runPayAttempt,
   isIdempotencyError,
+  isIndeterminateFailure,
   PAYMENT_MAY_BE_PROCESSING_MSG,
   type PayAttemptDeps,
 } from '../../src/portal/lib/pay-attempt'
+import { PortalApiError } from '../../src/portal/lib/portal-api'
 
 const tenant = { id: 'tenant-1', name: 'Acme Co' }
 
@@ -59,6 +71,29 @@ describe('isIdempotencyError', () => {
   it('does not match a non-Error throwable', () => {
     expect(isIdempotencyError('idempotency string, not an Error instance')).toBe(false)
     expect(isIdempotencyError(undefined)).toBe(false)
+  })
+})
+
+describe('isIndeterminateFailure', () => {
+  it('is true for a network-level failure (no HTTP response — bare Error/TypeError, never a PortalApiError)', () => {
+    expect(isIndeterminateFailure(new TypeError('Failed to fetch'))).toBe(true)
+    expect(isIndeterminateFailure(new Error('Network request failed'))).toBe(true)
+  })
+
+  it('is true for a server 5xx (failed during/after the Stripe call — outcome unknown)', () => {
+    expect(isIndeterminateFailure(new PortalApiError('Internal error', 500))).toBe(true)
+    expect(isIndeterminateFailure(new PortalApiError('Bad gateway', 502))).toBe(true)
+  })
+
+  it('is false for a deterministic 4xx — the charge never reached Stripe', () => {
+    expect(isIndeterminateFailure(new PortalApiError('Too many payment requests — retry in 42s', 429))).toBe(false)
+    expect(isIndeterminateFailure(new PortalApiError('Amount exceeds outstanding balance', 422))).toBe(false)
+    expect(isIndeterminateFailure(new PortalApiError('Your card was declined', 400))).toBe(false)
+  })
+
+  it('is false for a non-Error throwable', () => {
+    expect(isIndeterminateFailure('boom')).toBe(false)
+    expect(isIndeterminateFailure(undefined)).toBe(false)
   })
 })
 
@@ -131,11 +166,13 @@ describe('runPayAttempt', () => {
     await expect(runPayAttempt(deps, input, ref)).rejects.toThrow(PAYMENT_MAY_BE_PROCESSING_MSG)
   })
 
-  it('on a first attempt, an ordinary (non-idempotency) charge failure is NOT rewrapped', async () => {
+  it('a deterministic 4xx (rate limit, balance cap, validation) is NOT rewrapped — even on a retry, since the charge provably never reached Stripe', async () => {
     const deps = makeDeps({
-      createPaymentIntent: vi.fn().mockRejectedValue(new Error('Your card was declined')),
+      createPaymentIntent: vi.fn().mockRejectedValue(new PortalApiError('Too many payment requests — retry in 42s', 429)),
     })
-    const ref = { current: null as string | null }
+    // Retry (ref already set) — the old isRetry-based logic would have wrongly softened this into
+    // "may already be processing" for a rate-limited request that never reached Stripe.
+    const ref = { current: 'pm_persisted' as string | null }
 
     let caught: Error | undefined
     try {
@@ -143,8 +180,17 @@ describe('runPayAttempt', () => {
     } catch (err) {
       caught = err as Error
     }
-    expect(caught?.message).toBe('Your card was declined')
+    expect(caught?.message).toBe('Too many payment requests — retry in 42s')
     expect(caught?.message).not.toContain(PAYMENT_MAY_BE_PROCESSING_MSG)
+  })
+
+  it('on a first attempt, a server 5xx charge failure gets the soft message (outcome genuinely unknown)', async () => {
+    const deps = makeDeps({
+      createPaymentIntent: vi.fn().mockRejectedValue(new PortalApiError('Internal error', 500)),
+    })
+    const ref = { current: null as string | null }
+
+    await expect(runPayAttempt(deps, input, ref)).rejects.toThrow(PAYMENT_MAY_BE_PROCESSING_MSG)
   })
 
   it('a bank-linking failure leaves the ref null and never attempts the charge', async () => {

@@ -1,11 +1,26 @@
 import type { Stripe } from '@stripe/stripe-js'
-import type { portalApi } from './portal-api'
+import { PortalApiError, type portalApi } from './portal-api'
 
 export const PAYMENT_MAY_BE_PROCESSING_MSG =
   'This payment may already be processing — check your payment history before retrying.'
 
 export function isIdempotencyError(err: unknown): boolean {
   return err instanceof Error && /idempoten/i.test(err.message)
+}
+
+// True when we cannot rule out that the charge actually reached Stripe: a
+// network-level failure (fetch itself rejected — no HTTP response at all,
+// surfaces as a bare Error/TypeError, never a PortalApiError) or a server
+// 5xx (failed during or after the Stripe call; outcome unknown). A
+// deterministic 4xx from the server's own PRE-Stripe gates — the rate limit
+// at stripe.ts:120, the balance/amount checks at :135-168 — means the charge
+// never reached Stripe at all: retrying is unambiguously safe there, and
+// softening the message on one of those would be actively misleading (e.g.
+// telling a rate-limited tenant their payment "may already be processing").
+export function isIndeterminateFailure(err: unknown): boolean {
+  if (!(err instanceof Error)) return false
+  if (!(err instanceof PortalApiError)) return true
+  return err.status >= 500
 }
 
 export interface PayAttemptTenant {
@@ -60,7 +75,6 @@ export async function runPayAttempt(
   input: PayAttemptInput,
   paymentMethodIdRef: { current: string | null }
 ): Promise<{ payment_intent_id?: string; status?: string; deduped?: boolean }> {
-  const isRetry = paymentMethodIdRef.current !== null
   if (!paymentMethodIdRef.current) {
     paymentMethodIdRef.current = await linkBankAccount(deps, input.tenant)
   }
@@ -75,10 +89,13 @@ export async function runPayAttempt(
       client_request_id: input.clientRequestId,
     })
   } catch (err) {
-    // A retry (payment_method_id already persisted) or an idempotency-shaped failure even on
-    // attempt 1 (e.g. the ~24h Stripe idempotency window expired between attempts) both mean we
-    // cannot tell whether the charge already went through — never suggest blindly trying again.
-    if (isRetry || isIdempotencyError(err)) {
+    // Soften only when we genuinely cannot tell whether the charge went through: an idempotency-
+    // shaped rejection (Stripe saw this key before — note this is NOT the same as the ~24h key
+    // window expiring; an EXPIRED key mints a silent second PaymentIntent instead of erroring, a
+    // double-charge risk this check cannot catch), or an indeterminate network/5xx failure. A
+    // deterministic 4xx (rate limit, balance cap, validation) means the charge never happened —
+    // showing the raw reason is correct and never misleading there, retry or not.
+    if (isIdempotencyError(err) || isIndeterminateFailure(err)) {
       throw new Error(`${PAYMENT_MAY_BE_PROCESSING_MSG} (${(err as Error).message})`)
     }
     throw err
