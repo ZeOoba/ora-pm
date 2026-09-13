@@ -36,6 +36,15 @@ interface FormState {
 
 const today = new Date().toISOString().slice(0, 10)
 
+// OI-082: one dedupe token per form session, sent as idempotency_key. A
+// double-click, a React Query retry, or a resubmit after a network timeout
+// resends the SAME value, so migration 0015's payments_idempotency_key_uniq
+// rejects the second row (the API answers 409 "already recorded") instead of
+// a duplicate payment silently understating the tenant's ar_ledger balance.
+// Regenerated whenever the form is reset, so a genuine second payment — even
+// one with identical lease/date/amount — gets its own token.
+const newIdempotencyKey = () => `manual:${crypto.randomUUID()}`
+
 const EMPTY: FormState = {
   lease_id: '',
   payment_date: today,
@@ -69,6 +78,7 @@ export function PaymentsList() {
   const [showForm, setShowForm] = useState(false)
   const [form, setForm] = useState<FormState>(EMPTY)
   const [errors, setErrors] = useState<FormErrors>({})
+  const [idempotencyKey, setIdempotencyKey] = useState<string>(newIdempotencyKey)
 
   // Payment history
   const paymentsQ = useQuery({
@@ -89,6 +99,7 @@ export function PaymentsList() {
     invalidate: [['payments'], ['ar-aging']],
     onSuccess: () => {
       setForm(EMPTY)
+      setIdempotencyKey(newIdempotencyKey())
       setShowForm(false)
     },
   })
@@ -114,12 +125,14 @@ export function PaymentsList() {
       method: form.method,
       check_number: form.check_number.trim() || null,
       notes: form.notes.trim() || null,
+      idempotency_key: idempotencyKey,
     })
   }
 
   function handleCancel() {
     setShowForm(false)
     setForm(EMPTY)
+    setIdempotencyKey(newIdempotencyKey())
     setErrors({})
   }
 
