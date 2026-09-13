@@ -32,7 +32,9 @@ const id = (p: string) => `${p}_${String(seq++).padStart(7, '0')}`
 const PROP = 'prop_1'
 const unit = (property_id = PROP): Row => ({ id: id('u'), property_id })
 const lease = (unit_id: string, status = 'active'): Row => ({ id: id('l'), unit_id, status })
-const charge = (lease_id: string, charge_date: string, type = 'rent', amount = 100): Row => ({ id: id('c'), lease_id, type, amount, charge_date })
+// `voided_at` (migration 0014, OI-278): null = live; a timestamp = voided (audit row, not money).
+const charge = (lease_id: string, charge_date: string, type = 'rent', amount = 100, voided_at: string | null = null): Row =>
+  ({ id: id('c'), lease_id, type, amount, charge_date, voided_at })
 const expense = (expense_date: string, category = 'repairs', amount = 10): Row => ({ id: id('e'), property_id: PROP, category, amount, expense_date })
 
 // The `.in(col, ids)` id lists a table was queried with — proves the list is chunked (URL length).
@@ -80,6 +82,23 @@ describe('GET /api/reports/actuals — PostgREST max_rows + error handling', () 
     world({ units: [u], leases: [ended], charges: [charge(ended.id as string, '2026-01-01')] })
 
     expect((await (await get()).json() as Body).data!.rental_income).toBe(100)
+  })
+
+  // OI-278 / migration 0014: a voided charge is an audit row. Budget vs Actual must not report it
+  // as income — the $50 voided late fee below would otherwise land in other_income.
+  it('excludes voided charges from actuals (a voided late fee is not other_income)', async () => {
+    const u = unit(); const l = lease(u.id as string)
+    world({ units: [u], leases: [l], charges: [
+      charge(l.id as string, '2026-03-01', 'rent', 1000),
+      charge(l.id as string, '2026-03-02', 'late_fee', 50, '2026-09-13T12:00:00Z'),
+      charge(l.id as string, '2026-03-02', 'late_fee', 50), // a live fee still counts
+    ] })
+
+    const res = await get()
+    expect(res.status).toBe(200)
+    const data = (await res.json() as Body).data!
+    expect(data.rental_income).toBe(1000)
+    expect(data.other_income).toBe(50)
   })
 
   it('chunks the lease_id list (no single unbounded .in() URL) and still counts every lease', async () => {
@@ -132,6 +151,22 @@ describe('GET /api/exports/qb-iif — PostgREST max_rows + error handling', () =
     const res = await get()
     expect(res.status).toBe(200)
     expect(await res.text()).toContain(`Rental Income:Base Rent\t-${((PG_MAX_ROWS + 1) * 100).toFixed(2)}\t`)
+  })
+
+  // OI-278 / migration 0014: a voided charge must never reach QuickBooks — the IIF journal is what
+  // gets imported into the books, so a voided $50 fee here would post phantom Late Fee income.
+  it('does not journal voided charges (a voided late fee produces no Late Fees line)', async () => {
+    const u = unit(); const l = lease(u.id as string)
+    world({ units: [u], leases: [l], charges: [
+      charge(l.id as string, '2026-03-01', 'rent', 1000),
+      charge(l.id as string, '2026-03-05', 'late_fee', 50, '2026-09-13T12:00:00Z'),
+    ] })
+
+    const res = await get()
+    expect(res.status).toBe(200)
+    const iif = await res.text()
+    expect(iif).toContain('Rental Income:Base Rent\t-1000.00\t')
+    expect(iif).not.toContain('Rental Income:Late Fees')
   })
 
   it('chunks the lease_id list and still journals every lease', async () => {

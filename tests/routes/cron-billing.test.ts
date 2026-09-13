@@ -97,10 +97,11 @@ function paymentCounts(p: PaymentRow): boolean {
   return ['check', 'wire', 'other'].includes(p.method)
 }
 
-// Mirrors migration 0011's ar_ledger view: lifetime totals per lease, no date scoping — sums
-// EVERY charge regardless of due_date (unlike the step-3 open-charges query, which is period-scoped).
+// Mirrors migration 0014's ar_ledger view: lifetime totals per lease, no date scoping — sums
+// EVERY non-voided charge regardless of due_date (unlike the step-3 open-charges query, which is
+// period-scoped). Voided charges (OI-278) are excluded exactly as the view's `voided_at IS NULL`.
 function ledgerBalance(leaseId: string): number {
-  const chargedTotal = state.charges.filter(c => c.lease_id === leaseId).reduce((s, c) => s + c.amount, 0)
+  const chargedTotal = state.charges.filter(c => c.lease_id === leaseId && (c.voided_at ?? null) === null).reduce((s, c) => s + c.amount, 0)
   const paidTotal = state.payments.filter(p => p.lease_id === leaseId && paymentCounts(p)).reduce((s, p) => s + p.amount, 0)
   return chargedTotal - paidTotal
 }
@@ -166,26 +167,32 @@ function installDbMock() {
             return { data: inserted, error: null }
           }),
         })),
-        // Step 3: bulk open-charges lookup — .in('lease_id', ids).gte('due_date',y).lte('due_date',z)
+        // Step 3: bulk open-charges lookup —
+        //   .in('lease_id', ids).is('voided_at', null).gte('due_date',y).lte('due_date',z)
         // Filters by the ACTUAL due_date bounds, not just lease_id — a charge outside the period
         // (arrears) must not appear here even though it's in the same state.charges array as the
         // in-period ones (round-2 review finding #4: removing this date filter used to still pass).
+        // OI-278 / migration 0014: `.is('voided_at', null)` is applied for real too — a voided
+        // charge (an audit row, not money owed) must not inflate periodChargeTotal.
         select: vi.fn().mockReturnValue({
           in: inChargesSpy.mockImplementation((_col: string, leaseIds: string[]) => ({
-            gte: vi.fn().mockImplementation((gteCol: string, gteVal: string) => ({
-              lte: vi.fn().mockImplementation(async (lteCol: string, lteVal: string) => {
-                if (state.debitInputsError) return { data: null, error: state.debitInputsError }
-                return {
-                  data: capped(state.charges
-                    .filter(c =>
-                      leaseIds.includes(c.lease_id) &&
-                      gteCol === 'due_date' && lteCol === 'due_date' &&
-                      c.due_date >= gteVal && c.due_date <= lteVal
-                    )
-                    .map(c => ({ lease_id: c.lease_id, amount: c.amount }))),
-                  error: null,
-                }
-              }),
+            is: vi.fn().mockImplementation((isCol: string, isVal: unknown) => ({
+              gte: vi.fn().mockImplementation((gteCol: string, gteVal: string) => ({
+                lte: vi.fn().mockImplementation(async (lteCol: string, lteVal: string) => {
+                  if (state.debitInputsError) return { data: null, error: state.debitInputsError }
+                  return {
+                    data: capped(state.charges
+                      .filter(c =>
+                        leaseIds.includes(c.lease_id) &&
+                        isCol === 'voided_at' && isVal === null && (c.voided_at ?? null) === null &&
+                        gteCol === 'due_date' && lteCol === 'due_date' &&
+                        c.due_date >= gteVal && c.due_date <= lteVal
+                      )
+                      .map(c => ({ lease_id: c.lease_id, amount: c.amount }))),
+                    error: null,
+                  }
+                }),
+              })),
             })),
           })),
         }),
@@ -438,6 +445,27 @@ describe('POST /api/cron/monthly-billing', () => {
     expect(ledgerBalanceLease1()).toBe(5000) // arrears paid off, only this period's $5,000 rent remains
     expect(mockStripe.paymentIntents.create).toHaveBeenCalledWith(
       expect.objectContaining({ amount: 500000 }), // full $5,000 this-period rent, not $5,500 or $0
+      expect.anything(),
+    )
+  })
+
+  // OI-278 / migration 0014: a VOIDED in-period charge is an audit row, not money owed. The debit is
+  // min(periodCharges − periodPaid, arBalance); ar_ledger already excludes voided rows, but with
+  // unpaid prior arrears the lifetime cap is loose, so an un-filtered period sum would collect the
+  // voided amount as if it were this period's rent. Here: $5,000 rent + $50 voided fee in-period,
+  // $500 prior arrears → correct debit $5,000, not $5,050.
+  it('does not debit a voided in-period charge even when prior arrears leave headroom under the balance cap', async () => {
+    state.charges = [
+      { lease_id: 'lease_1', idempotency_key: 'arrears-1', amount: 500, due_date: '2026-04-05' },
+      { lease_id: 'lease_1', idempotency_key: 'late_fee_lease_1_2026_06', amount: 50, due_date: '2026-06-02', voided_at: '2026-09-13T12:00:00Z', void_reason: 'OI-278 test' },
+    ]
+
+    const res = await postBilling()
+    expect(res.status).toBe(200)
+
+    expect(ledgerBalanceLease1()).toBe(5500) // 500 arrears + 5,000 this-period rent; the voided 50 never counts
+    expect(mockStripe.paymentIntents.create).toHaveBeenCalledWith(
+      expect.objectContaining({ amount: 500000 }), // $5,000 — not $5,050
       expect.anything(),
     )
   })

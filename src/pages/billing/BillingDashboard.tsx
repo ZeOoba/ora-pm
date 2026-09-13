@@ -45,11 +45,23 @@ export function BillingDashboard() {
               </tr>
             )}
             {data?.map(ch => (
-              <tr key={ch.id} className="hover:bg-gray-50">
+              // OI-278 / migration 0014: voided rows stay in the list as the audit trail but are
+              // visibly retired — struck-through amount + "Voided" badge carrying the reason.
+              <tr key={ch.id} className={`hover:bg-gray-50 ${ch.voided_at ? 'text-gray-400' : ''}`}>
                 <td className="px-4 py-3">{formatDate(ch.charge_date)}</td>
                 <td className="px-4 py-3 text-gray-500">{formatDate(ch.due_date)}</td>
-                <td className="px-4 py-3">{CHARGE_LABELS[ch.type] ?? ch.type}</td>
-                <td className="px-4 py-3 font-medium">{formatCurrency(ch.amount)}</td>
+                <td className="px-4 py-3">
+                  {CHARGE_LABELS[ch.type] ?? ch.type}
+                  {ch.voided_at && (
+                    <span
+                      className="ml-2 text-xs px-1.5 py-0.5 rounded bg-red-100 text-red-700"
+                      title={`${ch.void_reason ?? ''} (${formatDate(ch.voided_at)})`}
+                    >
+                      Voided
+                    </span>
+                  )}
+                </td>
+                <td className={`px-4 py-3 font-medium ${ch.voided_at ? 'line-through' : ''}`}>{formatCurrency(ch.amount)}</td>
                 <td className="px-4 py-3 text-gray-500 text-xs">
                   {formatDate(ch.period_start)} – {formatDate(ch.period_end)}
                 </td>

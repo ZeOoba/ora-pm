@@ -48,7 +48,7 @@ const state = {
   rec: null as Row | null,
   recSelectError: null as PgError | null,
   leaseUnits: { sf: 1000 } as Row | null,
-  camEstimateCharges: [] as { amount: number }[],
+  camEstimateCharges: [] as { amount: number; voided_at?: string | null }[],
   charges: [] as Row[],
   chargesInsertError: null as PgError | null,
   reconciliationUpdateError: null as PgError | null,
@@ -153,12 +153,23 @@ function installDbMock() {
     }
     if (table === 'charges') {
       return {
+        // /calculate's estimated-CAM-paid sum:
+        //   .eq('lease_id').eq('type','cam_estimate').is('voided_at', null).gte(period_start).lte(period_end)
+        // OI-278 / migration 0014: the `.is('voided_at', null)` link is applied for real — a voided
+        // estimate row must not count as CAM already paid (it would understate the true-up).
         select: vi.fn().mockReturnValue({
           eq: vi.fn().mockReturnValue({
             eq: vi.fn().mockReturnValue({
-              gte: vi.fn().mockReturnValue({
-                lte: vi.fn().mockImplementation(async () => ({ data: state.camEstimateCharges, error: null })),
-              }),
+              is: vi.fn().mockImplementation((col: string, val: unknown) => ({
+                gte: vi.fn().mockReturnValue({
+                  lte: vi.fn().mockImplementation(async () => ({
+                    data: col === 'voided_at' && val === null
+                      ? state.camEstimateCharges.filter((c) => (c.voided_at ?? null) === null)
+                      : state.camEstimateCharges,
+                    error: null,
+                  })),
+                }),
+              })),
             }),
           }),
         }),
@@ -353,6 +364,21 @@ describe('POST /api/cam/calculate', () => {
     const json = await res.json() as { data: Row }
     expect(json.data.lease_id).toBe(VALID_BODY.lease_id)
     expect(json.data.status).toBe('draft')
+  })
+
+  // OI-278 / migration 0014: estimated_cam_paid is Σ cam_estimate charges for the year. A voided
+  // estimate is not money the tenant was billed, so it must not reduce the true-up owed.
+  it('excludes voided cam_estimate charges from estimated_cam_paid', async () => {
+    state.camEstimateCharges = [
+      { amount: 100 },
+      { amount: 100, voided_at: '2026-09-13T12:00:00Z' },
+    ]
+    // tenantSF 1000 / totalLeasedSF 50000 = 2% × $10,000 = $200 owed; $100 paid (not $200).
+    const res = await calculate(VALID_BODY)
+    expect(res.status).toBe(200)
+    const json = await res.json() as { data: Row }
+    expect(json.data.estimated_cam_paid).toBe(100)
+    expect(json.data.true_up_amount).toBe(100)
   })
 
   // RED 4 — a string where a number is required is rejected before any DB write.

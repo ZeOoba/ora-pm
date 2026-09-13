@@ -248,9 +248,14 @@ cronRouter.post('/monthly-billing', async (c) => {
     //   - open-charges dropped  -> period total understated -> under-debit / resolved as zero (missed collection)
     //   - period-paid dropped   -> a manual payment vanishes -> OVER-DEBIT up to the AR balance (wrong charge)
     //   - ar_ledger row dropped -> balance reads 0 -> resolved as zero (missed collection)
+    //
+    // OI-278 / migration 0014: `.is('voided_at', null)` — a voided charge is an audit row, not
+    // money owed. ar_ledger.balance already excludes it, but the lifetime cap is loose whenever
+    // prior arrears exist, so an un-filtered period sum would debit the voided amount as if it
+    // were this period's rent.
     const [openChargesRes, periodPaymentsRes, arRes] = await Promise.all([
       fetchChunked(ids, BULK_QUERY_CHUNK_SIZE, (chunk) =>
-        db.from('charges').select('lease_id, amount').in('lease_id', chunk).gte('due_date', periodStartStr).lte('due_date', periodEndStr),
+        db.from('charges').select('lease_id, amount').in('lease_id', chunk).is('voided_at', null).gte('due_date', periodStartStr).lte('due_date', periodEndStr),
         { maxRows: POSTGREST_MAX_ROWS }),
       // Period-paid: manual (check/wire/other) or succeeded ACH payments dated WITHIN this
       // period. Autopay is only authorized to collect THIS period's rent — it must never sweep
@@ -579,11 +584,17 @@ cronRouter.post('/delinquency-check', async (c) => {
   //     overdue_i = ar_ledger.balance_i − recent_i
   //     delinquent iff overdue_i > OVERDUE_EPSILON
   // `recent_i` must be summed over EXACTLY the charge population ar_ledger.balance counts. The
-  // live view (supabase/migrations/0011_appsec_idempotency_and_scale.sql, verbatim from 0010)
-  // sums every `charges` row for the lease with no type/void/status filter (the table has no
-  // such column; amount is NUMERIC(12,2) US dollars, CHECK >= 0), so no filter is applied here
-  // either — only the due_date split. A late fee posted this month has due_date = today, so it
-  // is always "recent" and can never make itself overdue.
+  // live view (supabase/migrations/0014_charges_void.sql, verbatim from 0011/0010 plus one
+  // filter) sums every `charges` row for the lease WHERE voided_at IS NULL — no type/status
+  // filter (amount is NUMERIC(12,2) US dollars, CHECK >= 0), so the only filters applied here are
+  // that same `.is('voided_at', null)` and the due_date split. A late fee posted this month has
+  // due_date = today, so it is always "recent" and can never make itself overdue.
+  //
+  // OI-278 / migration 0014, existing-fee guard (second query below) — DELIBERATELY NOT filtered
+  // on voided_at: a voided fee for a lease-month still occupies the unique idempotency_key
+  // `late_fee_<lease>_<year>_<month>`, so re-posting that month would 23505 regardless; counting
+  // voided rows here means a month whose fee was voided is treated as already handled. That is
+  // the conservative choice — never re-fee a voided month.
   //
   // Row cap (PR #27 refute review): PostgREST returns at most `max_rows` (POSTGREST_MAX_ROWS) per
   // request and says nothing when it truncates. Before OI-234 a truncated existence probe could only
@@ -598,7 +609,7 @@ cronRouter.post('/delinquency-check', async (c) => {
   const leaseIds = (arRows as ARRow[]).map((ar) => ar.lease_id)
   const [recentRes, existingFeeRes] = await Promise.all([
     fetchChunked(leaseIds, BULK_QUERY_CHUNK_SIZE, (chunk) =>
-      db.from('charges').select('lease_id, amount').in('lease_id', chunk).gt('due_date', cutoffStr),
+      db.from('charges').select('lease_id, amount').in('lease_id', chunk).is('voided_at', null).gt('due_date', cutoffStr),
       { maxRows: POSTGREST_MAX_ROWS }),
     fetchChunked(leaseIds, BULK_QUERY_CHUNK_SIZE, (chunk) =>
       db.from('charges').select('lease_id').in('lease_id', chunk).eq('type', 'late_fee').gte('charge_date', periodStart),
