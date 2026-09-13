@@ -101,8 +101,14 @@ function livePayments() {
 function wire(arRows: ARRow[], charges: ReturnType<typeof makeCharges>) {
   mockFrom.mockImplementation((table: string) => {
     if (table === 'payments') return livePayments()
-    if (table === 'ar_ledger') return {
-      select: vi.fn().mockReturnValue({ gt: vi.fn().mockResolvedValue({ data: arRows, error: null }) }),
+    // ar_ledger is keyset-paged (.gt().order('lease_id').limit()); every fixture here is < 1000 rows,
+    // so one page holding the full set, sorted bytewise by lease_id as Postgres returns it, is complete.
+    if (table === 'ar_ledger') {
+      const b: Record<string, unknown> = {}
+      for (const m of ['select', 'gt', 'order', 'limit']) b[m] = () => b
+      const sorted = [...arRows].sort((x, y) => (x.lease_id < y.lease_id ? -1 : x.lease_id > y.lease_id ? 1 : 0))
+      b.then = (resolve: (v: unknown) => void) => resolve({ data: sorted, error: null })
+      return b
     }
     if (table === 'charges') return charges
     return { select: vi.fn() }
