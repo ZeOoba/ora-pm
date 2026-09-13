@@ -46,6 +46,15 @@ function makeUpdateChain(error: unknown = null) {
   return { update, eq }
 }
 
+// OI-222: the 23505 branch now reads back the existing row's status via
+// .select('status').eq('id', event.id).single() before deciding to skip.
+function makeSelectChain(data: unknown, error: unknown = null) {
+  const single = vi.fn().mockResolvedValue({ data, error })
+  const eq = vi.fn().mockReturnValue({ single })
+  const select = vi.fn().mockReturnValue({ eq })
+  return { select, eq, single }
+}
+
 describe('POST /api/webhooks/stripe', () => {
   it('returns 400 if stripe-signature header is missing', async () => {
     const res = await app.request('/api/webhooks/stripe', {
@@ -74,13 +83,16 @@ describe('POST /api/webhooks/stripe', () => {
     expect(json.error).not.toMatch(/Invalid signature/)
   })
 
-  it('returns 200 with skipped:true for duplicate event (idempotency)', async () => {
+  it('returns 200 with skipped:true for duplicate event whose row is already processed (idempotency)', async () => {
     const fakeEvent = { id: 'evt_dup', type: 'payment_intent.succeeded', data: { object: {} } }
     mockConstructEventAsync.mockResolvedValue(fakeEvent)
 
-    // 23505 = PostgreSQL unique_violation = PK conflict = already processed
+    // 23505 = PostgreSQL unique_violation = PK conflict. OI-222: a conflict alone
+    // is NOT proof the event was handled — the route must read the row's status
+    // and only skip when it is 'processed'.
     const { insert } = makeInsert({ code: '23505', message: 'duplicate key' })
-    mockFrom.mockReturnValue({ insert })
+    const { select, eq } = makeSelectChain({ status: 'processed' })
+    mockFrom.mockReturnValue({ insert, select })
 
     const res = await app.request('/api/webhooks/stripe', {
       method: 'POST',
@@ -91,6 +103,81 @@ describe('POST /api/webhooks/stripe', () => {
     const json = await res.json() as { received: boolean; skipped: boolean }
     expect(json.skipped).toBe(true)
     expect(insert).toHaveBeenCalledWith({ id: 'evt_dup', event_type: 'payment_intent.succeeded' })
+    expect(select).toHaveBeenCalledWith('status')
+    expect(eq).toHaveBeenCalledWith('id', 'evt_dup')
+    expect(mockHandleStripeEvent).not.toHaveBeenCalled()
+  })
+
+  // OI-222: a retry of an event whose first attempt FAILED must be re-processed,
+  // not dropped. Before the fix, every 23505 was treated as "already handled",
+  // so a transient handler failure (DB blip, timeout) on e.g.
+  // payment_intent.succeeded permanently lost the ledger credit even though
+  // Stripe delivered and retried the event.
+  it('OI-222: re-runs the handler and marks processed when the conflicting row is status:failed', async () => {
+    const fakeEvent = { id: 'evt_retry', type: 'payment_intent.succeeded', data: { object: { id: 'pi_retry' } } }
+    mockConstructEventAsync.mockResolvedValue(fakeEvent)
+    mockHandleStripeEvent.mockResolvedValue(undefined)
+
+    const { insert } = makeInsert({ code: '23505', message: 'duplicate key' })
+    const { select, eq: selectEq } = makeSelectChain({ status: 'failed' })
+    const { update, eq: updateEq } = makeUpdateChain()
+    mockFrom.mockReturnValue({ insert, select, update })
+
+    const res = await app.request('/api/webhooks/stripe', {
+      method: 'POST',
+      headers: { 'stripe-signature': 'sig_test' },
+      body: JSON.stringify(fakeEvent),
+    }, env)
+    expect(res.status).toBe(200)
+    const json = await res.json() as { received: boolean; skipped?: boolean }
+    expect(json.received).toBe(true)
+    expect(json.skipped).toBeUndefined()
+    expect(select).toHaveBeenCalledWith('status')
+    expect(selectEq).toHaveBeenCalledWith('id', 'evt_retry')
+    expect(mockHandleStripeEvent).toHaveBeenCalledTimes(1)
+    expect(mockHandleStripeEvent).toHaveBeenCalledWith(fakeEvent, expect.anything())
+    expect(update).toHaveBeenCalledWith({ status: 'processed' })
+    expect(updateEq).toHaveBeenCalledWith('id', 'evt_retry')
+  })
+
+  it('OI-222: marks failed again and returns 500 when the retry of a status:failed row also throws', async () => {
+    const fakeEvent = { id: 'evt_retry_again', type: 'payment_intent.succeeded', data: { object: {} } }
+    mockConstructEventAsync.mockResolvedValue(fakeEvent)
+    mockHandleStripeEvent.mockRejectedValue(new Error('still broken'))
+
+    const { insert } = makeInsert({ code: '23505', message: 'duplicate key' })
+    const { select } = makeSelectChain({ status: 'failed' })
+    const { update, eq } = makeUpdateChain()
+    mockFrom.mockReturnValue({ insert, select, update })
+
+    const res = await app.request('/api/webhooks/stripe', {
+      method: 'POST',
+      headers: { 'stripe-signature': 'sig_test' },
+      body: JSON.stringify(fakeEvent),
+    }, env)
+    expect(res.status).toBe(500)
+    expect(mockHandleStripeEvent).toHaveBeenCalledTimes(1)
+    expect(update).toHaveBeenCalledWith({ status: 'failed' })
+    expect(update).not.toHaveBeenCalledWith({ status: 'processed' })
+    expect(eq).toHaveBeenCalledWith('id', 'evt_retry_again')
+  })
+
+  it('OI-222: returns 500 and does not call the handler if the status read-back after 23505 fails (Stripe will retry)', async () => {
+    const fakeEvent = { id: 'evt_readback_err', type: 'payment_intent.succeeded', data: { object: {} } }
+    mockConstructEventAsync.mockResolvedValue(fakeEvent)
+
+    const { insert } = makeInsert({ code: '23505', message: 'duplicate key' })
+    const { select } = makeSelectChain(null, { code: '08006', message: 'connection error' })
+    mockFrom.mockReturnValue({ insert, select })
+
+    const res = await app.request('/api/webhooks/stripe', {
+      method: 'POST',
+      headers: { 'stripe-signature': 'sig_test' },
+      body: JSON.stringify(fakeEvent),
+    }, env)
+    expect(res.status).toBe(500)
+    const json = await res.json() as { error: string }
+    expect(json.error).not.toMatch(/connection error/)
     expect(mockHandleStripeEvent).not.toHaveBeenCalled()
   })
 

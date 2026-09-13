@@ -1,6 +1,7 @@
 import { useState } from 'react'
-import { useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { portalSupabase } from '../lib/supabase-portal'
+import { portalApi } from '../lib/portal-api'
 
 export function PortalInsurance() {
   const [form, setForm] = useState({
@@ -16,8 +17,18 @@ export function PortalInsurance() {
   const [errorMsg, setErrorMsg] = useState('')
   const qc = useQueryClient()
 
+  // OI-071: the storage RLS policy (tenant_upload_insurance, migration 0008)
+  // keys the folder on public.tenants.id — NOT the Supabase auth user id
+  // (session.user.id), which is a different uuid. Same query PortalPayNow and
+  // PortalDashboard use.
+  const { data: meData, error: meError } = useQuery({ queryKey: ['portal-me'], queryFn: portalApi.getMe })
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
+
+    const tenantId = meData?.tenant.id
+    if (!tenantId) { setStatus('error'); setErrorMsg('Your account details are still loading — try again in a moment.'); return }
+
     setStatus('uploading')
     setErrorMsg('')
 
@@ -27,7 +38,6 @@ export function PortalInsurance() {
     let storagePath: string | null = null
 
     if (file) {
-      const tenantId = session.user.id
       const fileName = `${tenantId}/${file.name}`
 
       const { error: uploadErr } = await portalSupabase.storage
@@ -84,6 +94,11 @@ export function PortalInsurance() {
 
       {status === 'error' && (
         <div className="bg-red-50 border border-red-200 rounded p-4 text-red-700 text-sm">{errorMsg}</div>
+      )}
+      {meError && (
+        <div className="bg-red-50 border border-red-200 rounded p-4 text-red-700 text-sm">
+          Could not load your account: {meError.message}
+        </div>
       )}
 
       <form onSubmit={handleSubmit} className="bg-white rounded-lg border border-gray-200 p-6 space-y-4">
@@ -161,10 +176,10 @@ export function PortalInsurance() {
 
         <button
           type="submit"
-          disabled={status === 'uploading'}
+          disabled={status === 'uploading' || !meData?.tenant}
           className="w-full bg-[#1B2A4A] text-white rounded px-4 py-2.5 text-sm font-medium hover:bg-[#243660] disabled:opacity-50"
         >
-          {status === 'uploading' ? 'Uploading…' : 'Submit Certificate'}
+          {status === 'uploading' ? 'Uploading…' : meData?.tenant ? 'Submit Certificate' : 'Loading account…'}
         </button>
       </form>
     </div>
