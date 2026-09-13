@@ -18,9 +18,9 @@
 // the form payload exactly. VALID_* bodies below are the literal shapes the
 // forms send; the drift guards re-derive the sent key sets from the component
 // source, so a form/schema rename fails here first, and check every schema key
-// against the CREATE TABLE / ADD COLUMN statements in 0001, 0002 and 0011. A
-// later migration that renames or drops one of these columns must be added to
-// tableColumns() below — that guard does not read RENAME/DROP.
+// against the CREATE TABLE / ADD COLUMN statements in 0001, 0002, 0011 and
+// 0015. A later migration that renames or drops one of these columns must be
+// added to tableColumns() below — that guard does not read RENAME/DROP.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { readFileSync } from 'node:fs'
@@ -243,6 +243,9 @@ describe('PUT /api/tenants/:id — TenantForm.tsx edit payload', () => {
 
 const LEASE_ID = '33333333-3333-3333-3333-333333333333'
 
+// idempotency_key: OI-082 — PaymentsList.tsx sends one manual:<uuid> per form
+// session (migration 0015 made the column NOT NULL + UNIQUE); the route passes
+// a supplied key through unchanged, so it round-trips here verbatim.
 const PAYMENT_FILLED = {
   lease_id: LEASE_ID,
   payment_date: '2026-09-01',
@@ -250,6 +253,7 @@ const PAYMENT_FILLED = {
   method: 'check',
   check_number: '10457',
   notes: 'September base rent',
+  idempotency_key: 'manual:5b1e6f3a-2c4d-4e8f-9a0b-1c2d3e4f5a6b',
 }
 
 const PAYMENT_BLANK = {
@@ -259,6 +263,7 @@ const PAYMENT_BLANK = {
   method: 'wire',
   check_number: null,
   notes: null,
+  idempotency_key: 'manual:5b1e6f3a-2c4d-4e8f-9a0b-1c2d3e4f5a6b',
 }
 
 describe('POST /api/payments — PaymentsList.tsx payload', () => {
@@ -289,7 +294,8 @@ describe('POST /api/payments — PaymentsList.tsx payload', () => {
   it('rejects method ach_stripe on the manual route (ACH rows are written only by the Stripe webhook/cron)', async () => {
     const spy = vi.fn()
     mockFrom.mockReturnValue(tableMock(spy))
-    // Minimal body with no null fields, so the 422 can only come from `method`.
+    // Minimal body with no null fields (idempotency_key is optional — the
+    // route defaults it), so the 422 can only come from `method`.
     const res = await send('POST', '/api/payments', { lease_id: LEASE_ID, payment_date: '2026-09-01', amount: 3500, method: 'ach_stripe' })
     expect(res.status).toBe(422)
     expect(spy).not.toHaveBeenCalled()
@@ -319,7 +325,7 @@ function sentKeys(componentPath: string): string[] {
 
 function tableColumns(table: string): Set<string> {
   const cols = new Set<string>()
-  for (const file of ['0001_core_entities.sql', '0002_financial_tables.sql', '0011_appsec_idempotency_and_scale.sql']) {
+  for (const file of ['0001_core_entities.sql', '0002_financial_tables.sql', '0011_appsec_idempotency_and_scale.sql', '0015_payments_idempotency_key.sql']) {
     const sql = readFileSync(join(root, 'supabase/migrations', file), 'utf-8')
     const create = sql.match(new RegExp(`CREATE TABLE ${table} \\(([\\s\\S]*?)\\n\\);`))
     if (create) for (const m of create[1].matchAll(/^\s*([a-z_]+)\s+[A-Z]/gm)) cols.add(m[1])
