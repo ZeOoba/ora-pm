@@ -5,6 +5,7 @@ import { portalApi } from '../lib/portal-api'
 import { formatCurrency } from '../../lib/format'
 import type { Charge } from '../lib/portal-api'
 import { singleLeaseId } from '../lib/charges'
+import { runPayAttempt } from '../lib/pay-attempt'
 
 const stripePromise = loadStripe(import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY as string)
 
@@ -22,8 +23,16 @@ export function PortalPayNow() {
   // the key across a changed amount would make Stripe reject the retry as an
   // idempotency-key/parameter mismatch — and after a successful payment, so
   // the next payment gets its own fresh id.
+  //
+  // paymentMethodIdRef (OI-064) is the same one-per-attempt unit as
+  // clientRequestIdRef, not a separate lifecycle: reusing the client_request_id
+  // on a retry only keeps Stripe's idempotency key stable if the PARAMS also
+  // match, and payment_method_id is one of those params. Always reset (and
+  // read) both refs together — see runPayAttempt in ../lib/pay-attempt.ts.
+  const paymentMethodIdRef = useRef<string | null>(null)
   const clientRequestIdRef = useRef<string | null>(null)
   useEffect(() => {
+    paymentMethodIdRef.current = null
     clientRequestIdRef.current = null
   }, [selected])
 
@@ -72,39 +81,23 @@ export function PortalPayNow() {
     if (!stripe) { setStep('error'); setErrorMsg('Stripe failed to load'); return }
 
     try {
-      const { client_secret } = await portalApi.createSetupIntent(tenant.id)
-
-      const { setupIntent, error: setupErr } = await stripe.collectBankAccountForSetup({
-        clientSecret: client_secret,
-        params: {
-          payment_method_type: 'us_bank_account',
-          payment_method_data: { billing_details: { name: tenant.name } },
-        },
-      })
-
-      if (setupErr) throw new Error(setupErr.message)
-      if (!setupIntent?.payment_method) throw new Error('No payment method returned')
-
-      const { error: confirmErr } = await stripe.confirmUsBankAccountSetup(client_secret)
-      if (confirmErr) throw new Error(confirmErr.message)
-
-      const paymentMethodId = typeof setupIntent.payment_method === 'string'
-        ? setupIntent.payment_method
-        : setupIntent.payment_method.id
-
       if (!clientRequestIdRef.current) clientRequestIdRef.current = crypto.randomUUID()
 
-      const result = await portalApi.createPaymentIntent({
-        tenant_id: tenant.id,
-        lease_id: leaseId,
-        amount_cents: totalCents,
-        payment_method_id: paymentMethodId,
-        description: `Rent payment — ${selectedCharges.length} charge(s)`,
-        client_request_id: clientRequestIdRef.current,
-      })
+      const result = await runPayAttempt(
+        { stripe, api: portalApi },
+        {
+          tenant,
+          leaseId,
+          amountCents: totalCents,
+          description: `Rent payment — ${selectedCharges.length} charge(s)`,
+          clientRequestId: clientRequestIdRef.current,
+        },
+        paymentMethodIdRef
+      )
 
       if (!result.payment_intent_id) throw new Error('Payment intent creation failed')
 
+      paymentMethodIdRef.current = null
       clientRequestIdRef.current = null // this attempt is done — the next payment gets a fresh id
       setStep('done')
       qc.invalidateQueries({ queryKey: ['portal-me'] })
@@ -157,7 +150,11 @@ export function PortalPayNow() {
                   checked={selected.has(ch.id)}
                   onChange={() => {
                     const next = new Set(selected)
-                    next.has(ch.id) ? next.delete(ch.id) : next.add(ch.id)
+                    if (next.has(ch.id)) {
+                      next.delete(ch.id)
+                    } else {
+                      next.add(ch.id)
+                    }
                     setSelected(next)
                   }}
                   className="rounded"
