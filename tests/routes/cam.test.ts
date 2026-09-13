@@ -49,6 +49,8 @@ const state = {
   recSelectError: null as PgError | null,
   leaseUnits: { sf: 1000 } as Row | null,
   camEstimateCharges: [] as { amount: number; voided_at?: string | null }[],
+  camChargesError: null as PgError | null,
+  leaseSelectError: null as PgError | null,
   charges: [] as Row[],
   chargesInsertError: null as PgError | null,
   reconciliationUpdateError: null as PgError | null,
@@ -146,7 +148,11 @@ function installDbMock() {
       return {
         select: vi.fn().mockReturnValue({
           eq: vi.fn().mockReturnValue({
-            single: vi.fn().mockImplementation(async () => ({ data: { units: state.leaseUnits }, error: null })),
+            single: vi.fn().mockImplementation(async () => (
+              state.leaseSelectError
+                ? { data: null, error: state.leaseSelectError }
+                : { data: { units: state.leaseUnits }, error: null }
+            )),
           }),
         }),
       }
@@ -162,12 +168,16 @@ function installDbMock() {
             eq: vi.fn().mockReturnValue({
               is: vi.fn().mockImplementation((col: string, val: unknown) => ({
                 gte: vi.fn().mockReturnValue({
-                  lte: vi.fn().mockImplementation(async () => ({
-                    data: col === 'voided_at' && val === null
-                      ? state.camEstimateCharges.filter((c) => (c.voided_at ?? null) === null)
-                      : state.camEstimateCharges,
-                    error: null,
-                  })),
+                  lte: vi.fn().mockImplementation(async () => (
+                    state.camChargesError
+                      ? { data: null, error: state.camChargesError }
+                      : {
+                          data: col === 'voided_at' && val === null
+                            ? state.camEstimateCharges.filter((c) => (c.voided_at ?? null) === null)
+                            : state.camEstimateCharges,
+                          error: null,
+                        }
+                  )),
                 }),
               })),
             }),
@@ -232,6 +242,8 @@ beforeEach(() => {
   state.recSelectError = null
   state.leaseUnits = { sf: 1000 }
   state.camEstimateCharges = []
+  state.camChargesError = null
+  state.leaseSelectError = null
   state.charges = []
   state.chargesInsertError = null
   state.reconciliationUpdateError = null
@@ -379,6 +391,33 @@ describe('POST /api/cam/calculate', () => {
     const json = await res.json() as { data: Row }
     expect(json.data.estimated_cam_paid).toBe(100)
     expect(json.data.true_up_amount).toBe(100)
+  })
+
+  // PR #42 refute (Important 1): the estimated-CAM-paid read used to discard its `error`, so a
+  // failed query (e.g. 42703 while the app is deployed ahead of migration 0014's `voided_at`
+  // column) read as estimated_cam_paid = 0 — overstating true_up_amount and SAVING a draft that
+  // /approve would then post. Fail closed like every other charges reader: 500, nothing written,
+  // no raw Postgres text.
+  it('returns 500 and saves nothing when the cam_estimate charges read fails (never a $0-paid draft)', async () => {
+    state.camChargesError = { code: '42703', message: 'column charges.voided_at does not exist' }
+
+    const res = await calculate(VALID_BODY)
+    expect(res.status).toBe(500)
+    expect(camUpdateSpy).not.toHaveBeenCalled()
+    expect(camInsertSpy).not.toHaveBeenCalled()
+    const text = await res.text()
+    expect(text).not.toContain('voided_at')
+    expect(text).not.toContain('42703')
+  })
+
+  it('returns 500 and saves nothing when the lease/unit SF read fails (never a 0-SF pro-rata draft)', async () => {
+    state.leaseSelectError = { code: '57014', message: 'canceling statement due to statement timeout on relation "leases"' }
+
+    const res = await calculate(VALID_BODY)
+    expect(res.status).toBe(500)
+    expect(camUpdateSpy).not.toHaveBeenCalled()
+    expect(camInsertSpy).not.toHaveBeenCalled()
+    expect(await res.text()).not.toContain('statement timeout')
   })
 
   // RED 4 — a string where a number is required is rejected before any DB write.

@@ -51,11 +51,14 @@ chargesRouter.post('/', async (c) => {
 // should set the two columns, never call this route.
 chargesRouter.delete('/:id', async (c) => {
   const db = getDb(c.env)
-  const { data: charge } = await db
+  // Fail closed (PR #42 refute): a failed pre-read used to fall through as "not found". PGRST116
+  // (no row) is the genuine 404; any other error is a DB failure and must not be reported as 404.
+  const { data: charge, error: readErr } = await db
     .from('charges')
     .select('source')
     .eq('id', c.req.param('id'))
     .single()
+  if (readErr && readErr.code !== 'PGRST116') return dbError(c, readErr, 'Failed to load charge')
   if (!charge) return c.json({ error: 'Charge not found' }, 404)
   if ((charge as { source: string }).source === 'auto') {
     return c.json({ error: 'Auto-generated charges cannot be deleted' }, 400)
