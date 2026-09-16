@@ -96,31 +96,15 @@ about — see OI-048/OI-073/OI-074 in `~/.claude` memory
 (`open-items-tracker.md`) for the full incident history and root-cause
 writeup.
 
-## Migration history (0011 onward — earlier files predate this log)
+## Migration history log
 
-- `0011_appsec_idempotency_and_scale.sql` — appsec sweep 2026-08 (OI-034 /
-  OI-035 / OI-039 / OI-046): `payments_stripe_pi_uniq` (one row per
-  PaymentIntent), `payments.autopay_period` + `payments_autopay_period_uniq`,
-  `charges.idempotency_key NOT NULL`, all money columns re-typed
-  `NUMERIC(12,2)` with unit comments (ar_ledger dropped/recreated verbatim
-  around the re-types). Its apply is what surfaced the untracked 0008-0010
-  history above.
-- `0012_view_security_invoker.sql` — OI-079: `ar_ledger`, `rent_roll`,
-  `critical_dates` set `security_invoker = true` so a direct PostgREST caller
-  is bound by the underlying tables' RLS. Additive; no logic change.
-- `0013_enable_rls_remaining_tables.sql` — OI-078: `ENABLE ROW LEVEL SECURITY`
-  on the 17 tables that had none, deliberately with no policies (default-deny
-  for the anon key; the service-role API is unaffected).
-- `0014_payment_intent_pending_row.sql` — OI-065 / OI-223 / OI-233 payment-
-  intent hardening: `payments.client_request_id` +
-  `payments_client_request_id_uniq`, and the `reserve_payment_intent()`
-  plpgsql function that takes a per-lease `pg_advisory_xact_lock`, subtracts
-  in-flight (`pending`/`processing`) ACH from `ar_ledger.balance`, and inserts
-  the `'pending'` ledger row BEFORE `server/routes/stripe.ts` calls Stripe.
-  `ar_ledger` itself is untouched. Executable by `service_role` only. Ships
-  with a reconciliation query for reservations whose Stripe result was never
-  written back. Apply BEFORE deploying the matching `server/` change — the
-  new route fails closed (500, no Stripe call) if the function is missing.
+| File | Item | What it does | Pre-flight before applying to prod |
+|------|------|--------------|-----------------------------------|
+| `0011_appsec_idempotency_and_scale.sql` | OI-034/035/039/046 | `payments_stripe_pi_uniq` + `payments_autopay_period_uniq` partial unique indexes, `charges.idempotency_key` NOT NULL, money columns to `NUMERIC(12,2)` | Three checks in the file header — duplicate PaymentIntents, backfill collisions, sub-cent precision. Hit `42P16` on first apply (see History above). |
+| `0012_view_security_invoker.sql` | OI-079 | `security_invoker = true` on the views so RLS applies through them | None. |
+| `0013_enable_rls_remaining_tables.sql` | OI-078/081 | RLS on the remaining tables; `tests/db/rls-inventory-remaining-tables.test.ts` manifest | None; run `scripts/verify-rls.sql` after. |
+| `0014_payment_intent_pending_row.sql` | OI-065/223/233 | `payments.client_request_id` + `payments_client_request_id_uniq`, and the `reserve_payment_intent()` plpgsql function: takes a per-lease `pg_advisory_xact_lock`, subtracts in-flight (`pending`/`processing`) ACH from `ar_ledger.balance`, inserts the `'pending'` ledger row BEFORE `server/routes/stripe.ts` calls Stripe. `ar_ledger` itself is untouched; executable by `service_role` only. Ships with a reconciliation query for reservations whose Stripe result was never written back. | None required to apply safely (additive column + function). **Apply BEFORE deploying the matching `server/` change** — the new route fails closed (500, no Stripe call) if the function is missing, the safe direction but still worth minimizing. Adversarially verified against a real PostgreSQL 16.2 instance (advisory-lock concurrency under genuine races), not just pg-mem — see `tests/db/payment-intent-migration-0014.test.ts`. |
+| `0015_payments_idempotency_key.sql` | OI-082 | `payments.idempotency_key` TEXT NOT NULL, `legacy:<id>` backfill, `auto:<uuid>` DB default for the stripe.ts/cron.ts insert paths, `payments_idempotency_key_uniq` unique index. Closes the gap 0011 left: its two partial indexes never covered manual check/wire/other rows, so a double-submitted form inserted twice and `ar_ledger` summed both. | **Run the duplicate-manual-payment query in the file header against the LIVE database first** — `SELECT lease_id, payment_date, amount, method, count(*) FROM payments WHERE method IN ('check','wire','other') GROUP BY lease_id, payment_date, amount, method HAVING count(*) > 1;` — and adjudicate every group against deposit records before applying. The migration deliberately does NOT auto-dedupe: two same-day same-amount checks can be legitimate. `tests/db/payments-idempotency-migration-0015.test.ts` applies the real SQL under pg-mem. |
 
 ## Keeping this claim honest as migrations change
 
