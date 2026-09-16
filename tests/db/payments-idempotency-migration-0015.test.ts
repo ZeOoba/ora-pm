@@ -11,12 +11,16 @@
 // stripe.ts balance cap and cron.ts autopay lifetime cap).
 //
 // 0015 mirrors 0011's charges treatment for payments. Same live-SQL loader
-// (tests/fixtures/pg-migrated-db.ts) as appsec-migration-0011.test.ts.
+// (tests/fixtures/pg-migrations.ts) as appsec-migration-0011.test.ts — this
+// suite originally extracted its own copy (pg-migrated-db.ts) in parallel
+// with a concurrent workstream's equivalent extraction; consolidated onto
+// the other one since it also handles 0014's dollar-quoted plpgsql function
+// body, which this loader must now parse past correctly too.
 
 import { describe, it, expect, beforeEach } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { freshMigratedDb, allMigrationText, migrationFiles, MIGRATIONS_DIR, type MigratedDb } from '../fixtures/pg-migrated-db'
+import { freshMigratedDb, allMigrationText, migrationFiles, MIGRATIONS_DIR, type MigratedDb } from '../fixtures/pg-migrations'
 
 const MIGRATION_FILE = '0015_payments_idempotency_key.sql'
 

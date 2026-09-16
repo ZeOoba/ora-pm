@@ -64,7 +64,7 @@ exportsRouter.get('/qb-iif', async (c) => {
     { maxRows: Infinity })
   if (leaseErr) return dbError(c, leaseErr, 'Failed to load leases')
 
-  // Sum charges posted for this property in this period (accrual basis). OI-278 / migration 0014:
+  // Sum charges posted for this property in this period (accrual basis). OI-278 / migration 0016:
   // voided charges never reach the journal — this file is what gets imported into QuickBooks.
   const totals = { rent: 0, cam: 0, utility: 0, fees: 0 }
 

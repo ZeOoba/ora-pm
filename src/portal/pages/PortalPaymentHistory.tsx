@@ -6,6 +6,12 @@ import type { Payment } from '../lib/portal-api'
 const STATUS_BADGE: Record<string, string> = {
   succeeded: 'bg-green-100 text-green-700',
   processing: 'bg-yellow-100 text-yellow-700',
+  // OI-065/223/233 review follow-up: a payment-intent reservation (0014) is
+  // written as 'pending' before Stripe is even called, and stays that way
+  // until write-back or the webhook resolves it. Same visual treatment as
+  // 'processing' — both mean "not yet settled, nothing to do" from a tenant's
+  // view — rather than falling through to the generic untitled gray badge.
+  pending: 'bg-yellow-100 text-yellow-700',
   failed: 'bg-red-100 text-red-700',
   returned: 'bg-red-100 text-red-700',
 }

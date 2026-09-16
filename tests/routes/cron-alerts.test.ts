@@ -619,7 +619,7 @@ describe('POST /api/cron/delinquency-check', () => {
     // Unique, bytewise-ascending ids in creation order (charges.id is a uuid PK in production).
     let seq = 0
     const nextId = () => `c_${String(seq++).padStart(7, '0')}`
-    // `voided_at: null` — live rows (migration 0014); the recent-charges query filters on it.
+    // `voided_at: null` — live rows (migration 0016); the recent-charges query filters on it.
     const rentRow = (lease_id: string): Row => ({ id: nextId(), lease_id, type: 'base_rent', amount: 100, due_date: OLD, charge_date: OLD, voided_at: null })
     const feeRow = (lease_id: string): Row => ({ id: nextId(), lease_id, type: 'late_fee', amount: 50, due_date: today, charge_date: today, voided_at: null })
     const expectKeysetPages = (pages: Call[][], key: string) => {

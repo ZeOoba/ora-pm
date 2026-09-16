@@ -10,18 +10,18 @@
 -- (0002_financial_tables.sql), so an offsetting credit charge is impossible —
 -- a void marker is the only non-destructive mechanism.
 --
--- 0016_void_oi278_pre_guard_late_fees.sql is the DATA half (the guarded UPDATE
+-- 0017_void_oi278_pre_guard_late_fees.sql is the DATA half (the guarded UPDATE
 -- of exactly those 103 rows). ORDERING, stated as it really runs:
 --   * The "DB Migrate (manual)" workflow (`supabase db push`) applies EVERY
---     untracked migration in filename order in one run — 0014 and 0016 land
---     together unless 0016 is deliberately held out of the tree for that run.
+--     untracked migration in filename order in one run — 0016 and 0017 land
+--     together unless 0017 is deliberately held out of the tree for that run.
 --   * The Dashboard path (scripts/prepare-migration-for-dashboard.mjs) applies
---     one file per paste — 0014 first, then 0016.
---   Either way 0014 always precedes 0016 (0016 needs these columns), and 0016
+--     one file per paste — 0016 first, then 0017.
+--   Either way 0016 always precedes 0017 (0017 needs these columns), and 0017
 --   is self-guarding: it RAISEs unless the population is exactly the ruled
 --   census, and RETURNs with a NOTICE when there is nothing to do (already
 --   applied, or a DB with no such fees), so it is safe in a combined push.
---   Deploy the application AFTER 0014 is live: the app's `voided_at IS NULL`
+--   Deploy the application AFTER 0016 is live: the app's `voided_at IS NULL`
 --   filters 400 (42703) against the old schema.
 --
 -- Application code (server/routes/cron.ts, portal.ts, exports.ts, reports.ts,
@@ -111,7 +111,7 @@ ALTER VIEW ar_ledger SET (security_invoker = true);
 
 -- ---------------------------------------------------------------------------
 -- Rollback (reference) — restores the 0011 view text and drops the columns.
--- Run 0016's rollback FIRST if it has been applied (un-void the rows), or the
+-- Run 0017's rollback FIRST if it has been applied (un-void the rows), or the
 -- DROP COLUMN below discards the void markers with no way to recover which
 -- rows they were on.
 --   CREATE OR REPLACE VIEW ar_ledger WITH (security_invoker = true) AS

@@ -72,9 +72,9 @@ camRouter.post('/calculate', async (c) => {
 
   const tenantSF: number = (lease as { units: { sf: number } } | null)?.units?.sf ?? 0
 
-  // Sum all CAM estimate charges billed this year. OI-278 / migration 0014: a voided estimate was
+  // Sum all CAM estimate charges billed this year. OI-278 / migration 0016: a voided estimate was
   // never really billed, so it must not count as CAM paid (that would understate the true-up).
-  // Fail closed on a read error — including 42703 while the app runs ahead of migration 0014.
+  // Fail closed on a read error — including 42703 while the app runs ahead of migration 0016.
   const { data: camCharges, error: camChargesErr } = await db
     .from('charges')
     .select('amount')

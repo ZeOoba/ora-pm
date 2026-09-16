@@ -9,7 +9,7 @@ const MIGRATIONS_DIR = join(__dirname, '../../supabase/migrations')
 // Matches the head of an ar_ledger definition, with or without a view-options clause:
 //   CREATE OR REPLACE VIEW ar_ledger AS
 //   CREATE OR REPLACE VIEW ar_ledger WITH (security_invoker = true) AS
-// Anchored to line start (`m` flag) so a copy quoted inside a "--" rollback comment (0014) is
+// Anchored to line start (`m` flag) so a copy quoted inside a "--" rollback comment (0016) is
 // never mistaken for the live statement.
 const AR_LEDGER_HEAD_RE = /^CREATE OR REPLACE VIEW ar_ledger(\s+WITH\s*\([^)]*\))?\s+AS\b/gm
 
@@ -17,7 +17,7 @@ const AR_LEDGER_HEAD_RE = /^CREATE OR REPLACE VIEW ar_ledger(\s+WITH\s*\([^)]*\)
 // `from` in `sql`, ending at the statement's OWN terminating ";" — the first ";" that is outside a
 // single-quoted string and outside a "--" line comment. Terminating on the statement's own ";"
 // (rather than the last ";" before the next CREATE VIEW) lets a migration put further statements
-// after the view (0014 re-runs ALTER VIEW ... SET (security_invoker) right after recreating it).
+// after the view (0016 re-runs ALTER VIEW ... SET (security_invoker) right after recreating it).
 function extractViewStatementAt(sql: string, from: number): string {
   let i = from
   let inString = false
@@ -71,7 +71,7 @@ function pgMemExecutable(viewSql: string): string {
 function freshLedgerDb() {
   const db = newDb()
   const { public: pub } = db
-  // Column subset the live view reads. `voided_at` (migration 0014): a voided charge stays on the
+  // Column subset the live view reads. `voided_at` (migration 0016): a voided charge stays on the
   // table as an audit row but must not count toward total_charged/balance.
   pub.none(`
     CREATE TABLE properties (id UUID PRIMARY KEY, name TEXT NOT NULL);
@@ -202,7 +202,7 @@ describe('ar_ledger view — balance arithmetic under multiple charges + payment
     expect(Number(b.balance)).toBe(0)
   })
 
-  // OI-278 (migration 0014): a voided charge is an audit row, not money owed. It must be excluded
+  // OI-278 (migration 0016): a voided charge is an audit row, not money owed. It must be excluded
   // from total_charged (and so from balance) while a sibling non-voided charge still counts.
   it('excludes voided charges from total_charged and balance (voided_at IS NOT NULL)', () => {
     db.none(`
@@ -236,7 +236,7 @@ describe('ar_ledger view — balance arithmetic under multiple charges + payment
 // against REL_15_STABLE 2026-09-13). So any later redefinition without WITH (security_invoker =
 // true) silently drops the OI-079 fix. These assertions run against the SAME definition the
 // behavioral suite above executes, so they cannot check a stale copy.
-describe('ar_ledger view — security_invoker survives redefinition (OI-079 + migration 0014)', () => {
+describe('ar_ledger view — security_invoker survives redefinition (OI-079 + migration 0016)', () => {
   const live = extractLiveArLedgerView()
 
   it('the live definition carries WITH (security_invoker = true) in the CREATE statement itself', () => {

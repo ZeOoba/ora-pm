@@ -313,7 +313,7 @@ describe('POST /api/cron/delinquency-check — oldest-first overdue test (OI-234
     expect(charges.insert).not.toHaveBeenCalled()
   })
 
-  // OI-278 / migration 0014: ar_ledger.balance now excludes voided charges (`voided_at IS NULL`), so
+  // OI-278 / migration 0016: ar_ledger.balance now excludes voided charges (`voided_at IS NULL`), so
   // recent_i must be summed over that SAME population or overdue_i = balance − recent_i drifts:
   // a voided recent charge counted here would UNDER-state overdue (missed fee); the inverse
   // (recent excludes, balance includes) can never happen because the view is the source. Pinned on

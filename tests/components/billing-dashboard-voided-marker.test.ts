@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-// OI-278 / migration 0014: the admin charges list (GET /api/charges, `select('*')`) still returns
+// OI-278 / migration 0016: the admin charges list (GET /api/charges, `select('*')`) still returns
 // voided rows — they are the audit trail — so the table must make the voided state visible rather
 // than render a voided $50 fee indistinguishably from a live one. No React-rendering harness exists
 // in this repo (see portal-charge-field-drift.test.ts), so this reads the component source.

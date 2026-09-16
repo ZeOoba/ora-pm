@@ -32,7 +32,7 @@ const id = (p: string) => `${p}_${String(seq++).padStart(7, '0')}`
 const PROP = 'prop_1'
 const unit = (property_id = PROP): Row => ({ id: id('u'), property_id })
 const lease = (unit_id: string, status = 'active'): Row => ({ id: id('l'), unit_id, status })
-// `voided_at` (migration 0014, OI-278): null = live; a timestamp = voided (audit row, not money).
+// `voided_at` (migration 0016, OI-278): null = live; a timestamp = voided (audit row, not money).
 const charge = (lease_id: string, charge_date: string, type = 'rent', amount = 100, voided_at: string | null = null): Row =>
   ({ id: id('c'), lease_id, type, amount, charge_date, voided_at })
 const expense = (expense_date: string, category = 'repairs', amount = 10): Row => ({ id: id('e'), property_id: PROP, category, amount, expense_date })
@@ -84,7 +84,7 @@ describe('GET /api/reports/actuals — PostgREST max_rows + error handling', () 
     expect((await (await get()).json() as Body).data!.rental_income).toBe(100)
   })
 
-  // OI-278 / migration 0014: a voided charge is an audit row. Budget vs Actual must not report it
+  // OI-278 / migration 0016: a voided charge is an audit row. Budget vs Actual must not report it
   // as income — the $50 voided late fee below would otherwise land in other_income.
   it('excludes voided charges from actuals (a voided late fee is not other_income)', async () => {
     const u = unit(); const l = lease(u.id as string)
@@ -153,7 +153,7 @@ describe('GET /api/exports/qb-iif — PostgREST max_rows + error handling', () =
     expect(await res.text()).toContain(`Rental Income:Base Rent\t-${((PG_MAX_ROWS + 1) * 100).toFixed(2)}\t`)
   })
 
-  // OI-278 / migration 0014: a voided charge must never reach QuickBooks — the IIF journal is what
+  // OI-278 / migration 0016: a voided charge must never reach QuickBooks — the IIF journal is what
   // gets imported into the books, so a voided $50 fee here would post phantom Late Fee income.
   it('does not journal voided charges (a voided late fee produces no Late Fees line)', async () => {
     const u = unit(); const l = lease(u.id as string)

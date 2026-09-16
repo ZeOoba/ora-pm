@@ -249,7 +249,7 @@ cronRouter.post('/monthly-billing', async (c) => {
     //   - period-paid dropped   -> a manual payment vanishes -> OVER-DEBIT up to the AR balance (wrong charge)
     //   - ar_ledger row dropped -> balance reads 0 -> resolved as zero (missed collection)
     //
-    // OI-278 / migration 0014: `.is('voided_at', null)` — a voided charge is an audit row, not
+    // OI-278 / migration 0016: `.is('voided_at', null)` — a voided charge is an audit row, not
     // money owed. ar_ledger.balance already excludes it, but the lifetime cap is loose whenever
     // prior arrears exist, so an un-filtered period sum would debit the voided amount as if it
     // were this period's rent.
@@ -584,13 +584,13 @@ cronRouter.post('/delinquency-check', async (c) => {
   //     overdue_i = ar_ledger.balance_i − recent_i
   //     delinquent iff overdue_i > OVERDUE_EPSILON
   // `recent_i` must be summed over EXACTLY the charge population ar_ledger.balance counts. The
-  // live view (supabase/migrations/0014_charges_void.sql, verbatim from 0011/0010 plus one
+  // live view (supabase/migrations/0016_charges_void.sql, verbatim from 0011/0010 plus one
   // filter) sums every `charges` row for the lease WHERE voided_at IS NULL — no type/status
   // filter (amount is NUMERIC(12,2) US dollars, CHECK >= 0), so the only filters applied here are
   // that same `.is('voided_at', null)` and the due_date split. A late fee posted this month has
   // due_date = today, so it is always "recent" and can never make itself overdue.
   //
-  // OI-278 / migration 0014, existing-fee guard (second query below) — DELIBERATELY NOT filtered
+  // OI-278 / migration 0016, existing-fee guard (second query below) — DELIBERATELY NOT filtered
   // on voided_at: a voided fee for a lease-month still occupies the unique idempotency_key
   // `late_fee_<lease>_<year>_<month>`, so re-posting that month would 23505 regardless; counting
   // voided rows here means a month whose fee was voided is treated as already handled. That is
