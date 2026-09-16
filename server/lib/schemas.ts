@@ -88,6 +88,16 @@ export const PaymentInsertSchema = z.object({
   method: z.enum(['check', 'wire', 'other']),
   check_number: z.string().nullish(),
   notes: z.string().nullish(),
+  // OI-082: migration 0015 made this column NOT NULL + UNIQUE
+  // (payments_idempotency_key_uniq) — the 0011 partial indexes never covered
+  // manual rows, so a double-submitted form / retried request inserted twice
+  // and ar_ledger summed both. Same shape as ChargeInsertSchema (OI-046):
+  // optional so PaymentsList.tsx's one-key-per-form-session token passes
+  // through unchanged (a retry resends the same value and collides instead
+  // of duplicating); payments.ts's POST handler defaults it to
+  // `manual:${crypto.randomUUID()}` when absent. min(1) — an empty string is
+  // a useless dedupe token, not a NULL, and would be silently accepted.
+  idempotency_key: z.string().min(1).optional(),
 }).strict()
 
 // Stripe payment-intent client-generated idempotency token — one per pay
