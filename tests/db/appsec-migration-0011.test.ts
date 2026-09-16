@@ -2,11 +2,16 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-// Live-SQL loader (applies every supabase/migrations/*.sql to a fresh pg-mem
-// instance in filename order) — extracted to tests/fixtures/pg-migrated-db.ts
-// for OI-082 so payments-idempotency-migration-0015.test.ts shares it. The
-// PG_MEM_SKIP rationale lives there.
-import { freshMigratedDb, allMigrationText, MIGRATIONS_DIR } from '../fixtures/pg-migrated-db'
+// Live-SQL loader (extends the ar-ledger.test.ts convention from single-view
+// extraction to full-schema application) — see tests/fixtures/pg-migrations.ts
+// for the loader, its pg-mem skip list (including dollar-quote-aware
+// statement splitting, needed once 0014's plpgsql function body entered the
+// migration set), and the rationale for each skip. Also used by
+// payments-idempotency-migration-0015.test.ts — a second, less capable
+// extraction (tests/fixtures/pg-migrated-db.ts, no dollar-quote handling)
+// briefly existed from a parallel workstream and was consolidated into this
+// one rather than kept as a duplicate.
+import { MIGRATIONS_DIR, freshMigratedDb, allMigrationText } from '../fixtures/pg-migrations'
 
 const PROP = '00000000-0000-0000-0000-000000000001'
 const UNIT = '00000000-0000-0000-0000-000000000002'
