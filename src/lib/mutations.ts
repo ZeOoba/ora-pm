@@ -14,9 +14,14 @@ export function useSaveMutation<TResult = unknown>(opts: {
   path: string
   invalidate?: string[][]
   onSuccess?: (result: TResult) => void
+  onError?: (err: Error) => void
 }) {
   const qc = useQueryClient()
-  return useMutation({
+  // TError pinned to Error explicitly — without it, adding the optional
+  // onError above widens inference to `unknown` for every existing caller
+  // (mutation.error becomes `unknown`, breaking `.message` reads across every
+  // page using this hook, not just the one adding onError).
+  return useMutation<{ data: TResult }, Error, unknown>({
     mutationFn: (body: unknown) =>
       opts.method === 'post'
         ? api.post<{ data: TResult }>(opts.path, body)
@@ -27,5 +32,6 @@ export function useSaveMutation<TResult = unknown>(opts: {
       }
       opts.onSuccess?.(res.data)
     },
+    onError: opts.onError,
   })
 }
