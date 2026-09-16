@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 // Live-SQL loader (applies every real supabase/migrations/*.sql file to a
 // fresh pg-mem instance; skip-list rationale lives with it):
-// tests/fixtures/migrations.ts.
+// tests/fixtures/migrations.ts (tests/fixtures/pg-migrated-db.ts re-exports it).
 import { MIGRATIONS_DIR, allMigrationText, freshMigratedDb } from '../fixtures/migrations'
 
 const PROP = '00000000-0000-0000-0000-000000000001'

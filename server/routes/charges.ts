@@ -47,7 +47,7 @@ chargesRouter.post('/', async (c) => {
 
 // DELETE is NOT the void path. Voiding (voided_at + void_reason, migration 0014) keeps the row as
 // an audit record and is reversible; deletion is neither. Auto charges stay undeletable — the
-// OI-278 population was retired via migration 0015's guarded UPDATE, and any future void action
+// OI-278 population was retired via migration 0016's guarded UPDATE, and any future void action
 // should set the two columns, never call this route.
 chargesRouter.delete('/:id', async (c) => {
   const db = getDb(c.env)

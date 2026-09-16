@@ -80,7 +80,7 @@ export interface Payment {
   id: string; lease_id: string; payment_date: string; amount: number
   method: PaymentMethod; stripe_payment_intent_id: string | null
   stripe_status: string | null; check_number: string | null
-  notes: string | null; created_at: string
+  notes: string | null; idempotency_key: string; created_at: string
 }
 
 export interface Expense {

@@ -1,6 +1,6 @@
 /// <reference types="node" />
 // Live-SQL migration loader shared by tests/db/** (moved out of
-// tests/db/appsec-migration-0011.test.ts so 0014/0015's tests apply the same
+// tests/db/appsec-migration-0011.test.ts so 0014/0016's tests apply the same
 // real migration files instead of a second, drift-prone copy of this loader).
 //
 // Every supabase/migrations/*.sql file is applied to a fresh pg-mem instance
@@ -29,7 +29,7 @@
 //  - ALTER VIEW ... SET (security_invoker = true): pg-mem's grammar doesn't
 //    recognize this Postgres-15 view-option syntax (0012, OI-079; re-run by
 //    0014 after recreating ar_ledger).
-//  - DO $$ ... $$: pg-mem ships no plpgsql. 0015's guarded data migration is
+//  - DO $$ ... $$: pg-mem ships no plpgsql. 0016's guarded data migration is
 //    a DO block; its guard + UPDATE are extracted and verified textually and
 //    at runtime (the UPDATE statement alone) by tests/db/charges-void.test.ts.
 import { readFileSync, readdirSync } from 'node:fs'
@@ -183,3 +183,5 @@ export function freshMigratedDb() {
   }
   return pub
 }
+
+export type MigratedDb = ReturnType<typeof freshMigratedDb>
