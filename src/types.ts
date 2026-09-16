@@ -71,7 +71,7 @@ export interface Charge {
   period_start: string; period_end: string; type: ChargeType; amount: number
   description: string | null; source: ChargeSource; idempotency_key: string | null
   created_at: string
-  // OI-278 / migration 0014: both null = live; both set = voided (audit row, excluded from every
+  // OI-278 / migration 0016: both null = live; both set = voided (audit row, excluded from every
   // money sum incl. ar_ledger). The DB CHECK forbids a half-void.
   voided_at: string | null; void_reason: string | null
 }

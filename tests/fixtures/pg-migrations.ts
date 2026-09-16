@@ -1,7 +1,6 @@
-/// <reference types="node" />
-// Live-SQL migration loader shared by tests/db/** (moved out of
-// tests/db/appsec-migration-0011.test.ts so 0014/0016's tests apply the same
-// real migration files instead of a second, drift-prone copy of this loader).
+// Shared live-SQL migration loader for pg-mem-backed schema tests (extracted
+// from tests/db/appsec-migration-0011.test.ts so tests/db/payment-intent-
+// migration-0014.test.ts can apply the same real migration chain).
 //
 // Every supabase/migrations/*.sql file is applied to a fresh pg-mem instance
 // in filename order, statement by statement, so these tests exercise the REAL
@@ -15,10 +14,10 @@
 // Skip list rationale (verified empirically against pg-mem 3.0.14):
 //  - ENABLE ROW LEVEL SECURITY / CREATE POLICY: not parseable; RLS behavior
 //    is not under test here.
-//  - CREATE OR REPLACE VIEW: the CTE-based ar_ledger redefinitions (0009/0010/
-//    0011/0014) and NULLIF/INTERVAL usages (0004) hit pg-mem gaps. Views are
-//    not under test in this loader — tests/db/ar-ledger.test.ts covers the
-//    live ar_ledger view via its own extraction pattern.
+//  - CREATE OR REPLACE VIEW: the CTE-based ar_ledger redefinitions (0009/0010)
+//    and NULLIF/INTERVAL usages (0004) hit pg-mem gaps. Views are not under
+//    test in this file — tests/db/ar-ledger.test.ts covers the live view via
+//    its own extraction pattern.
 //  - DELETE FROM payments a USING ...: pg-mem cannot parse DELETE ... USING.
 //    This is migration 0011's one-time dedupe backfill; it is a no-op on the
 //    empty test database, and its presence in the migration TEXT is asserted
@@ -27,11 +26,18 @@
 //    dependency on charges.amount/payments.amount before ALTER COLUMN TYPE
 //    (the drop/recreate ordering is asserted textually).
 //  - ALTER VIEW ... SET (security_invoker = true): pg-mem's grammar doesn't
-//    recognize this Postgres-15 view-option syntax (0012, OI-079; re-run by
-//    0014 after recreating ar_ledger).
-//  - DO $$ ... $$: pg-mem ships no plpgsql. 0016's guarded data migration is
-//    a DO block; its guard + UPDATE are extracted and verified textually and
-//    at runtime (the UPDATE statement alone) by tests/db/charges-void.test.ts.
+//    recognize this Postgres-15 view-option syntax (0012, OI-079). Not under
+//    test here for the same reason as the other RLS/policy statements above.
+//  - CREATE OR REPLACE FUNCTION ... LANGUAGE plpgsql: pg-mem has no plpgsql
+//    interpreter and no pg_advisory_xact_lock. 0014's reserve_payment_intent()
+//    is skipped here and its structure pinned textually by
+//    tests/db/payment-intent-migration-0014.test.ts; its behavior is
+//    exercised at the route seam by tests/routes/stripe.test.ts with a
+//    stateful stand-in that models the same contract.
+//  - GRANT / REVOKE: not parseable; privilege statements are not under test.
+//  - DO $$ ... $$: pg-mem ships no plpgsql. 0017's guarded data migration
+//    (OI-278 late-fee void) is a DO block; its guards are pinned textually
+//    and its UPDATE is run standalone by tests/db/charges-void.test.ts.
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -46,20 +52,22 @@ export const PG_MEM_SKIP: RegExp[] = [
   /^DELETE FROM payments a\s+USING\b/i,
   /^DROP VIEW IF EXISTS\b/i,
   /^ALTER VIEW\s+\S+\s+SET\s*\(\s*security_invoker\s*=\s*true\s*\)$/i,
+  /^CREATE (OR REPLACE )?FUNCTION\b/i,
+  /^(GRANT|REVOKE)\b/i,
   /^DO\s+\$\$/i,
 ]
 
 // Splits SQL into statements on ";" while respecting single-quoted strings
-// (including '' escapes), "--" line comments, and $$-dollar-quoted bodies (a
-// DO block's plpgsql contains its own ";" separators and must stay one
-// statement).
+// (including '' escapes), "--" line comments, and dollar-quoted bodies
+// ($$ ... $$ or $tag$ ... $tag$ — a plpgsql function body is full of ";"
+// that must NOT terminate the CREATE FUNCTION statement).
 export function splitSqlStatements(sql: string): string[] {
   const stmts: string[] = []
   let cur = ''
   let i = 0
   let inString = false
   let inLineComment = false
-  let inDollar = false
+  let dollarTag: string | null = null
   while (i < sql.length) {
     const ch = sql[i]
     if (inLineComment) {
@@ -68,14 +76,14 @@ export function splitSqlStatements(sql: string): string[] {
       i++
       continue
     }
-    if (inDollar) {
-      cur += ch
-      if (ch === '$' && sql[i + 1] === '$') {
-        cur += '$'
-        i += 2
-        inDollar = false
+    if (dollarTag !== null) {
+      if (sql.startsWith(dollarTag, i)) {
+        cur += dollarTag
+        i += dollarTag.length
+        dollarTag = null
         continue
       }
+      cur += ch
       i++
       continue
     }
@@ -92,11 +100,14 @@ export function splitSqlStatements(sql: string): string[] {
       i++
       continue
     }
-    if (ch === '$' && sql[i + 1] === '$') {
-      inDollar = true
-      cur += '$$'
-      i += 2
-      continue
+    if (ch === '$') {
+      const m = /^\$[A-Za-z_]*\$/.exec(sql.slice(i))
+      if (m) {
+        dollarTag = m[0]
+        cur += dollarTag
+        i += dollarTag.length
+        continue
+      }
     }
     if (ch === "'") {
       inString = true
@@ -151,7 +162,7 @@ export function freshMigratedDb() {
   const pub = db.public
   // Supabase-environment stubs pg-mem doesn't ship: the auth schema that
   // tenants.auth_user_id references, pgcrypto's gen_random_uuid(), and the
-  // btrim() builtin (used by 0014's void-pair CHECK; pg-mem has no string
+  // btrim() builtin (used by 0016's void-pair CHECK; pg-mem has no string
   // trimming functions at all, so this is the real Postgres semantics).
   pub.registerFunction({
     name: 'gen_random_uuid',

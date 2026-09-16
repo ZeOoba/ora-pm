@@ -49,7 +49,7 @@ portalRouter.get('/charges', async (c) => {
   const leaseIds = (leases ?? []).map((l: { id: string }) => l.id)
   if (!leaseIds.length) return c.json({ data: [] })
 
-  // OI-278 / migration 0014: voided charges are audit rows — never shown to (or payable by) the
+  // OI-278 / migration 0016: voided charges are audit rows — never shown to (or payable by) the
   // tenant, and never part of the balance ar_ledger reports.
   const { data, error } = await db
     .from('charges')

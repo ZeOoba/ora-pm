@@ -83,7 +83,7 @@ describe('GET /api/portal/me', () => {
 
 describe('GET /api/portal/charges', () => {
   // The charges chain the route builds: .select().in('lease_id', …).is('voided_at', null).order(…).
-  // OI-278 / migration 0014: a tenant must never see (or be able to select for Pay Now) a voided
+  // OI-278 / migration 0016: a tenant must never see (or be able to select for Pay Now) a voided
   // charge, so `.is('voided_at', null)` is part of the query and is asserted on below.
   function chargesTable(result: { data: unknown; error: unknown }) {
     const isSpy = vi.fn().mockReturnValue({ order: vi.fn().mockResolvedValue(result) })

@@ -45,7 +45,7 @@ export function BillingDashboard() {
               </tr>
             )}
             {data?.map(ch => (
-              // OI-278 / migration 0014: voided rows stay in the list as the audit trail but are
+              // OI-278 / migration 0016: voided rows stay in the list as the audit trail but are
               // visibly retired — struck-through amount + "Voided" badge carrying the reason.
               <tr key={ch.id} className={`hover:bg-gray-50 ${ch.voided_at ? 'text-gray-400' : ''}`}>
                 <td className="px-4 py-3">{formatDate(ch.charge_date)}</td>

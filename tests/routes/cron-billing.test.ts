@@ -97,7 +97,7 @@ function paymentCounts(p: PaymentRow): boolean {
   return ['check', 'wire', 'other'].includes(p.method)
 }
 
-// Mirrors migration 0014's ar_ledger view: lifetime totals per lease, no date scoping — sums
+// Mirrors migration 0016's ar_ledger view: lifetime totals per lease, no date scoping — sums
 // EVERY non-voided charge regardless of due_date (unlike the step-3 open-charges query, which is
 // period-scoped). Voided charges (OI-278) are excluded exactly as the view's `voided_at IS NULL`.
 function ledgerBalance(leaseId: string): number {
@@ -172,7 +172,7 @@ function installDbMock() {
         // Filters by the ACTUAL due_date bounds, not just lease_id — a charge outside the period
         // (arrears) must not appear here even though it's in the same state.charges array as the
         // in-period ones (round-2 review finding #4: removing this date filter used to still pass).
-        // OI-278 / migration 0014: `.is('voided_at', null)` is applied for real too — a voided
+        // OI-278 / migration 0016: `.is('voided_at', null)` is applied for real too — a voided
         // charge (an audit row, not money owed) must not inflate periodChargeTotal.
         select: vi.fn().mockReturnValue({
           in: inChargesSpy.mockImplementation((_col: string, leaseIds: string[]) => ({
@@ -449,7 +449,7 @@ describe('POST /api/cron/monthly-billing', () => {
     )
   })
 
-  // OI-278 / migration 0014: a VOIDED in-period charge is an audit row, not money owed. The debit is
+  // OI-278 / migration 0016: a VOIDED in-period charge is an audit row, not money owed. The debit is
   // min(periodCharges − periodPaid, arBalance); ar_ledger already excludes voided rows, but with
   // unpaid prior arrears the lifetime cap is loose, so an un-filtered period sum would collect the
   // voided amount as if it were this period's rent. Here: $5,000 rent + $50 voided fee in-period,

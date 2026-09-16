@@ -84,7 +84,7 @@ reportsRouter.get('/actuals', async (c) => {
     { maxRows: Infinity })
   if (leaseErr) return dbError(c, leaseErr, 'Failed to load lease actuals')
 
-  // OI-278 / migration 0014: voided charges are not income — excluded from actuals.
+  // OI-278 / migration 0016: voided charges are not income — excluded from actuals.
   const { data: charges, error: chargeErr } = await fetchChunked(leaseRows.map(l => l.id), BULK_QUERY_CHUNK_SIZE, (chunk) =>
     fetchAllPages<{ id: string; type: string; amount: number }>((after) => {
       let q = db.from('charges').select('id, type, amount')

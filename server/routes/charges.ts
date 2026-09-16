@@ -7,7 +7,7 @@ type Env = { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string }
 
 export const chargesRouter = new Hono<{ Bindings: Env }>()
 
-// Admin list: returns voided rows too (OI-278 / migration 0014 — they are the audit trail;
+// Admin list: returns voided rows too (OI-278 / migration 0016 — they are the audit trail;
 // `select('*')` carries voided_at/void_reason and BillingDashboard.tsx marks them). Every money
 // path (ar_ledger, cron sums, portal, exports, reports, cam) filters `voided_at IS NULL` itself.
 chargesRouter.get('/', async (c) => {
@@ -45,9 +45,9 @@ chargesRouter.post('/', async (c) => {
   return c.json({ data }, 201)
 })
 
-// DELETE is NOT the void path. Voiding (voided_at + void_reason, migration 0014) keeps the row as
+// DELETE is NOT the void path. Voiding (voided_at + void_reason, migration 0016) keeps the row as
 // an audit record and is reversible; deletion is neither. Auto charges stay undeletable — the
-// OI-278 population was retired via migration 0016's guarded UPDATE, and any future void action
+// OI-278 population was retired via migration 0017's guarded UPDATE, and any future void action
 // should set the two columns, never call this route.
 chargesRouter.delete('/:id', async (c) => {
   const db = getDb(c.env)

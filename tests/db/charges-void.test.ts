@@ -4,22 +4,22 @@
 // 0 rows EVER, so every lease looked delinquent. They are VOIDED, not deleted: the rows stay as an
 // audit trail (reversible), and money math everywhere excludes them.
 //
-//   0014_charges_void.sql            schema: charges.voided_at / void_reason + pair CHECK,
+//   0016_charges_void.sql            schema: charges.voided_at / void_reason + pair CHECK,
 //                                    ar_ledger recreated to exclude voided rows, security_invoker
 //                                    kept (see tests/db/ar-ledger.test.ts for the view itself).
-//   0016_void_oi278_pre_guard_late_fees.sql
+//   0017_void_oi278_pre_guard_late_fees.sql
 //                                    data: a DO block that asserts the target population is
 //                                    EXACTLY 103 rows / $5,150.00 before and after voiding, and
 //                                    RAISEs (aborting the transaction) on any drift.
 //
 // Runtime assertions run the real migration SQL on pg-mem (tests/fixtures/migrations.ts). pg-mem
-// has no plpgsql, so 0016's DO block is verified textually AND by extracting its UPDATE/predicate
+// has no plpgsql, so 0017's DO block is verified textually AND by extracting its UPDATE/predicate
 // and running that against seeded rows.
 import { describe, it, expect, beforeEach } from 'vitest'
-import { PG_MEM_SKIP, freshMigratedDb, readMigration, splitSqlStatements, statementBody } from '../fixtures/migrations'
+import { PG_MEM_SKIP, freshMigratedDb, readMigration, splitSqlStatements, statementBody } from '../fixtures/pg-migrations'
 
-const FILE_0014 = '0014_charges_void.sql'
-const FILE_0016 = '0016_void_oi278_pre_guard_late_fees.sql'
+const FILE_0016 = '0016_charges_void.sql'
+const FILE_0017 = '0017_void_oi278_pre_guard_late_fees.sql'
 
 // Verified read-only census of production charges, 2026-09-13 (PR body carries the breakdown).
 const EXPECTED_COUNT = 103
@@ -65,7 +65,7 @@ function insertCharge(
   return id
 }
 
-describe('migration 0014 — charges.voided_at / void_reason (runtime, real migration SQL on pg-mem)', () => {
+describe('migration 0016 — charges.voided_at / void_reason (runtime, real migration SQL on pg-mem)', () => {
   let db: Db
   beforeEach(() => {
     db = freshMigratedDb()
@@ -111,8 +111,8 @@ describe('migration 0014 — charges.voided_at / void_reason (runtime, real migr
   })
 })
 
-describe('migration 0014 — text pins (what pg-mem cannot execute)', () => {
-  const sql = readMigration(FILE_0014)
+describe('migration 0016 — text pins (what pg-mem cannot execute)', () => {
+  const sql = readMigration(FILE_0016)
 
   it('recreates ar_ledger with charge_totals filtered to voided_at IS NULL', () => {
     // The CTE that feeds total_charged must carry the exclusion; the payment_totals CTE and the
@@ -156,8 +156,8 @@ describe('migration 0014 — text pins (what pg-mem cannot execute)', () => {
   })
 })
 
-describe('migration 0016 — guarded void of the OI-278 pre-guard late fees', () => {
-  const sql = readMigration(FILE_0016)
+describe('migration 0017 — guarded void of the OI-278 pre-guard late fees', () => {
+  const sql = readMigration(FILE_0017)
   const stmts = splitSqlStatements(sql).map(statementBody)
   const doBlocks = stmts.filter((s) => /^DO\s+\$\$/i.test(s))
 
@@ -266,18 +266,18 @@ describe('migration 0016 — guarded void of the OI-278 pre-guard late fees', ()
     expect(sql).toMatch(new RegExp(String.raw`--\s*SELECT count\(\*\), SUM\(amount\) FROM charges\s*\n?\s*--\s*WHERE void_reason = '${escapeRe(VOID_REASON)}';\s*--\s*expect 103 \| 5150\.00`))
   })
 
-  describe('the predicate and UPDATE, run for real against seeded rows (pg-mem, post-0014 schema)', () => {
+  describe('the predicate and UPDATE, run for real against seeded rows (pg-mem, post-0016 schema)', () => {
     let db: Db
     // Extracted from the migration text so the runtime check can never test a different predicate
     // than the one that ships.
     const updateStmt = () => {
       const m = /UPDATE charges\s+SET voided_at = now\(\),\s+void_reason = '[^']*'\s+WHERE [^;]*;/.exec(block())
-      if (!m) throw new Error('0016: could not extract the UPDATE statement from the DO block')
+      if (!m) throw new Error('0017: could not extract the UPDATE statement from the DO block')
       return m[0]
     }
     const predicateFromUpdate = () => {
       const m = /WHERE ([^;]*);$/.exec(updateStmt())
-      if (!m) throw new Error('0016: could not extract the UPDATE predicate')
+      if (!m) throw new Error('0017: could not extract the UPDATE predicate')
       return m[1].trim()
     }
 

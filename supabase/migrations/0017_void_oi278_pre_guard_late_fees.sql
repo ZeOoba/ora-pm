@@ -1,5 +1,5 @@
 -- OI-278 (data half): void the 103 auto late fees posted BEFORE the payments-
--- feed guard, per Gabriel's ruling 2026-09-13. Requires 0014_charges_void.sql.
+-- feed guard, per Gabriel's ruling 2026-09-13. Requires 0016_charges_void.sql.
 --
 -- Verified read-only census of production `charges` (2026-09-13):
 --   type='late_fee' AND source='auto'  -> 103 rows, all amount 50.00,
@@ -105,6 +105,6 @@ $$;
 -- ---------------------------------------------------------------------------
 -- Rollback (reference) — un-voids ONLY the rows this migration voided, keyed
 -- on the exact void_reason string so a void applied for any other reason is
--- left alone. Both columns go back to NULL together (0014's pair CHECK).
+-- left alone. Both columns go back to NULL together (0016's pair CHECK).
 --   UPDATE charges SET voided_at = NULL, void_reason = NULL
 --    WHERE void_reason = 'OI-278: posted while payments feed absent (payments table empty); voided per Gabriel ruling 2026-09-13';

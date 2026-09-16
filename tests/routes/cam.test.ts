@@ -161,7 +161,7 @@ function installDbMock() {
       return {
         // /calculate's estimated-CAM-paid sum:
         //   .eq('lease_id').eq('type','cam_estimate').is('voided_at', null).gte(period_start).lte(period_end)
-        // OI-278 / migration 0014: the `.is('voided_at', null)` link is applied for real — a voided
+        // OI-278 / migration 0016: the `.is('voided_at', null)` link is applied for real — a voided
         // estimate row must not count as CAM already paid (it would understate the true-up).
         select: vi.fn().mockReturnValue({
           eq: vi.fn().mockReturnValue({
@@ -378,7 +378,7 @@ describe('POST /api/cam/calculate', () => {
     expect(json.data.status).toBe('draft')
   })
 
-  // OI-278 / migration 0014: estimated_cam_paid is Σ cam_estimate charges for the year. A voided
+  // OI-278 / migration 0016: estimated_cam_paid is Σ cam_estimate charges for the year. A voided
   // estimate is not money the tenant was billed, so it must not reduce the true-up owed.
   it('excludes voided cam_estimate charges from estimated_cam_paid', async () => {
     state.camEstimateCharges = [
@@ -394,7 +394,7 @@ describe('POST /api/cam/calculate', () => {
   })
 
   // PR #42 refute (Important 1): the estimated-CAM-paid read used to discard its `error`, so a
-  // failed query (e.g. 42703 while the app is deployed ahead of migration 0014's `voided_at`
+  // failed query (e.g. 42703 while the app is deployed ahead of migration 0016's `voided_at`
   // column) read as estimated_cam_paid = 0 — overstating true_up_amount and SAVING a draft that
   // /approve would then post. Fail closed like every other charges reader: 500, nothing written,
   // no raw Postgres text.
