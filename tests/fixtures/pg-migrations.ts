@@ -172,3 +172,5 @@ export function freshMigratedDb() {
   }
   return pub
 }
+
+export type MigratedDb = ReturnType<typeof freshMigratedDb>
