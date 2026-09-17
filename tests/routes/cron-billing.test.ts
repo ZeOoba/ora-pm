@@ -75,6 +75,7 @@ const upsertChargesSpy = vi.hoisted(() => vi.fn())
 const inPaymentsSpy = vi.hoisted(() => vi.fn())
 const inChargesSpy = vi.hoisted(() => vi.fn())
 const inArLedgerSpy = vi.hoisted(() => vi.fn())
+const inIdemRecheckSpy = vi.hoisted(() => vi.fn())
 
 const state = {
   leases: [] as Record<string, unknown>[],
@@ -89,6 +90,7 @@ const state = {
   paymentsInsertError: null as { code?: string; message: string } | null,
   priorAutopayCheckError: null as { code?: string; message: string } | null,
   debitInputsError: null as { code?: string; message: string } | null,
+  voidRecheckError: null as { code?: string; message: string } | null,
   arLedgerPaddingRows: 0,
 }
 
@@ -167,34 +169,55 @@ function installDbMock() {
             return { data: inserted, error: null }
           }),
         })),
-        // Step 3: bulk open-charges lookup —
-        //   .in('lease_id', ids).is('voided_at', null).gte('due_date',y).lte('due_date',z)
-        // Filters by the ACTUAL due_date bounds, not just lease_id — a charge outside the period
-        // (arrears) must not appear here even though it's in the same state.charges array as the
-        // in-period ones (round-2 review finding #4: removing this date filter used to still pass).
-        // OI-278 / migration 0016: `.is('voided_at', null)` is applied for real too — a voided
-        // charge (an audit row, not money owed) must not inflate periodChargeTotal.
-        select: vi.fn().mockReturnValue({
-          in: inChargesSpy.mockImplementation((_col: string, leaseIds: string[]) => ({
-            is: vi.fn().mockImplementation((isCol: string, isVal: unknown) => ({
-              gte: vi.fn().mockImplementation((gteCol: string, gteVal: string) => ({
-                lte: vi.fn().mockImplementation(async (lteCol: string, lteVal: string) => {
-                  if (state.debitInputsError) return { data: null, error: state.debitInputsError }
-                  return {
-                    data: capped(state.charges
-                      .filter(c =>
-                        leaseIds.includes(c.lease_id) &&
-                        isCol === 'voided_at' && isVal === null && (c.voided_at ?? null) === null &&
-                        gteCol === 'due_date' && lteCol === 'due_date' &&
-                        c.due_date >= gteVal && c.due_date <= lteVal
-                      )
-                      .map(c => ({ lease_id: c.lease_id, amount: c.amount }))),
-                    error: null,
-                  }
-                }),
+        // `.select(cols)` branches by column list — two entirely different queries share the
+        // 'charges' table mock:
+        //   - Step 3's open-charges lookup: 'lease_id, amount'
+        //   - The PR #42 review-follow-up voided-charge re-check: 'idempotency_key, voided_at'
+        select: vi.fn().mockImplementation((cols?: string) => {
+          if (cols === 'idempotency_key, voided_at') {
+            // Voided-charge re-check — .in('idempotency_key', chunk), resolves directly (no
+            // further chain), mirroring the real fetchChunked-driven query in cron.ts step 1.
+            return {
+              in: inIdemRecheckSpy.mockImplementation(async (_col: string, keys: string[]) => {
+                if (state.voidRecheckError) return { data: null, error: state.voidRecheckError }
+                return {
+                  data: capped(state.charges
+                    .filter(c => keys.includes(c.idempotency_key))
+                    .map(c => ({ idempotency_key: c.idempotency_key, voided_at: c.voided_at ?? null }))),
+                  error: null,
+                }
+              }),
+            }
+          }
+          // Step 3: bulk open-charges lookup —
+          //   .in('lease_id', ids).is('voided_at', null).gte('due_date',y).lte('due_date',z)
+          // Filters by the ACTUAL due_date bounds, not just lease_id — a charge outside the period
+          // (arrears) must not appear here even though it's in the same state.charges array as the
+          // in-period ones (round-2 review finding #4: removing this date filter used to still pass).
+          // OI-278 / migration 0016: `.is('voided_at', null)` is applied for real too — a voided
+          // charge (an audit row, not money owed) must not inflate periodChargeTotal.
+          return {
+            in: inChargesSpy.mockImplementation((_col: string, leaseIds: string[]) => ({
+              is: vi.fn().mockImplementation((isCol: string, isVal: unknown) => ({
+                gte: vi.fn().mockImplementation((gteCol: string, gteVal: string) => ({
+                  lte: vi.fn().mockImplementation(async (lteCol: string, lteVal: string) => {
+                    if (state.debitInputsError) return { data: null, error: state.debitInputsError }
+                    return {
+                      data: capped(state.charges
+                        .filter(c =>
+                          leaseIds.includes(c.lease_id) &&
+                          isCol === 'voided_at' && isVal === null && (c.voided_at ?? null) === null &&
+                          gteCol === 'due_date' && lteCol === 'due_date' &&
+                          c.due_date >= gteVal && c.due_date <= lteVal
+                        )
+                        .map(c => ({ lease_id: c.lease_id, amount: c.amount }))),
+                      error: null,
+                    }
+                  }),
+                })),
               })),
             })),
-          })),
+          }
         }),
       }
     }
@@ -323,6 +346,7 @@ beforeEach(() => {
   state.paymentsInsertError = null
   state.priorAutopayCheckError = null
   state.debitInputsError = null
+  state.voidRecheckError = null
   state.arLedgerPaddingRows = 0
   installDbMock()
   mockStripe.paymentIntents.create.mockResolvedValue({ id: 'pi_auto_1', status: 'processing' })
@@ -573,6 +597,129 @@ describe('POST /api/cron/monthly-billing', () => {
     expect(body2.skipped).toBe(2)
     expect(body2.errors).toBe(0)
     expect(state.charges).toHaveLength(2) // still 2, not 4 — no duplicate rows
+  })
+
+  // -------------------------------------------------------------------------
+  // PR #42 review finding (CONFIRMED): idempotency_key survives voiding (migration 0016 only
+  // ever sets voided_at/void_reason), so the upsert's ignoreDuplicates skip could not tell
+  // "already posted and fine" from "the existing row was voided" — indistinguishable from a
+  // routine already-posted skip in every count and log line.
+  //
+  // Auto-reposting a distinct-keyed correction charge was the first design here and was REJECTED
+  // on adversarial review: this endpoint has no way to read WHY a charge was voided, so silently
+  // re-billing on the next run would just as silently reverse a legitimate void (termination,
+  // abatement). The fix instead FLAGS a voided skip (`voidedSkipped` + an errorMessages line) for
+  // a human to act on manually — it must never itself create a new charge.
+  // -------------------------------------------------------------------------
+
+  it('flags a skip whose existing charge was voided, WITHOUT auto-reposting it', async () => {
+    state.leases = [nonAutopayLease('lease_a', 4000)]
+    // Pre-existing VOIDED charge occupying the exact key buildMonthlyCharges would generate.
+    state.charges = [{
+      lease_id: 'lease_a',
+      idempotency_key: 'auto:lease_a:2026-06-01:rent',
+      amount: 4000,
+      due_date: '2026-06-05',
+      voided_at: '2026-09-13T12:00:00Z',
+      void_reason: 'tenant terminated — legitimate write-off, not a mistake',
+    }]
+
+    const res = await postBilling()
+    expect(res.status).toBe(200)
+    const body = await res.json() as { posted: number; skipped: number; errors: number; voidedSkipped: number; errorMessages: string[] }
+
+    expect(body.voidedSkipped).toBe(1)
+    // Never auto-reposted: posted/skipped counts are the ordinary "already exists" shape, and no
+    // second row of any kind appears in the table — a legitimate void must not be silently reversed.
+    expect(body.posted).toBe(0)
+    expect(body.skipped).toBe(1)
+    expect(body.errors).toBe(0)
+    expect(state.charges).toHaveLength(1) // exactly the original voided row — nothing added
+    expect(body.errorMessages.some(m => /VOIDED existing row/.test(m))).toBe(true)
+
+    // Running it again changes nothing — the flag is not itself a mutation, and repeats safely.
+    const res2 = await postBilling()
+    const body2 = await res2.json() as { voidedSkipped: number }
+    expect(body2.voidedSkipped).toBe(1)
+    expect(state.charges).toHaveLength(1)
+  })
+
+  it('does not flag an ordinary already-posted skip whose existing charge is NOT voided', async () => {
+    state.leases = [nonAutopayLease('lease_a', 4000)]
+    state.charges = [{
+      lease_id: 'lease_a',
+      idempotency_key: 'auto:lease_a:2026-06-01:rent',
+      amount: 4000,
+      due_date: '2026-06-05',
+    }]
+
+    const res = await postBilling()
+    expect(res.status).toBe(200)
+    const body = await res.json() as { posted: number; skipped: number; voidedSkipped: number; errorMessages: string[] }
+
+    expect(body.voidedSkipped).toBe(0)
+    expect(body.posted).toBe(0)
+    expect(body.skipped).toBe(1)
+    expect(body.errorMessages).toEqual([])
+    expect(state.charges).toHaveLength(1)
+  })
+
+  it('correctly separates voided from non-voided skips within the SAME mixed-lease batch', async () => {
+    state.leases = [nonAutopayLease('lease_a', 4000), nonAutopayLease('lease_b', 3000)]
+    state.charges = [
+      { lease_id: 'lease_a', idempotency_key: 'auto:lease_a:2026-06-01:rent', amount: 4000, due_date: '2026-06-05', voided_at: '2026-09-13T12:00:00Z' },
+      { lease_id: 'lease_b', idempotency_key: 'auto:lease_b:2026-06-01:rent', amount: 3000, due_date: '2026-06-05' },
+    ]
+
+    const res = await postBilling()
+    expect(res.status).toBe(200)
+    const body = await res.json() as { posted: number; skipped: number; voidedSkipped: number }
+
+    expect(body.posted).toBe(0)
+    expect(body.skipped).toBe(2)
+    expect(body.voidedSkipped).toBe(1) // only lease_a's skip is voided
+    expect(state.charges).toHaveLength(2) // no rows added for either lease
+  })
+
+  it('fails closed (500) when the voided-charge re-check itself fails, rather than silently miscounting a flag', async () => {
+    state.leases = [nonAutopayLease('lease_a', 4000)]
+    state.charges = [{
+      lease_id: 'lease_a',
+      idempotency_key: 'auto:lease_a:2026-06-01:rent',
+      amount: 4000,
+      due_date: '2026-06-05',
+    }]
+    state.voidRecheckError = { message: 'connection reset' }
+
+    const res = await postBilling()
+    expect(res.status).toBe(500)
+    const body = await res.json() as { errorMessages: string[]; errors: number }
+    expect(body.errorMessages.some(m => /voided-charge re-check failed/.test(m))).toBe(true)
+    expect(body.errors).toBeGreaterThan(0)
+  })
+
+  it('chunks the voided-charge re-check at IDEMPOTENCY_KEY_CHUNK_SIZE (50), never issuing one over that size', async () => {
+    const N = 120 // over the 50-key chunk size
+    state.leases = Array.from({ length: N }, (_, i) => nonAutopayLease(`lease_${i}`, 4000))
+    // Every lease's rent charge already exists (and is not voided) — all N are skipped, so the
+    // re-check must run against the full 120-key set, chunked.
+    state.charges = state.leases.map((l) => ({
+      lease_id: (l as { id: string }).id,
+      idempotency_key: `auto:${(l as { id: string }).id}:2026-06-01:rent`,
+      amount: 4000,
+      due_date: '2026-06-05',
+    }))
+
+    const res = await postBilling()
+    expect(res.status).toBe(200)
+    const body = await res.json() as { skipped: number; voidedSkipped: number }
+    expect(body.skipped).toBe(N)
+    expect(body.voidedSkipped).toBe(0)
+
+    const chunkSizes = inIdemRecheckSpy.mock.calls.map((call) => (call[1] as string[]).length)
+    expect(chunkSizes.length).toBeGreaterThan(1) // proves chunking happened, not one oversized call
+    expect(chunkSizes.every((len) => len <= 50)).toBe(true)
+    expect(chunkSizes).toContain(50)
   })
 
   it('a bulk charge-upsert failure posts ZERO charges portfolio-wide and returns HTTP 500', async () => {

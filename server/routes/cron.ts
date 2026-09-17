@@ -72,15 +72,23 @@ cronRouter.use('/*', async (c, next) => {
 //     or a debit attempt this invocation — a failed pre-check, a failed debit-input lookup, the
 //     batch-limit slice, or a deferred-by-chargesBulkFailed run all count. `trigger-billing.ps1`
 //     loops on this; an undercount there is silent, permanent revenue under-collection, not a retry.
-//   - `chargesBulkFailed` / `priorAutopayCheckFailed` / `debitInputsBulkFailed` are whole-batch
-//     failures ("never debit blind") and return HTTP 500 — never look like a normal 200.
+//   - `chargesBulkFailed` / `voidRecheckFailed` / `priorAutopayCheckFailed` / `debitInputsBulkFailed`
+//     are whole-batch failures ("never debit blind") and return HTTP 500 — never look like a normal 200.
+//   - `voidedSkipped` (PR #42 review follow-up): a charge-upsert skip can mean "already posted and
+//     fine" OR "the existing row was voided" (migration 0016 never clears idempotency_key on void).
+//     Every skipped key is re-checked and a voided match is flagged, NOT auto-reposted — this
+//     endpoint has no way to tell "void = mistake, needs a correction" from "void = legitimate
+//     write-off, stays gone" (voiding has no ruling here the way the late-fee guard below has one),
+//     so an automatic repost was rejected on review as a silent way to reverse a real void.
 //   - AUTOPAY_BATCH_LIMIT is MAX SAFE for this endpoint's subrequest budget, not "conservative."
 //     Fixed cost per invocation is
-//     `(floor(activeLeases/1000) + 1) + 1 + ceil(eligible/100) + 3×ceil(notYetCollected/100)`
-//     (keyset-paged leases select + charges-upsert + prior-check chunks + the three debit-input
-//     chunk sets — i.e. the same `2 + …` as before until the portfolio reaches 1000 active leases),
-//     plus 2 more if RATE_LIMIT_KV is ever provisioned (currently commented out in wrangler.toml,
-//     costs 0 today). Each Stripe call is 1-2 subrequests (`maxNetworkRetries: 1` in
+//     `(floor(activeLeases/1000) + 1) + 1 + ceil(skipped/50) + ceil(eligible/100) + 3×ceil(notYetCollected/100)`
+//     (keyset-paged leases select + charges-upsert + the voided-charge re-check chunks (PR #42
+//     review follow-up, IDEMPOTENCY_KEY_CHUNK_SIZE=50 — usually 0 when nothing was skipped) +
+//     prior-check chunks + the three debit-input chunk sets — the same `2 + …` as before until the
+//     portfolio reaches 1000 active leases and a real skip batch appears), plus 2 more if
+//     RATE_LIMIT_KV is ever provisioned (currently commented out in wrangler.toml, costs 0 today).
+//     Each Stripe call is 1-2 subrequests (`maxNetworkRetries: 1` in
 //     server/lib/stripe.ts) plus 1 for the payments insert. Raising the limit means recomputing
 //     that formula against the actual Cloudflare plan's ceiling (Free=50, Paid=1000 —
 //     UNVERIFIED from this repo, confirm in the dashboard), not eyeballing a smaller number.
@@ -119,6 +127,12 @@ cronRouter.post('/monthly-billing', async (c) => {
 
   const AUTOPAY_BATCH_LIMIT = 8
   const BULK_QUERY_CHUNK_SIZE = 100
+  // Half of BULK_QUERY_CHUNK_SIZE, specifically for the voided-charge re-check below: an
+  // idempotency_key string (~40-60 chars, e.g. `auto:<uuid>:2026-06-01:cam_estimate`) is far
+  // longer than the lease_id UUIDs every other chunked query here filters on, so the same chunk
+  // size risks the request-URL length wall well before POSTGREST_MAX_ROWS (adversarial review,
+  // this session — measured ~7.5KB at 100 keys against this endpoint's own documented ~7.2-8KB wall).
+  const IDEMPOTENCY_KEY_CHUNK_SIZE = 50
 
   const periodStartStr = `${year}-${String(month).padStart(2, '0')}-01`
   const lastDay = new Date(year, month, 0).getDate()
@@ -141,6 +155,7 @@ cronRouter.post('/monthly-billing', async (c) => {
   let chargeErrors = 0, autopayErrors = 0
   const errorMessages: string[] = []
   let chargesBulkFailed = false
+  let voidRecheckFailed = false
 
   // --- Step 1: charge posting — one bulk upsert for the whole portfolio, not one insert/charge. ---
   const allCharges = (leases ?? []).flatMap((lease) =>
@@ -154,6 +169,8 @@ cronRouter.post('/monthly-billing', async (c) => {
     }).charges
   )
 
+  let voidedSkipped = 0
+
   if (allCharges.length > 0) {
     const { data: insertedCharges, error: chargesErr } = await db
       .from('charges')
@@ -165,8 +182,55 @@ cronRouter.post('/monthly-billing', async (c) => {
       chargeErrors += allCharges.length
       errorMessages.push(`bulk charge upsert failed (batch of ${allCharges.length}), ZERO charges posted this run: ${chargesErr.message}`)
     } else {
-      posted += insertedCharges?.length ?? 0
-      skipped += allCharges.length - (insertedCharges?.length ?? 0)
+      const insertedKeys = new Set((insertedCharges ?? []).map((r) => r.idempotency_key as string))
+      posted += insertedKeys.size
+      const skippedCharges = allCharges.filter((ch) => !insertedKeys.has(ch.idempotency_key))
+      skipped += skippedCharges.length
+
+      // PR #42 review finding (idempotency_key survives voiding — migration 0016 only ever sets
+      // voided_at/void_reason): the ignoreDuplicates skip above cannot tell "already posted and
+      // fine" from "the existing row was voided" — a voided charge silently and permanently
+      // occupies its key, indistinguishable from a routine already-posted skip in every count and
+      // log line. late_fee accepts a version of this tradeoff on purpose (existing-fee guard
+      // below, "never re-fee a voided month"); rent/cam_estimate never made that call.
+      //
+      // Auto-reposting under a corrected key was the first approach here and was REJECTED on
+      // adversarial review (Fable pass, this session): voiding has no recorded reason this
+      // endpoint can read (void_reason exists but is never checked) — it can mean "this was
+      // wrong, replace it" OR "this tenant terminated / was abated, it's gone for good." Silently
+      // re-billing every voided rent/cam_estimate charge on the next run would just as silently
+      // REVERSE a legitimate void the moment anyone ever voids one of these charge types. Flag it
+      // instead: surfaced via `voidedSkipped` and an errorMessages line so a human decides whether
+      // a manual correction charge (source: 'manual', through the normal charges route) is
+      // warranted — never automatic.
+      if (skippedCharges.length > 0) {
+        const skippedKeys = skippedCharges.map((ch) => ch.idempotency_key)
+        const { data: existingRows, error: recheckErr } = await fetchChunked(
+          skippedKeys,
+          IDEMPOTENCY_KEY_CHUNK_SIZE,
+          (chunk) => db.from('charges').select('idempotency_key, voided_at').in('idempotency_key', chunk),
+          { maxRows: POSTGREST_MAX_ROWS }
+        )
+
+        if (recheckErr) {
+          // Unknown which skipped keys are voided vs. genuinely already posted — leave them all
+          // as ordinary skips (today's behavior) rather than guessing, and surface it as a real
+          // failure (500, not a silent 200) so it isn't mistaken for "nothing to flag."
+          voidRecheckFailed = true
+          chargeErrors += skippedCharges.length
+          errorMessages.push(`voided-charge re-check failed for a batch of ${skippedCharges.length} skipped charges, left as skipped this run: ${recheckErr.message}`)
+        } else {
+          voidedSkipped = (existingRows as { idempotency_key: string; voided_at: string | null }[])
+            .filter((r) => r.voided_at !== null).length
+          if (voidedSkipped > 0) {
+            errorMessages.push(
+              `${voidedSkipped} skipped charge(s) correspond to a VOIDED existing row for that `
+              + 'lease-period, not re-posted automatically (voiding may be intentional) — review '
+              + 'and post a manual correction charge if one is actually owed.'
+            )
+          }
+        }
+      }
     }
   }
 
@@ -378,8 +442,8 @@ cronRouter.post('/monthly-billing', async (c) => {
   // must not look like a normal 200 (OI-162/#1 review round 2 finding #2, round 3 finding #7):
   // the charge-bulk-upsert failing means the ENTIRE portfolio got zero charges this run; a failed
   // autopay pre-check or debit-input lookup means that whole batch got zero debit attempts.
-  const status = (chargesBulkFailed || priorAutopayCheckFailed || debitInputsBulkFailed) ? 500 : 200
-  return c.json({ posted, skipped, errors, chargeErrors, autopayErrors, errorMessages, remaining, year, month }, status)
+  const status = (chargesBulkFailed || voidRecheckFailed || priorAutopayCheckFailed || debitInputsBulkFailed) ? 500 : 200
+  return c.json({ posted, skipped, errors, chargeErrors, autopayErrors, errorMessages, remaining, year, month, voidedSkipped }, status)
 })
 
 cronRouter.post('/critical-dates-alerts', async (c) => {
