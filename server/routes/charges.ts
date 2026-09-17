@@ -7,6 +7,9 @@ type Env = { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string }
 
 export const chargesRouter = new Hono<{ Bindings: Env }>()
 
+// Admin list: returns voided rows too (OI-278 / migration 0016 — they are the audit trail;
+// `select('*')` carries voided_at/void_reason and BillingDashboard.tsx marks them). Every money
+// path (ar_ledger, cron sums, portal, exports, reports, cam) filters `voided_at IS NULL` itself.
 chargesRouter.get('/', async (c) => {
   const db = getDb(c.env)
   const leaseId = c.req.query('lease_id')
@@ -42,13 +45,20 @@ chargesRouter.post('/', async (c) => {
   return c.json({ data }, 201)
 })
 
+// DELETE is NOT the void path. Voiding (voided_at + void_reason, migration 0016) keeps the row as
+// an audit record and is reversible; deletion is neither. Auto charges stay undeletable — the
+// OI-278 population was retired via migration 0017's guarded UPDATE, and any future void action
+// should set the two columns, never call this route.
 chargesRouter.delete('/:id', async (c) => {
   const db = getDb(c.env)
-  const { data: charge } = await db
+  // Fail closed (PR #42 refute): a failed pre-read used to fall through as "not found". PGRST116
+  // (no row) is the genuine 404; any other error is a DB failure and must not be reported as 404.
+  const { data: charge, error: readErr } = await db
     .from('charges')
     .select('source')
     .eq('id', c.req.param('id'))
     .single()
+  if (readErr && readErr.code !== 'PGRST116') return dbError(c, readErr, 'Failed to load charge')
   if (!charge) return c.json({ error: 'Charge not found' }, 404)
   if ((charge as { source: string }).source === 'auto') {
     return c.json({ error: 'Auto-generated charges cannot be deleted' }, 400)

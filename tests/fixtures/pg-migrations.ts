@@ -35,6 +35,9 @@
 //    exercised at the route seam by tests/routes/stripe.test.ts with a
 //    stateful stand-in that models the same contract.
 //  - GRANT / REVOKE: not parseable; privilege statements are not under test.
+//  - DO $$ ... $$: pg-mem ships no plpgsql. 0017's guarded data migration
+//    (OI-278 late-fee void) is a DO block; its guards are pinned textually
+//    and its UPDATE is run standalone by tests/db/charges-void.test.ts.
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -51,6 +54,7 @@ export const PG_MEM_SKIP: RegExp[] = [
   /^ALTER VIEW\s+\S+\s+SET\s*\(\s*security_invoker\s*=\s*true\s*\)$/i,
   /^CREATE (OR REPLACE )?FUNCTION\b/i,
   /^(GRANT|REVOKE)\b/i,
+  /^DO\s+\$\$/i,
 ]
 
 // Splits SQL into statements on ";" while respecting single-quoted strings
@@ -143,22 +147,40 @@ export function allMigrationText(): string {
     .join('\n')
 }
 
+export function readMigration(file: string): string {
+  return readFileSync(join(MIGRATIONS_DIR, file), 'utf8')
+}
+
+// Strips leading comment lines so the skip regexes see the statement's first
+// real token.
+export function statementBody(stmt: string): string {
+  return stmt.replace(/^(\s*--[^\n]*\n)+/, '').trim()
+}
+
 export function freshMigratedDb() {
   const db = newDb()
   const pub = db.public
   // Supabase-environment stubs pg-mem doesn't ship: the auth schema that
-  // tenants.auth_user_id references, and pgcrypto's gen_random_uuid().
+  // tenants.auth_user_id references, pgcrypto's gen_random_uuid(), and the
+  // btrim() builtin (used by 0016's void-pair CHECK; pg-mem has no string
+  // trimming functions at all, so this is the real Postgres semantics).
   pub.registerFunction({
     name: 'gen_random_uuid',
     returns: DataType.uuid,
     implementation: () => randomUUID(),
     impure: true,
   })
+  pub.registerFunction({
+    name: 'btrim',
+    args: [DataType.text],
+    returns: DataType.text,
+    implementation: (s: string | null) => (s === null ? null : s.trim()),
+  })
   pub.none('CREATE SCHEMA auth; CREATE TABLE auth.users (id UUID PRIMARY KEY);')
   for (const file of migrationFiles()) {
     const sql = readFileSync(join(MIGRATIONS_DIR, file), 'utf8')
     for (const stmt of splitSqlStatements(sql)) {
-      const body = stmt.replace(/^(\s*--[^\n]*\n)+/, '').trim()
+      const body = statementBody(stmt)
       if (PG_MEM_SKIP.some((re) => re.test(body))) continue
       try {
         pub.none(stmt)
