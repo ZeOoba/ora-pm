@@ -70,6 +70,24 @@ describe('ChargeInsertSchema', () => {
     })
     expect(result.success).toBe(false)
   })
+
+  // OI-278 / migration 0016: voided_at / void_reason are audit columns set only by a migration (or a
+  // future dedicated void action), never by POST /api/charges. The schema must strip them so a
+  // client cannot mass-assign a pre-voided charge (or a half-void the DB CHECK would reject).
+  it('strips voided_at and void_reason from an insert payload (void is not a client-settable state)', () => {
+    const result = ChargeInsertSchema.safeParse({
+      lease_id: '00000000-0000-0000-0000-000000000001',
+      charge_date: '2026-06-01', due_date: '2026-06-01',
+      period_start: '2026-06-01', period_end: '2026-06-30',
+      type: 'late_fee', amount: 50,
+      voided_at: '2026-09-13T12:00:00Z', void_reason: 'client-supplied',
+    })
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data).not.toHaveProperty('voided_at')
+      expect(result.data).not.toHaveProperty('void_reason')
+    }
+  })
 })
 
 describe('TenantInsertSchema', () => {

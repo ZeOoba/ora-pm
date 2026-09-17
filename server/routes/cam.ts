@@ -59,23 +59,37 @@ camRouter.post('/calculate', async (c) => {
   const { lease_id, reconciliation_year, total_property_recoverable_expenses, total_leased_sf } =
     parsed.data
 
-  // Get tenant's SF from their unit
-  const { data: lease } = await db
+  // Get tenant's SF from their unit. Both reads below FAIL CLOSED (PR #42 refute): they used to
+  // discard `error`, so a failed query read as SF 0 / estimated_cam_paid 0 and SAVED a draft with
+  // a wrong pro-rata or an overstated true_up_amount that /approve would then post. A genuinely
+  // missing lease is PGRST116 (no row) and is a 404-class input error, not a DB failure — returned
+  // as such (PR #42 review follow-up: this used to swallow PGRST116 and fall through with
+  // tenantSF defaulted to 0, computing a true-up against a nonexistent lease that only failed
+  // later, and generically, via the cam_reconciliations FK constraint on insert).
+  const { data: lease, error: leaseErr } = await db
     .from('leases')
     .select('units(sf)')
     .eq('id', lease_id)
     .single()
+  if (leaseErr) {
+    if (leaseErr.code === 'PGRST116') return c.json({ error: 'Lease not found' }, 404)
+    return dbError(c, leaseErr, 'Failed to load lease')
+  }
 
-  const tenantSF: number = (lease as { units: { sf: number } } | null)?.units?.sf ?? 0
+  const tenantSF: number = (lease as unknown as { units: { sf: number } } | null)?.units?.sf ?? 0
 
-  // Sum all CAM estimate charges billed this year
-  const { data: camCharges } = await db
+  // Sum all CAM estimate charges billed this year. OI-278 / migration 0016: a voided estimate was
+  // never really billed, so it must not count as CAM paid (that would understate the true-up).
+  // Fail closed on a read error — including 42703 while the app runs ahead of migration 0016.
+  const { data: camCharges, error: camChargesErr } = await db
     .from('charges')
     .select('amount')
     .eq('lease_id', lease_id)
     .eq('type', 'cam_estimate')
+    .is('voided_at', null)
     .gte('period_start', `${reconciliation_year}-01-01`)
     .lte('period_end', `${reconciliation_year}-12-31`)
+  if (camChargesErr) return dbError(c, camChargesErr, 'Failed to load CAM estimate charges')
 
   const estimatedCamPaid = (camCharges ?? []).reduce(
     (s: number, ch: { amount: number }) => s + ch.amount,

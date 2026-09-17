@@ -6,54 +6,82 @@ import { newDb } from 'pg-mem'
 
 const MIGRATIONS_DIR = join(__dirname, '../../supabase/migrations')
 
-// Extracts a single "CREATE OR REPLACE VIEW <name> AS ... ;" statement verbatim starting at `from`
-// in `sql`, ending at the LAST ";" before the next CREATE/top-level statement (so a trailing
-// comment line before the next statement isn't swept into the extracted text).
+// Matches the head of an ar_ledger definition, with or without a view-options clause:
+//   CREATE OR REPLACE VIEW ar_ledger AS
+//   CREATE OR REPLACE VIEW ar_ledger WITH (security_invoker = true) AS
+// Anchored to line start (`m` flag) so a copy quoted inside a "--" rollback comment (0016) is
+// never mistaken for the live statement.
+const AR_LEDGER_HEAD_RE = /^CREATE OR REPLACE VIEW ar_ledger(\s+WITH\s*\([^)]*\))?\s+AS\b/gm
+
+// Extracts a single "CREATE OR REPLACE VIEW <name> ... AS ... ;" statement verbatim starting at
+// `from` in `sql`, ending at the statement's OWN terminating ";" — the first ";" that is outside a
+// single-quoted string and outside a "--" line comment. Terminating on the statement's own ";"
+// (rather than the last ";" before the next CREATE VIEW) lets a migration put further statements
+// after the view (0016 re-runs ALTER VIEW ... SET (security_invoker) right after recreating it).
 function extractViewStatementAt(sql: string, from: number): string {
-  const nextStmtStart = sql.indexOf('CREATE OR REPLACE VIEW', from + 1)
-  const searchEnd = nextStmtStart === -1 ? sql.length : nextStmtStart
-  const terminatingSemicolon = sql.lastIndexOf(';', searchEnd)
-  if (terminatingSemicolon === -1 || terminatingSemicolon < from) {
-    throw new Error('could not find the view statement\'s terminating ";" — extraction boundary may be wrong')
+  let i = from
+  let inString = false
+  let inLineComment = false
+  while (i < sql.length) {
+    const ch = sql[i]
+    if (inLineComment) {
+      if (ch === '\n') inLineComment = false
+    } else if (inString) {
+      if (ch === "'") inString = false
+    } else if (ch === "'") {
+      inString = true
+    } else if (ch === '-' && sql[i + 1] === '-') {
+      inLineComment = true
+    } else if (ch === ';') {
+      return sql.slice(from, i + 1).trim()
+    }
+    i++
   }
-  const stmt = sql.slice(from, terminatingSemicolon + 1).trim()
-  if (!stmt.endsWith(';')) throw new Error('view statement did not end with ";" as expected — extraction boundary may be wrong')
-  return stmt
+  throw new Error('could not find the view statement\'s terminating ";" — extraction boundary may be wrong')
 }
 
 // Scans EVERY migration file in filename order and returns the LAST "CREATE OR REPLACE VIEW
 // ar_ledger" definition found — i.e. whatever is actually live today, regardless of how many
 // migrations have redefined it. This is what makes the test immune to drift: it can never
 // silently test stale SQL, and it fails the moment the live view regresses to a fan-out join.
-function extractLiveArLedgerViewSql(): string {
+// Returns the raw statement (options clause included) plus the file it came from and the file's
+// full text, so the security_invoker assertions below can check the SAME definition pg-mem runs.
+export function extractLiveArLedgerView(): { sql: string; file: string; fileSql: string } {
   const files = readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith('.sql')).sort()
-  let latest: string | null = null
+  let latest: { sql: string; file: string; fileSql: string } | null = null
   for (const file of files) {
-    const sql = readFileSync(join(MIGRATIONS_DIR, file), 'utf8')
-    let searchFrom = 0
-    for (;;) {
-      const idx = sql.indexOf('CREATE OR REPLACE VIEW ar_ledger AS', searchFrom)
-      if (idx === -1) break
-      latest = extractViewStatementAt(sql, idx)
-      searchFrom = idx + 1
+    const fileSql = readFileSync(join(MIGRATIONS_DIR, file), 'utf8')
+    AR_LEDGER_HEAD_RE.lastIndex = 0
+    let m: RegExpExecArray | null
+    while ((m = AR_LEDGER_HEAD_RE.exec(fileSql)) !== null) {
+      latest = { sql: extractViewStatementAt(fileSql, m.index), file, fileSql }
     }
   }
   if (!latest) throw new Error('no "CREATE OR REPLACE VIEW ar_ledger" definition found in any migration file')
   return latest
 }
 
+// pg-mem 3.0.14 cannot parse a view-options clause (`WITH (security_invoker = true)`), so the
+// clause is stripped before the definition is executed here. It is asserted on separately below
+// — stripping it for execution must never let its absence in the migration pass unnoticed.
+function pgMemExecutable(viewSql: string): string {
+  return viewSql.replace(/^CREATE OR REPLACE VIEW ar_ledger\s+WITH\s*\([^)]*\)\s+AS\b/, 'CREATE OR REPLACE VIEW ar_ledger AS')
+}
+
 function freshLedgerDb() {
   const db = newDb()
   const { public: pub } = db
+  // Column subset the live view reads. `voided_at` (migration 0016): a voided charge stays on the
+  // table as an audit row but must not count toward total_charged/balance.
   pub.none(`
     CREATE TABLE properties (id UUID PRIMARY KEY, name TEXT NOT NULL);
     CREATE TABLE units (id UUID PRIMARY KEY, property_id UUID NOT NULL REFERENCES properties(id), suite TEXT NOT NULL);
     CREATE TABLE tenants (id UUID PRIMARY KEY, name TEXT NOT NULL);
     CREATE TABLE leases (id UUID PRIMARY KEY, tenant_id UUID NOT NULL REFERENCES tenants(id), unit_id UUID NOT NULL REFERENCES units(id));
-    CREATE TABLE charges (id UUID PRIMARY KEY, lease_id UUID NOT NULL REFERENCES leases(id), amount NUMERIC NOT NULL);
+    CREATE TABLE charges (id UUID PRIMARY KEY, lease_id UUID NOT NULL REFERENCES leases(id), amount NUMERIC NOT NULL, voided_at TIMESTAMPTZ, void_reason TEXT);
     CREATE TABLE payments (id UUID PRIMARY KEY, lease_id UUID NOT NULL REFERENCES leases(id), amount NUMERIC NOT NULL, method TEXT NOT NULL, stripe_status TEXT);
   `)
-  pub.none(extractLiveArLedgerViewSql())
+  pub.none(pgMemExecutable(extractLiveArLedgerView().sql))
   return pub
 }
 
@@ -172,5 +200,60 @@ describe('ar_ledger view — balance arithmetic under multiple charges + payment
     expect(Number(b.total_charged)).toBe(300)
     expect(Number(b.total_paid)).toBe(300)
     expect(Number(b.balance)).toBe(0)
+  })
+
+  // OI-278 (migration 0016): a voided charge is an audit row, not money owed. It must be excluded
+  // from total_charged (and so from balance) while a sibling non-voided charge still counts.
+  it('excludes voided charges from total_charged and balance (voided_at IS NOT NULL)', () => {
+    db.none(`
+      INSERT INTO charges (id, lease_id, amount, voided_at, void_reason) VALUES
+        ('c0000000-0000-0000-0000-000000000001', '${LEASE}', 1000, NULL, NULL),
+        ('c0000000-0000-0000-0000-000000000002', '${LEASE}', 50, '2026-09-13T12:00:00Z', 'OI-278 test void');
+      INSERT INTO payments (id, lease_id, amount, method, stripe_status) VALUES ('a0000000-0000-0000-0000-000000000001', '${LEASE}', 400, 'check', NULL);
+    `)
+    const [row] = db.many(`SELECT total_charged, total_paid, balance FROM ar_ledger WHERE lease_id = '${LEASE}'`)
+    expect(Number(row.total_charged)).toBe(1000)
+    expect(Number(row.total_paid)).toBe(400)
+    expect(Number(row.balance)).toBe(600)
+  })
+
+  it('a lease whose only charges are voided has a zero balance, not a phantom debit', () => {
+    db.none(`
+      INSERT INTO charges (id, lease_id, amount, voided_at, void_reason) VALUES
+        ('c0000000-0000-0000-0000-000000000001', '${LEASE}', 50, '2026-09-13T12:00:00Z', 'OI-278 test void'),
+        ('c0000000-0000-0000-0000-000000000002', '${LEASE}', 50, '2026-09-13T12:00:00Z', 'OI-278 test void');
+    `)
+    const [row] = db.many(`SELECT total_charged, balance FROM ar_ledger WHERE lease_id = '${LEASE}'`)
+    expect(Number(row.total_charged)).toBe(0)
+    expect(Number(row.balance)).toBe(0)
+  })
+})
+
+// OI-079 (migration 0012) set security_invoker = true on ar_ledger so the view runs with the
+// caller's privileges and the underlying tables' RLS applies. In Postgres, CREATE OR REPLACE VIEW
+// REPLACES the view's whole reloptions list with the new statement's WITH clause — "even if it's
+// empty" (src/backend/commands/view.c, DefineVirtualRelation, AT_ReplaceRelOptions; verified
+// against REL_15_STABLE 2026-09-13). So any later redefinition without WITH (security_invoker =
+// true) silently drops the OI-079 fix. These assertions run against the SAME definition the
+// behavioral suite above executes, so they cannot check a stale copy.
+describe('ar_ledger view — security_invoker survives redefinition (OI-079 + migration 0016)', () => {
+  const live = extractLiveArLedgerView()
+
+  it('the live definition carries WITH (security_invoker = true) in the CREATE statement itself', () => {
+    expect(live.sql).toMatch(/^CREATE OR REPLACE VIEW ar_ledger\s+WITH\s*\(\s*security_invoker\s*=\s*true\s*\)\s+AS\b/)
+  })
+
+  it('the same migration re-asserts ALTER VIEW ar_ledger SET (security_invoker = true) after the CREATE (belt and braces)', () => {
+    const createIdx = live.fileSql.indexOf(live.sql)
+    const alterRe = /ALTER VIEW ar_ledger SET \(security_invoker = true\);/g
+    const alters: number[] = []
+    let m: RegExpExecArray | null
+    while ((m = alterRe.exec(live.fileSql)) !== null) alters.push(m.index)
+    expect(createIdx).toBeGreaterThan(-1)
+    expect(alters.some((idx) => idx > createIdx)).toBe(true)
+  })
+
+  it('the live definition is in a migration at or after 0012 (0012 is where security_invoker was introduced)', () => {
+    expect(live.file >= '0012').toBe(true)
   })
 })

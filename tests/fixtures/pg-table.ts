@@ -22,7 +22,7 @@ export function pgTable(rows: Row[], opts: { insert?: ReturnType<typeof vi.fn>; 
       // the stub resolves synchronously, so an unbounded loop would starve vitest's timeout.
       if (pages.length > 50) throw new Error('pgTable stub: more than 50 selects on one table — pagination is not terminating')
       const b: Record<string, unknown> = {}
-      for (const m of ['in', 'eq', 'gt', 'gte', 'lt', 'lte', 'order', 'limit']) {
+      for (const m of ['in', 'eq', 'gt', 'gte', 'lt', 'lte', 'is', 'order', 'limit']) {
         b[m] = (...args: unknown[]) => { calls.push({ method: m, args }); return b }
       }
       // `.single()`: exactly one row, else PostgREST's PGRST116 error (as supabase-js surfaces it).
@@ -54,6 +54,12 @@ export function pgTable(rows: Row[], opts: { insert?: ReturnType<typeof vi.fn>; 
           const [c, v] = args as [string, unknown]
           if (method === 'in') out = out.filter(r => (v as unknown[]).includes(col(r, c)))
           if (method === 'eq') out = out.filter(r => String(col(r, c)) === String(v))
+          // PostgREST `.is(col, null)` — IS NULL (the only form the routes use; `.is(col, true/false)`
+          // is not modelled and throws rather than silently matching nothing).
+          if (method === 'is') {
+            if (v !== null) throw new Error(`pgTable stub: .is() only models IS NULL, got ${String(v)}`)
+            out = out.filter(r => col(r, c) === null)
+          }
           if (method === 'gt' && !(opts.ignoreGt === c)) out = out.filter(r => cmp(col(r, c), v) > 0)
           if (method === 'gte') out = out.filter(r => cmp(col(r, c), v) >= 0)
           if (method === 'lt') out = out.filter(r => cmp(col(r, c), v) < 0)

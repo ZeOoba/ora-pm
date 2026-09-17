@@ -48,7 +48,9 @@ const state = {
   rec: null as Row | null,
   recSelectError: null as PgError | null,
   leaseUnits: { sf: 1000 } as Row | null,
-  camEstimateCharges: [] as { amount: number }[],
+  camEstimateCharges: [] as { amount: number; voided_at?: string | null }[],
+  camChargesError: null as PgError | null,
+  leaseSelectError: null as PgError | null,
   charges: [] as Row[],
   chargesInsertError: null as PgError | null,
   reconciliationUpdateError: null as PgError | null,
@@ -146,19 +148,38 @@ function installDbMock() {
       return {
         select: vi.fn().mockReturnValue({
           eq: vi.fn().mockReturnValue({
-            single: vi.fn().mockImplementation(async () => ({ data: { units: state.leaseUnits }, error: null })),
+            single: vi.fn().mockImplementation(async () => (
+              state.leaseSelectError
+                ? { data: null, error: state.leaseSelectError }
+                : { data: { units: state.leaseUnits }, error: null }
+            )),
           }),
         }),
       }
     }
     if (table === 'charges') {
       return {
+        // /calculate's estimated-CAM-paid sum:
+        //   .eq('lease_id').eq('type','cam_estimate').is('voided_at', null).gte(period_start).lte(period_end)
+        // OI-278 / migration 0016: the `.is('voided_at', null)` link is applied for real — a voided
+        // estimate row must not count as CAM already paid (it would understate the true-up).
         select: vi.fn().mockReturnValue({
           eq: vi.fn().mockReturnValue({
             eq: vi.fn().mockReturnValue({
-              gte: vi.fn().mockReturnValue({
-                lte: vi.fn().mockImplementation(async () => ({ data: state.camEstimateCharges, error: null })),
-              }),
+              is: vi.fn().mockImplementation((col: string, val: unknown) => ({
+                gte: vi.fn().mockReturnValue({
+                  lte: vi.fn().mockImplementation(async () => (
+                    state.camChargesError
+                      ? { data: null, error: state.camChargesError }
+                      : {
+                          data: col === 'voided_at' && val === null
+                            ? state.camEstimateCharges.filter((c) => (c.voided_at ?? null) === null)
+                            : state.camEstimateCharges,
+                          error: null,
+                        }
+                  )),
+                }),
+              })),
             }),
           }),
         }),
@@ -221,6 +242,8 @@ beforeEach(() => {
   state.recSelectError = null
   state.leaseUnits = { sf: 1000 }
   state.camEstimateCharges = []
+  state.camChargesError = null
+  state.leaseSelectError = null
   state.charges = []
   state.chargesInsertError = null
   state.reconciliationUpdateError = null
@@ -353,6 +376,61 @@ describe('POST /api/cam/calculate', () => {
     const json = await res.json() as { data: Row }
     expect(json.data.lease_id).toBe(VALID_BODY.lease_id)
     expect(json.data.status).toBe('draft')
+  })
+
+  // OI-278 / migration 0016: estimated_cam_paid is Σ cam_estimate charges for the year. A voided
+  // estimate is not money the tenant was billed, so it must not reduce the true-up owed.
+  it('excludes voided cam_estimate charges from estimated_cam_paid', async () => {
+    state.camEstimateCharges = [
+      { amount: 100 },
+      { amount: 100, voided_at: '2026-09-13T12:00:00Z' },
+    ]
+    // tenantSF 1000 / totalLeasedSF 50000 = 2% × $10,000 = $200 owed; $100 paid (not $200).
+    const res = await calculate(VALID_BODY)
+    expect(res.status).toBe(200)
+    const json = await res.json() as { data: Row }
+    expect(json.data.estimated_cam_paid).toBe(100)
+    expect(json.data.true_up_amount).toBe(100)
+  })
+
+  // PR #42 refute (Important 1): the estimated-CAM-paid read used to discard its `error`, so a
+  // failed query (e.g. 42703 while the app is deployed ahead of migration 0016's `voided_at`
+  // column) read as estimated_cam_paid = 0 — overstating true_up_amount and SAVING a draft that
+  // /approve would then post. Fail closed like every other charges reader: 500, nothing written,
+  // no raw Postgres text.
+  it('returns 500 and saves nothing when the cam_estimate charges read fails (never a $0-paid draft)', async () => {
+    state.camChargesError = { code: '42703', message: 'column charges.voided_at does not exist' }
+
+    const res = await calculate(VALID_BODY)
+    expect(res.status).toBe(500)
+    expect(camUpdateSpy).not.toHaveBeenCalled()
+    expect(camInsertSpy).not.toHaveBeenCalled()
+    const text = await res.text()
+    expect(text).not.toContain('voided_at')
+    expect(text).not.toContain('42703')
+  })
+
+  it('returns 500 and saves nothing when the lease/unit SF read fails (never a 0-SF pro-rata draft)', async () => {
+    state.leaseSelectError = { code: '57014', message: 'canceling statement due to statement timeout on relation "leases"' }
+
+    const res = await calculate(VALID_BODY)
+    expect(res.status).toBe(500)
+    expect(camUpdateSpy).not.toHaveBeenCalled()
+    expect(camInsertSpy).not.toHaveBeenCalled()
+    expect(await res.text()).not.toContain('statement timeout')
+  })
+
+  // PR #42 review finding, CONFIRMED: a genuinely missing lease (PGRST116) used to be swallowed —
+  // execution fell through with tenantSF defaulted to 0, computed a true-up against a nonexistent
+  // lease, and only failed later (generically, via the cam_reconciliations FK constraint on
+  // insert) as an unrelated 500. Must 404 immediately instead, and never compute or save anything.
+  it('returns 404 and saves nothing when the lease does not exist (PGRST116), not a 0-SF true-up', async () => {
+    state.leaseSelectError = { code: 'PGRST116', message: 'not found' }
+
+    const res = await calculate(VALID_BODY)
+    expect(res.status).toBe(404)
+    expect(camUpdateSpy).not.toHaveBeenCalled()
+    expect(camInsertSpy).not.toHaveBeenCalled()
   })
 
   // RED 4 — a string where a number is required is rejected before any DB write.
