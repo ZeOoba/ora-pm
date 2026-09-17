@@ -420,6 +420,19 @@ describe('POST /api/cam/calculate', () => {
     expect(await res.text()).not.toContain('statement timeout')
   })
 
+  // PR #42 review finding, CONFIRMED: a genuinely missing lease (PGRST116) used to be swallowed —
+  // execution fell through with tenantSF defaulted to 0, computed a true-up against a nonexistent
+  // lease, and only failed later (generically, via the cam_reconciliations FK constraint on
+  // insert) as an unrelated 500. Must 404 immediately instead, and never compute or save anything.
+  it('returns 404 and saves nothing when the lease does not exist (PGRST116), not a 0-SF true-up', async () => {
+    state.leaseSelectError = { code: 'PGRST116', message: 'not found' }
+
+    const res = await calculate(VALID_BODY)
+    expect(res.status).toBe(404)
+    expect(camUpdateSpy).not.toHaveBeenCalled()
+    expect(camInsertSpy).not.toHaveBeenCalled()
+  })
+
   // RED 4 — a string where a number is required is rejected before any DB write.
   it('rejects a non-numeric total_leased_sf with 422 and never touches the DB', async () => {
     const res = await calculate({ ...VALID_BODY, total_leased_sf: 'abc' })
