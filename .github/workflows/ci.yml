@@ -109,6 +109,35 @@ jobs:
             echo "deploy=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # OI-312 deploy-ordering gate. db-migrate.yml is workflow_dispatch-only and deliberately
+      # decoupled, so without this step a push to main could deploy the app BEFORE the migration it
+      # depends on -- 0016_charges_void.sql's header says the app must deploy AFTER 0016 is live,
+      # because `.is('voided_at', null)` raises 42703 against the old schema. That nearly happened
+      # merging PR #42; it was caught only because a human was watching CI live.
+      # Gated identically to the Cloudflare-env check below, and fails closed on any doubt.
+      # `version: latest` matches db-migrate.yml rather than inventing a second pin. A CLI output
+      # change would break the gate's parser -- which fails CLOSED with an explicit "format may have
+      # changed" error, so the worst case is a blocked deploy, never a silently-skipped check.
+      - uses: supabase/setup-cli@v1
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push' && steps.tip.outputs.deploy == 'true'
+        with:
+          version: latest
+
+      # `migration list --linked` needs link state, which a fresh CI checkout does not have.
+      - name: Link to production project (for the migration gate)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push' && steps.tip.outputs.deploy == 'true'
+        run: supabase link --project-ref tvfarkddtbtdrpvvehth --password "$SUPABASE_DB_PASSWORD"
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+
+      - name: Check migrations are applied
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push' && steps.tip.outputs.deploy == 'true'
+        run: node scripts/check-migrations-applied.mjs
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+
       - name: Check Cloudflare Pages production env
         if: github.ref == 'refs/heads/main' && github.event_name == 'push' && steps.tip.outputs.deploy == 'true'
         run: node scripts/check-deploy-env.mjs pages
