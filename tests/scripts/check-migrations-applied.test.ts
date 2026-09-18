@@ -13,6 +13,41 @@ const ASCII = `  LOCAL          | REMOTE         | TIME (UTC)
   --------------+----------------+------------
   20260916000000 | 20260916000000 | 2026-09-16`
 
+// VERBATIM output from `supabase migration list --linked` on this repo, captured from
+// run 35388593228 (2026-09-18). The versions are BACKTICK-WRAPPED and the repo uses sequential
+// numbering, not Supabase's default 14-digit timestamps. The first version of this gate assumed
+// bare digits, parsed zero rows against this exact text, and blocked the deploy on the first push
+// to main that ran it. This fixture is the regression: if the parser ever stops understanding real
+// production output again, this test fails instead of the deploy.
+const REAL_CLI_OUTPUT = [
+  '   Local  | Remote | Time (UTC) ',
+  '  --------|--------|------------',
+  '   `0015` | `0015` | `0015`     ',
+  '   `0016` | `0016` | `0016`     ',
+  '   `0017` | `0017` | `0017`     ',
+].join('\n')
+
+describe('parseMigrationList — real CLI output (OI-312 regression)', () => {
+  it('parses the verbatim backtick-wrapped production table and reports nothing pending', () => {
+    const { pending, sawAnyRow } = parseMigrationList(REAL_CLI_OUTPUT)
+    expect(sawAnyRow).toBe(true)
+    expect(pending).toEqual([])
+  })
+
+  it('flags a pending migration in the real backtick format (blank remote cell)', () => {
+    const { pending, sawAnyRow } = parseMigrationList(`${REAL_CLI_OUTPUT}
+   \`0018\` |        | \`0018\`     `)
+    expect(sawAnyRow).toBe(true)
+    expect(pending).toEqual(['0018'])
+  })
+
+  it('does not mistake the real header or ASCII rule row for a migration', () => {
+    expect(parseMigrationList(REAL_CLI_OUTPUT).pending).not.toContain('Local')
+    const headerAndRuleOnly = REAL_CLI_OUTPUT.split(String.fromCharCode(10)).slice(0, 2).join(String.fromCharCode(10))
+    expect(parseMigrationList(headerAndRuleOnly).sawAnyRow).toBe(false)
+  })
+})
+
 describe('parseMigrationList (OI-312 deploy gate)', () => {
   it('reports nothing pending when every local migration has a remote entry', () => {
     const { pending, sawAnyRow } = parseMigrationList(BOX)
