@@ -72,6 +72,20 @@ describe('DELETE /api/charges/:id — voided-charge guard (OI-310)', () => {
     expect(deleteSpy).not.toHaveBeenCalled()
   })
 
+  // REFUTE pass (Fable, 2026-09-18) finding 4: the commit message calls the `!== null` fail-closed
+  // property deliberate, but nothing exercised it. `getDb` returns an untyped client, so the
+  // `as { voided_at: string | null }` cast is a no-op and TypeScript offers zero protection here --
+  // this test is the only thing that holds the property.
+  it('fails CLOSED when voided_at is absent from the row entirely (a dropped select must not silently disable the guard)', async () => {
+    const deleteSpy = vi.fn()
+    mockFrom.mockReturnValue(chargesTable({ source: 'manual' }, deleteSpy))
+
+    const res = await app.request('/api/charges/charge_no_field', { method: 'DELETE' }, env)
+
+    expect(res.status).toBe(400)
+    expect(deleteSpy).not.toHaveBeenCalled()
+  })
+
   it('actually asks the database for voided_at — a guard reading a column it never selected is a guard that never fires', async () => {
     const table = chargesTable({ source: 'manual', voided_at: null })
     mockFrom.mockReturnValue(table)
