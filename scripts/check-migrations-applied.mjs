@@ -24,6 +24,17 @@ import { pathToFileURL } from 'node:url'
 // database -- i.e. pending. Box-drawing separators vary across CLI versions, so accept both.
 const COLUMN_SEPARATORS = /[│|]/
 
+// The CLI wraps each version in backticks -- the real production output is
+//     `0013` | `0013` | `0013`
+// not a bare 0013. The first version of this gate tested the raw cell against /^\d+$/, parsed zero
+// rows against live output, and blocked the deploy on the very first push to main that ran it
+// (run 35388439275). It failed closed and said exactly why, which is the only reason that was a
+// blocked deploy and not a silently-skipped check -- but the parser was still wrong. Normalise the
+// decoration away before matching, and never assume a cell is bare.
+function cellValue(raw) {
+  return raw.replace(/`/g, '').trim()
+}
+
 export function parseMigrationList(stdout) {
   const pending = []
   let sawAnyRow = false
@@ -33,15 +44,12 @@ export function parseMigrationList(stdout) {
     if (!line) continue
     if (!COLUMN_SEPARATORS.test(line)) continue
 
-    const cells = line.split(COLUMN_SEPARATORS).map((c) => c.trim())
+    const cells = line.split(COLUMN_SEPARATORS).map(cellValue)
     if (cells.length < 2) continue
 
     const [local, remote] = cells
-    // Skip the header row and the ─────┼───── rule.
-    if (/^local$/i.test(local)) continue
-    if (/^[─\-—═]+$/.test(local) || local === '') {
-      if (!/^\d+$/.test(local)) continue
-    }
+    // Anything that is not a bare version after normalisation -- the `Local | Remote | Time (UTC)`
+    // header, the ----|----|---- rule, a remote-only row -- is not a local migration.
     if (!/^\d+$/.test(local)) continue
 
     sawAnyRow = true
