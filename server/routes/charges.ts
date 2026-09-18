@@ -48,20 +48,30 @@ chargesRouter.post('/', async (c) => {
 // DELETE is NOT the void path. Voiding (voided_at + void_reason, migration 0016) keeps the row as
 // an audit record and is reversible; deletion is neither. Auto charges stay undeletable — the
 // OI-278 population was retired via migration 0017's guarded UPDATE, and any future void action
-// should set the two columns, never call this route.
+// should set the two columns, never call this route. Already-voided charges are undeletable too
+// (OI-310), so the audit record a void creates cannot be erased through this door.
 chargesRouter.delete('/:id', async (c) => {
   const db = getDb(c.env)
   // Fail closed (PR #42 refute): a failed pre-read used to fall through as "not found". PGRST116
   // (no row) is the genuine 404; any other error is a DB failure and must not be reported as 404.
   const { data: charge, error: readErr } = await db
     .from('charges')
-    .select('source')
+    .select('source, voided_at')
     .eq('id', c.req.param('id'))
     .single()
   if (readErr && readErr.code !== 'PGRST116') return dbError(c, readErr, 'Failed to load charge')
   if (!charge) return c.json({ error: 'Charge not found' }, 404)
   if ((charge as { source: string }).source === 'auto') {
     return c.json({ error: 'Auto-generated charges cannot be deleted' }, 400)
+  }
+  // OI-310: a voided charge IS the audit record — deleting one destroys exactly what the void
+  // mechanism exists to preserve. Today this cannot be reached (0017 only voids `source='auto'`
+  // rows, which the check above already refuses), so this guard is deliberately landed BEFORE the
+  // manual-void action that would make it reachable, not after. Do not drop it as "dead code":
+  // the day a manual void can stamp `voided_at` on a `source='manual'` charge, this is the only
+  // thing standing between a DELETE request and a hard-deleted audit trail.
+  if ((charge as { voided_at: string | null }).voided_at !== null) {
+    return c.json({ error: 'Voided charges cannot be deleted' }, 400)
   }
   const { error } = await db.from('charges').delete().eq('id', c.req.param('id'))
   if (error) return dbError(c, error, 'Failed to delete charge')
