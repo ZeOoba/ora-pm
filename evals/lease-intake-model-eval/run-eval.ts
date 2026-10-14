@@ -13,11 +13,12 @@
 //   ANTHROPIC_API_KEY=sk-... npx tsx evals/lease-intake-model-eval/run-eval.ts
 //   ANTHROPIC_API_KEY=sk-... npx tsx evals/lease-intake-model-eval/run-eval.ts --models=claude-opus-5,claude-sonnet-5
 import { extractLease } from '../../server/lib/lease-extract'
+import { ANTHROPIC_MODEL } from '../../server/lib/models'
 import { buildSimplePdfBase64 } from './build-pdf'
 import { FIXTURES } from './fixtures'
 import { scoreExtraction, summarizeModel, type ModelSummary } from './score'
 
-const DEFAULT_MODELS = ['claude-opus-5', 'claude-sonnet-5']
+const DEFAULT_MODELS = [ANTHROPIC_MODEL, 'claude-sonnet-5']
 
 function parseModelsArg(argv: string[]): string[] {
   const arg = argv.find(a => a.startsWith('--models='))

@@ -4,11 +4,12 @@ import { parseTerms, containsConfidentialTerm } from '../lib/confidentiality'
 import { extractLease } from '../lib/lease-extract'
 import { extractPdfText } from '../lib/pdf-extract'
 import { checkRateLimit } from '../lib/rate-limit'
+import { ANTHROPIC_MODEL } from '../lib/models'
 import { getDb } from '../db/client'
 
 export const intakeRouter = new Hono<{ Bindings: Env }>()
 
-const DEFAULT_MODEL = 'claude-opus-5'
+const DEFAULT_MODEL = ANTHROPIC_MODEL
 const MAX_PDF_BYTES = 10 * 1024 * 1024 // mirror the client cap; the client check is bypassable
 
 // OI-038 remainder: this is an LLM-spend-specific budget (each request egresses
@@ -28,7 +29,7 @@ const INTAKE_RATE_LIMIT = { scope: 'intake', maxCalls: 10, windowMs: 24 * 60 * 6
 // was "use my override", not "block lease intake"; the resulting request
 // still runs, just against a known-good model. Update this list when a new
 // model id is approved for lease-intake use.
-const ALLOWED_MODELS = new Set<string>(['claude-opus-5', 'claude-sonnet-5'])
+const ALLOWED_MODELS = new Set<string>([ANTHROPIC_MODEL, 'claude-sonnet-5'])
 
 function resolveModel(requested: string | undefined): string {
   return requested && ALLOWED_MODELS.has(requested) ? requested : DEFAULT_MODEL
