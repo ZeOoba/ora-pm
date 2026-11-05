@@ -109,19 +109,49 @@ describe('api.listAll', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
-  it('stops on a short page even if total is larger', async () => {
+  it('keeps paging short pages while total > 0 (server max_rows below 200): 150 x 3 of 450', async () => {
+    const fetchMock = stubPages([
+      { data: items(0, 150), total: 450 },
+      { data: items(150, 150), total: 450 },
+      { data: items(300, 150), total: 450 },
+    ])
+    const rows = await api.listAll<{ id: number }>('/tenants')
+    expect(rows).toHaveLength(450)
+    expect(rows[449]).toEqual({ id: 449 })
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    const offsets = fetchMock.mock.calls.map((c) => new URL(c[0] as string, 'http://x').searchParams.get('offset'))
+    expect(offsets).toEqual(['0', '150', '300'])
+  })
+
+  it('stops on an empty page after short pages when total over-reports', async () => {
     const fetchMock = stubPages([
       { data: items(0, 200), total: 999 },
       { data: items(200, 120), total: 999 },
+      { data: [], total: 999 },
     ])
     expect(await api.listAll('/tenants')).toHaveLength(320)
-    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
+  it('stops on an empty first page', async () => {
+    const fetchMock = stubPages([{ data: [], total: 0 }])
+    expect(await api.listAll('/tenants')).toEqual([])
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
   it('does not stop after page 1 when total is 0 (null-count fallback): 200 then 50 rows', async () => {
     const fetchMock = stubPages([
       { data: items(0, 200), total: 0 },
       { data: items(200, 50), total: 0 },
+    ])
+    expect(await api.listAll('/tenants')).toHaveLength(250)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('treats an absent total like 0 (short-page fallback): 200 then 50 rows', async () => {
+    const fetchMock = stubPages([
+      { data: items(0, 200) } as { data: unknown[]; total: number },
+      { data: items(200, 50) } as { data: unknown[]; total: number },
     ])
     expect(await api.listAll('/tenants')).toHaveLength(250)
     expect(fetchMock).toHaveBeenCalledTimes(2)
