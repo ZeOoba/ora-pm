@@ -21,6 +21,8 @@ export function toCsv<T>(rows: T[], columns: CsvColumn<T>[]): string {
   return lines.join('\r\n')
 }
 
+const REVOKE_DELAY_MS = 1000
+
 export function downloadCsv(filename: string, csv: string): void {
   // BOM so Excel reads UTF-8 correctly.
   const blob = new Blob(['\uFEFF', csv], { type: 'text/csv;charset=utf-8' })
@@ -31,8 +33,9 @@ export function downloadCsv(filename: string, csv: string): void {
   document.body.appendChild(a)
   a.click()
   a.remove()
-  // Defer so the browser can start the download before the URL is released.
-  setTimeout(() => URL.revokeObjectURL(url), 0)
+  // Defer so the browser can start the download before the URL is released. Firefox/Safari can
+  // begin the download after click() returns, so a 0 ms revoke can race it; ~1 s is safe.
+  setTimeout(() => URL.revokeObjectURL(url), REVOKE_DELAY_MS)
 }
 
 /** Standard export name for a list page: ora-<page>-YYYY-MM-DD.csv (local date). */

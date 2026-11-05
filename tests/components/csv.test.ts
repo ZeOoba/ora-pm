@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
 import { toCsv, downloadCsv, csvFilename } from '../../src/components/data-table/csv'
 
 type Row = { name: string; rent: number | null; note?: string | null }
@@ -55,7 +55,13 @@ describe('toCsv formula injection', () => {
 })
 
 describe('downloadCsv', () => {
-  it('writes the BOM as an escape and defers revokeObjectURL', () => {
+  // Restored even when an assertion fails, so fake timers / stubbed globals never leak.
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+  })
+
+  it('writes the BOM as an escape and revokes the object URL only after ~1 s', () => {
     vi.useFakeTimers()
     const el = { click: vi.fn(), remove: vi.fn(), href: '', download: '' }
     const blobs: unknown[][] = []
@@ -65,11 +71,12 @@ describe('downloadCsv', () => {
     vi.stubGlobal('document', { createElement: () => el, body: { appendChild: vi.fn() } })
     downloadCsv('f', 'a,b')
     expect(blobs[0][0]).toBe('\uFEFF')
+    expect(el.click).toHaveBeenCalledTimes(1)
+    // Firefox/Safari can start the download after click() returns; a 0 ms revoke can race it.
+    vi.advanceTimersByTime(999)
     expect(revoke).not.toHaveBeenCalled()
-    vi.runAllTimers()
+    vi.advanceTimersByTime(1)
     expect(revoke).toHaveBeenCalledWith('blob:x')
-    vi.useRealTimers()
-    vi.unstubAllGlobals()
   })
 })
 
