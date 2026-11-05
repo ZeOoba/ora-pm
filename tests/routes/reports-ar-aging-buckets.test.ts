@@ -121,6 +121,8 @@ describe('GET /api/reports/ar-aging — buckets', () => {
 
   it('balance greater than Σ charges surfaces as unallocated (row and totals)', async () => {
     // A negative (credit) payment lets balance exceed Σ charges while total_charged still ties.
+    // total_paid: -200 is SYNTHETIC: the schema forbids it (payments.amount CHECK > 0), but it is the only way
+    // to make balance exceed Σ charges while total_charged still ties, which exercises the defensive branch.
     const a = ledger(700, { total_paid: -200 })
     world([a], [charge(a.lease_id, 10, 500)])
     const body = await (await get()).json() as Body
@@ -225,19 +227,32 @@ describe('GET /api/reports/ar-aging — buckets', () => {
 })
 
 describe('GET /api/reports/ar-aging — snapshot cross-check (total_charged vs fetched charges)', () => {
-  it('mismatch on the first read, consistent on the retry → 200 with the retried buckets', async () => {
+  it('mismatch on the first read, consistent on the retry → 200 serving read 2 only (balance AND charges differ)', async () => {
     const a = ledger(300)
-    const fresh = [charge(a.lease_id, 100, 300), charge(a.lease_id, 0, 50)] // a charge landed between the reads
-    // First attempt: ledger snapshot says 300 charged but the charge read saw 350. Retry: both say 350, 50 of it paid.
-    const l1 = { ...a, total_charged: 300 }
-    const l2 = { ...a, total_charged: 350, total_paid: 50, balance: 300 }
-    worldSequence([{ ledger: [l1], charges: fresh }, { ledger: [l2], charges: fresh }])
+    const old100 = charge(a.lease_id, 100, 300)
+    // Read 1: ledger says 300 charged / 300 balance, but the charge read saw 350 (a 0-day charge landed) → mismatch.
+    const c1 = [old100, charge(a.lease_id, 0, 50)]
+    const l1 = { ...a, total_charged: 300, total_paid: 0, balance: 300 }
+    // Read 2 (consistent): the 0-day charge is gone, a 5-day charge exists, 150 paid → balance 200.
+    const c2 = [old100, charge(a.lease_id, 5, 50)]
+    const l2 = { ...a, total_charged: 350, total_paid: 150, balance: 200 }
+    const tables = worldSequence([{ ledger: [l1], charges: c1 }, { ledger: [l2], charges: c2 }])
     const res = await get()
     expect(res.status).toBe(200)
     const body = await res.json() as Body
-    expect(body.data![0].buckets).toEqual({ current: 50, d1_30: 0, d31_60: 0, d61_90: 0, d90_plus: 250, unallocated: 0 })
-    expect(body.totals!.balance).toBe(300)
+    // Oldest-first: 150 paid clears 150 of the 100-day charge; owed = 150 (100d) + 50 (5d). Read 1 would give
+    // balance 300 / current 50 / d90_plus 250, so every field below distinguishes read 2 from read 1.
+    expect(body.data![0].buckets).toEqual({ current: 0, d1_30: 50, d31_60: 0, d61_90: 0, d90_plus: 150, unallocated: 0 })
+    expect(body.data![0].balance).toBe(200)
+    expect(body.totals!.balance).toBe(200)
+    expect(body.totals!.d1_30).toBe(50)
+    expect(body.totals!.d90_plus).toBe(150)
     expect(bucketSumCents(body.totals!)).toBe(cents(body.totals!.balance))
+    // Read 2 issued its own ledger and charges selects (the charges were re-read, not reused from read 1).
+    expect(tables[0].ar_ledger.pages.length).toBe(1)
+    expect(tables[0].charges.pages.length).toBeGreaterThan(0)
+    expect(tables[1].ar_ledger.pages.length).toBe(1)
+    expect(tables[1].charges.pages.length).toBeGreaterThan(0)
   })
 
   it('persistent mismatch → 500 with a generic client message (no cents, no lease id)', async () => {

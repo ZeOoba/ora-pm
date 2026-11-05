@@ -77,9 +77,11 @@ export function buildAgingRow(
 // lease's non-voided charges newest→oldest (due_date DESC, id DESC) and assigns
 // min(charge, remaining balance) to each charge's age bucket until the balance is used up.
 //
-// If the charges cannot explain the whole balance (Σ charges < balance — a data anomaly, or a
-// charge voided between the ledger read and the charge read), the remainder goes to
-// `unallocated` rather than being hidden in any age bucket. By construction the six buckets
+// If the charges cannot explain the whole balance (Σ charges < balance), the remainder goes to
+// `unallocated` rather than being hidden in any age bucket. That is a defensive branch: a
+// consistent ledger+charges snapshot cannot produce it (balance = Σ non-voided charges − Σ payments,
+// and payments.amount has CHECK > 0). A charge voided between the two reads is caught by the
+// route's total_charged cross-check (retry once, then 500), not here. By construction the six buckets
 // always sum to the balance exactly. Everything is integer cents.
 
 export interface AllocationCharge {
