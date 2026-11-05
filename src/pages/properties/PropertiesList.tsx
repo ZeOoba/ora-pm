@@ -1,63 +1,65 @@
-import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router'
 import { api } from '../../lib/api'
 import { PageHeader } from '../../components/PageHeader'
+import { Button } from '../../components/ui/Button'
+import { DataTable } from '../../components/data-table/DataTable'
+import { dataTableColumnHelper } from '../../components/data-table/columns'
+import { csvFilename } from '../../components/data-table/csv'
 import { formatSF } from '../../lib/format'
 import type { Property } from '../../types'
 
+const h = dataTableColumnHelper<Property>()
+
+// Sortable ids match the server allowlist: name, city, state, created_at.
+const columns = [
+  h.accessor('name', {
+    header: 'Name',
+    enableSorting: true,
+    cell: ({ row }) => (
+      <Link to={`/properties/${row.original.id}`} className="font-medium text-foreground hover:underline">
+        {row.original.name}
+      </Link>
+    ),
+  }),
+  h.accessor('address', { header: 'Address', cell: ({ row }) => row.original.address }),
+  h.accessor('city', { header: 'City', enableSorting: true, cell: ({ row }) => row.original.city }),
+  h.accessor('state', { header: 'State', enableSorting: true, cell: ({ row }) => row.original.state }),
+  h.accessor('property_type', {
+    header: 'Type',
+    cell: ({ row }) => <span className="capitalize text-muted-foreground">{row.original.property_type}</span>,
+  }),
+  h.accessor('total_sf', {
+    header: 'SF',
+    meta: { numeric: true },
+    cell: ({ row }) => formatSF(row.original.total_sf),
+  }),
+  h.accessor('entity_llc', {
+    header: 'Entity LLC',
+    cell: ({ row }) => <span className="text-muted-foreground">{row.original.entity_llc ?? '—'}</span>,
+  }),
+]
+
 export function PropertiesList() {
-  const { data, isLoading } = useQuery({
-    queryKey: ['properties'],
-    queryFn: () => api.get<{ data: Property[] }>('/properties').then(r => r.data),
-  })
-
-  if (isLoading) return <p className="text-gray-500 p-4">Loading…</p>
-
   return (
     <div>
       <PageHeader
         title="Properties"
         action={
-          <Link to="/properties/new" className="bg-blue-600 hover:bg-blue-700 text-white text-sm px-3 py-1.5 rounded">
-            + Add Property
-          </Link>
+          <Button asChild>
+            <Link to="/properties/new">+ Add Property</Link>
+          </Button>
         }
       />
-      <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
-        <table className="min-w-full divide-y divide-gray-200">
-          <thead className="bg-gray-50">
-            <tr>
-              {['Name', 'Address', 'Type', 'SF', 'Entity LLC'].map(h => (
-                <th key={h} className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  {h}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-gray-200">
-            {data?.length === 0 && (
-              <tr>
-                <td colSpan={5} className="px-4 py-8 text-center text-gray-400">
-                  No properties yet.
-                </td>
-              </tr>
-            )}
-            {data?.map(p => (
-              <tr key={p.id} className="hover:bg-gray-50">
-                <td className="px-4 py-3 font-medium text-blue-600">
-                  <Link to={`/properties/${p.id}`}>{p.name}</Link>
-                </td>
-                <td className="px-4 py-3 text-sm text-gray-600">
-                  {p.address}, {p.city}, {p.state}
-                </td>
-                <td className="px-4 py-3 text-sm capitalize text-gray-600">{p.property_type}</td>
-                <td className="px-4 py-3 text-sm text-gray-600">{formatSF(p.total_sf)}</td>
-                <td className="px-4 py-3 text-sm text-gray-500">{p.entity_llc ?? '—'}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      <DataTable<Property>
+        columns={columns}
+        queryKey={['properties', 'list']}
+        fetchPage={(p) => api.list<Property>('/properties', p)}
+        searchPlaceholder="Search name, city or entity…"
+        rowHref={(p) => `/properties/${p.id}`}
+        csvFilename={csvFilename('properties')}
+        initialSort={{ id: 'name', desc: false }}
+        emptyTitle="No properties yet"
+      />
     </div>
   )
 }

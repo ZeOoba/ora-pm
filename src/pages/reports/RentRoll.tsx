@@ -1,79 +1,109 @@
-import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../../lib/api'
 import { PageHeader } from '../../components/PageHeader'
 import { formatCurrency, formatSF, formatPSF, formatDate } from '../../lib/format'
 import { StatusBadge } from '../../components/StatusBadge'
+import { DataTable } from '../../components/data-table/DataTable'
+import { dataTableColumnHelper } from '../../components/data-table/columns'
+import { csvFilename } from '../../components/data-table/csv'
 import type { RentRollRow } from '../../types'
 
-export function RentRoll() {
-  const [propertyFilter, setPropertyFilter] = useState('')
+const h = dataTableColumnHelper<RentRollRow>()
+const money = (v: number | null) => (v != null ? formatCurrency(v) : '—')
 
-  const { data, isLoading } = useQuery({
-    queryKey: ['rent-roll'], // full dataset; property filter is client-side
-    queryFn: () => api.get<{ data: RentRollRow[] }>('/reports/rent-roll').then(r => r.data),
+// Client mode: /reports/rent-roll is unpaged, so every column sorts in memory.
+const columns = [
+  h.accessor('property_name', {
+    header: 'Property',
+    enableSorting: true,
+    cell: ({ row }) => <span className="font-medium text-foreground">{row.original.property_name}</span>,
+  }),
+  h.accessor('suite', { header: 'Suite', enableSorting: true, cell: ({ row }) => row.original.suite }),
+  h.accessor('sf', {
+    header: 'SF',
+    enableSorting: true,
+    meta: { numeric: true },
+    cell: ({ row }) => (row.original.sf ? formatSF(row.original.sf) : '—'),
+  }),
+  h.accessor('tenant_name', {
+    header: 'Tenant',
+    enableSorting: true,
+    meta: { csv: (r: RentRollRow) => r.tenant_name ?? 'Vacant' },
+    cell: ({ row }) =>
+      row.original.tenant_name ?? <span className="italic text-muted-foreground">Vacant</span>,
+  }),
+  h.accessor('end_date', {
+    header: 'Lease End',
+    enableSorting: true,
+    cell: ({ row }) => <span className="text-muted-foreground">{formatDate(row.original.end_date)}</span>,
+  }),
+  h.accessor('base_rent_monthly', {
+    header: 'Base Rent',
+    enableSorting: true,
+    meta: { numeric: true },
+    cell: ({ row }) => money(row.original.base_rent_monthly),
+  }),
+  h.accessor('cam_estimate_monthly', {
+    header: 'CAM',
+    enableSorting: true,
+    meta: { numeric: true },
+    cell: ({ row }) => money(row.original.cam_estimate_monthly),
+  }),
+  h.accessor('total_monthly', {
+    header: 'Total/mo',
+    enableSorting: true,
+    meta: { numeric: true },
+    cell: ({ row }) => <span className="font-medium">{money(row.original.total_monthly)}</span>,
+  }),
+  h.accessor('rent_psf_annual', {
+    header: '$/SF/yr',
+    enableSorting: true,
+    meta: { numeric: true },
+    cell: ({ row }) => (row.original.rent_psf_annual != null ? formatPSF(row.original.rent_psf_annual) : '—'),
+  }),
+  h.accessor((r) => r.lease_status ?? r.unit_status, {
+    id: 'status',
+    header: 'Status',
+    enableSorting: true,
+    cell: ({ row }) => <StatusBadge status={row.original.lease_status ?? row.original.unit_status} />,
+  }),
+]
+
+function matchesSearch(r: RentRollRow, q: string): boolean {
+  const needle = q.toLowerCase()
+  return [r.property_name, r.suite, r.tenant_name].some((v) => v?.toLowerCase().includes(needle))
+}
+
+export function RentRoll() {
+  const { data, error, refetch } = useQuery({
+    queryKey: ['rent-roll'],
+    queryFn: () => api.get<{ data: RentRollRow[] }>('/reports/rent-roll').then((r) => r.data),
   })
 
-  const rows = (data ?? []).filter(r =>
-    !propertyFilter || r.property_name.toLowerCase().includes(propertyFilter.toLowerCase())
-  )
-
-  const totalMonthly = rows.reduce((s, r) => s + (r.total_monthly ?? 0), 0)
-  const occupied = rows.filter(r => r.lease_status === 'active').length
+  const all = data ?? []
+  const totalMonthly = all.reduce((s, r) => s + (r.total_monthly ?? 0), 0)
+  const occupied = all.filter((r) => r.lease_status === 'active').length
 
   return (
     <div>
-      <PageHeader title="Rent Roll" />
-      <div className="flex items-center gap-4 mb-4">
-        <input
-          type="text"
-          placeholder="Filter by property…"
-          value={propertyFilter}
-          onChange={e => setPropertyFilter(e.target.value)}
-          className="border border-gray-300 rounded px-3 py-1.5 text-sm w-56"
-        />
-        {!isLoading && (
-          <span className="text-sm text-gray-500">
-            {occupied} occupied · {formatCurrency(totalMonthly)}/mo total
-          </span>
-        )}
-      </div>
-      {isLoading ? (
-        <p className="text-gray-500">Loading…</p>
-      ) : (
-        <div className="bg-white rounded-lg border border-gray-200 overflow-auto">
-          <table className="min-w-full text-sm divide-y divide-gray-200">
-            <thead className="bg-gray-50">
-              <tr>
-                {['Property', 'Suite', 'SF', 'Tenant', 'Lease End', 'Base Rent', 'CAM', 'Total/mo', '$/SF/yr', 'Status'].map(h => (
-                  <th key={h} className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase whitespace-nowrap">{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {rows.map(r => (
-                <tr key={r.unit_id} className="hover:bg-gray-50">
-                  <td className="px-3 py-2 font-medium text-gray-900">{r.property_name}</td>
-                  <td className="px-3 py-2">{r.suite}</td>
-                  <td className="px-3 py-2 text-gray-600">{r.sf ? formatSF(r.sf) : '—'}</td>
-                  <td className="px-3 py-2 text-gray-700">{r.tenant_name ?? <span className="text-gray-400 italic">Vacant</span>}</td>
-                  <td className="px-3 py-2 text-gray-600">{formatDate(r.end_date)}</td>
-                  <td className="px-3 py-2">{r.base_rent_monthly != null ? formatCurrency(r.base_rent_monthly) : '—'}</td>
-                  <td className="px-3 py-2 text-gray-600">{r.cam_estimate_monthly != null ? formatCurrency(r.cam_estimate_monthly) : '—'}</td>
-                  <td className="px-3 py-2 font-medium">{r.total_monthly != null ? formatCurrency(r.total_monthly) : '—'}</td>
-                  <td className="px-3 py-2 text-gray-600">{r.rent_psf_annual != null ? formatPSF(r.rent_psf_annual) : '—'}</td>
-                  <td className="px-3 py-2">
-                    {r.lease_status ? <StatusBadge status={r.lease_status} /> : <StatusBadge status={r.unit_status} />}
-                  </td>
-                </tr>
-              ))}
-              {rows.length === 0 && (
-                <tr><td colSpan={10} className="px-3 py-8 text-center text-gray-400">No data.</td></tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      )}
+      <PageHeader
+        title="Rent Roll"
+        subtitle={data ? `${occupied} occupied · ${formatCurrency(totalMonthly)}/mo total` : undefined}
+      />
+      <DataTable<RentRollRow>
+        mode="client"
+        columns={columns}
+        queryKey={['rent-roll', 'table']}
+        rows={data}
+        error={error}
+        onRetry={() => void refetch()}
+        getRowId={(r) => r.unit_id}
+        clientSearchFn={matchesSearch}
+        searchPlaceholder="Search property, suite or tenant…"
+        csvFilename={csvFilename('rent-roll')}
+        initialSort={{ id: 'property_name', desc: false }}
+        emptyTitle="No data"
+      />
     </div>
   )
 }

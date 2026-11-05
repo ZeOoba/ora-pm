@@ -1,7 +1,9 @@
-import { useQuery } from '@tanstack/react-query'
 import { api } from '../../lib/api'
 import { PageHeader } from '../../components/PageHeader'
 import { StatusBadge } from '../../components/StatusBadge'
+import { DataTable } from '../../components/data-table/DataTable'
+import { dataTableColumnHelper } from '../../components/data-table/columns'
+import { csvFilename } from '../../components/data-table/csv'
 import { formatDate } from '../../lib/format'
 import type { Renewal } from '../../types'
 
@@ -12,43 +14,55 @@ type RenewalRow = Renewal & {
   }
 }
 
+const h = dataTableColumnHelper<RenewalRow>()
+
+const propertySuite = (r: RenewalRow) =>
+  `${r.leases?.units?.properties?.name ?? '—'} · ${r.leases?.units?.suite ?? '—'}`
+
+// Sortable ids match the server allowlist: expiration_date, target_decision_date, status.
+const columns = [
+  h.accessor((r) => r.leases?.tenants?.name, {
+    id: 'tenant',
+    header: 'Tenant',
+    cell: ({ row }) => <span className="font-medium text-foreground">{row.original.leases?.tenants?.name ?? '—'}</span>,
+  }),
+  h.accessor(propertySuite, {
+    id: 'property_suite',
+    header: 'Property / Suite',
+    cell: ({ row }) => <span className="text-muted-foreground">{propertySuite(row.original)}</span>,
+  }),
+  h.accessor('expiration_date', {
+    header: 'Expiration',
+    enableSorting: true,
+    cell: ({ row }) => formatDate(row.original.expiration_date),
+  }),
+  h.accessor('target_decision_date', {
+    header: 'Decision By',
+    enableSorting: true,
+    cell: ({ row }) => <span className="text-muted-foreground">{formatDate(row.original.target_decision_date)}</span>,
+  }),
+  h.accessor('status', {
+    header: 'Status',
+    enableSorting: true,
+    cell: ({ row }) => <StatusBadge status={row.original.status} />,
+  }),
+]
+
 export function RenewalsPipeline() {
-  const { data, isLoading } = useQuery({
-    queryKey: ['renewals'],
-    queryFn: () => api.get<{ data: RenewalRow[] }>('/renewals').then(r => r.data),
-  })
-
-  if (isLoading) return <p className="text-gray-500 p-4">Loading…</p>
-
   return (
     <div>
       <PageHeader title="Renewals" />
-      <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
-        <table className="min-w-full divide-y divide-gray-200 text-sm">
-          <thead className="bg-gray-50">
-            <tr>
-              {['Tenant', 'Property / Suite', 'Expiration', 'Status'].map(h => (
-                <th key={h} className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-gray-200">
-            {data?.length === 0 && (
-              <tr><td colSpan={4} className="px-4 py-8 text-center text-gray-400">No renewals tracked.</td></tr>
-            )}
-            {data?.map(r => (
-              <tr key={r.id} className="hover:bg-gray-50">
-                <td className="px-4 py-3 font-medium">{r.leases?.tenants?.name ?? '—'}</td>
-                <td className="px-4 py-3 text-gray-500">
-                  {r.leases?.units?.properties?.name} · {r.leases?.units?.suite}
-                </td>
-                <td className="px-4 py-3">{formatDate(r.expiration_date)}</td>
-                <td className="px-4 py-3"><StatusBadge status={r.status} /></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      <DataTable<RenewalRow>
+        columns={columns}
+        queryKey={['renewals', 'list']}
+        // /renewals is unpaged unless limit/offset are passed; DataTable always passes them.
+        fetchPage={(p) => api.list<RenewalRow>('/renewals', p)}
+        searchable={false}
+        rowHref={(r) => `/leases/${r.lease_id}`}
+        csvFilename={csvFilename('renewals')}
+        initialSort={{ id: 'expiration_date', desc: false }}
+        emptyTitle="No renewals tracked"
+      />
     </div>
   )
 }

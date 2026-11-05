@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { toCsv, downloadCsv } from '../../src/components/data-table/csv'
+import { toCsv, downloadCsv, csvFilename } from '../../src/components/data-table/csv'
 
 type Row = { name: string; rent: number | null; note?: string | null }
 const cols = [
@@ -70,5 +70,11 @@ describe('downloadCsv', () => {
     expect(revoke).toHaveBeenCalledWith('blob:x')
     vi.useRealTimers()
     vi.unstubAllGlobals()
+  })
+})
+
+describe('csvFilename', () => {
+  it('builds ora-<page>-YYYY-MM-DD.csv from the local date', () => {
+    expect(csvFilename('tenants', new Date(2026, 0, 5))).toBe('ora-tenants-2026-01-05.csv')
   })
 })

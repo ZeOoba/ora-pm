@@ -1,11 +1,18 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../../lib/api'
 import { useSaveMutation } from '../../lib/mutations'
 import { formatCurrency, formatDate } from '../../lib/format'
 import { PageHeader } from '../../components/PageHeader'
+import { Button } from '../../components/ui/Button'
+import { Badge } from '../../components/ui/Badge'
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '../../components/ui/sheet'
+import { DataTable, type FilterDef } from '../../components/data-table/DataTable'
+import { dataTableColumnHelper } from '../../components/data-table/columns'
+import { csvFilename } from '../../components/data-table/csv'
 import { Field } from '../../components/form/Field'
 import { TextInput, NumberInput, DateInput, Select, Textarea, Checkbox } from '../../components/form/inputs'
+import { Trash2 } from 'lucide-react'
 import type { Expense, ExpenseCategory, Property } from '../../types'
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -67,44 +74,81 @@ function validate(f: ExpenseForm): ExpenseErrors {
   return e
 }
 
+// ── Table columns ──────────────────────────────────────────────────────────
+
+const h = dataTableColumnHelper<ExpenseRow>()
+
+// Sortable ids match the server allowlist: expense_date, amount, category.
+function buildColumns(onDelete: (id: string) => void | Promise<void>) {
+  return [
+    h.accessor('expense_date', {
+      header: 'Date',
+      enableSorting: true,
+      cell: ({ row }) => <span className="whitespace-nowrap">{formatDate(row.original.expense_date)}</span>,
+    }),
+    h.accessor((e) => e.properties?.name, {
+      id: 'property',
+      header: 'Property',
+      cell: ({ row }) => row.original.properties?.name ?? '—',
+    }),
+    h.accessor('category', {
+      header: 'Category',
+      enableSorting: true,
+      meta: { csv: (e: ExpenseRow) => CATEGORY_LABELS[e.category] },
+      cell: ({ row }) => CATEGORY_LABELS[row.original.category],
+    }),
+    h.accessor('vendor', {
+      header: 'Vendor',
+      cell: ({ row }) => <span className="text-muted-foreground">{row.original.vendor ?? '—'}</span>,
+    }),
+    h.accessor('amount', {
+      header: 'Amount',
+      enableSorting: true,
+      meta: { numeric: true },
+      cell: ({ row }) => <span className="font-medium">{formatCurrency(row.original.amount)}</span>,
+    }),
+    h.accessor('recoverable', {
+      header: 'Recoverable',
+      meta: { csv: (e: ExpenseRow) => (e.recoverable ? 'Yes' : 'No') },
+      cell: ({ row }) =>
+        row.original.recoverable ? <Badge tone="active">✓ CAM</Badge> : <span className="text-muted-foreground">—</span>,
+    }),
+    h.display({
+      id: 'actions',
+      header: () => <span className="sr-only">Actions</span>,
+      cell: ({ row }) => (
+        <button
+          type="button"
+          onClick={() => onDelete(row.original.id)}
+          className="text-muted-foreground transition-colors hover:text-status-danger"
+          title="Delete expense"
+          aria-label="Delete expense"
+        >
+          <Trash2 className="size-4" aria-hidden />
+        </button>
+      ),
+    }),
+  ]
+}
+
 // ── Component ──────────────────────────────────────────────────────────────
 
 export function ExpensesList() {
   const qc = useQueryClient()
-  const [propertyFilter, setPropertyFilter] = useState<string>('')
   const [showForm, setShowForm] = useState(false)
   const [form, setForm] = useState<ExpenseForm>(EMPTY_FORM)
   const [errors, setErrors] = useState<ExpenseErrors>({})
 
-  // Fetch properties for filter dropdown and form
+  // Properties feed the filter dropdown and the form picker.
   const { data: propertiesData } = useQuery({
-    queryKey: ['properties'],
-    queryFn: () => api.get<{ data: Property[] }>('/properties').then(r => r.data),
+    queryKey: ['properties', 'picker'],
+    queryFn: () => api.list<Property>('/properties', { limit: 200, sort: 'name', dir: 'asc' }).then(r => r.data),
   })
-  const properties = propertiesData ?? []
-
-  // Fetch expenses, filtered by property if set
-  const expensesQueryKey = propertyFilter
-    ? ['expenses', { property_id: propertyFilter }]
-    : ['expenses']
-
-  const { data: expensesData, isLoading } = useQuery({
-    queryKey: expensesQueryKey,
-    queryFn: () => {
-      const url = propertyFilter
-        ? `/expenses?property_id=${encodeURIComponent(propertyFilter)}`
-        : '/expenses'
-      return api.get<{ data: ExpenseRow[] }>(url).then(r => r.data)
-    },
-  })
-  const expenses: ExpenseRow[] = expensesData ?? []
-
-  // Sort most-recent first
-  const sorted = [...expenses].sort(
-    (a, b) => new Date(b.expense_date).getTime() - new Date(a.expense_date).getTime()
+  const properties = useMemo(() => propertiesData ?? [], [propertiesData])
+  const filters = useMemo<FilterDef[]>(
+    () => [{ id: 'property_id', label: 'Property', options: properties.map(p => ({ value: p.id, label: p.name })) }],
+    [properties],
   )
-
-  const total = expenses.reduce((sum, e) => sum + e.amount, 0)
 
   // ── Mutation ───────────────────────────────────────────────────────────────
 
@@ -147,11 +191,16 @@ export function ExpensesList() {
     })
   }
 
-  async function handleDelete(id: string) {
-    if (!confirm('Delete this expense?')) return
-    await api.del(`/expenses/${id}`)
-    qc.invalidateQueries({ queryKey: ['expenses'] })
-  }
+  // Delete behavior unchanged (Task 6 replaces confirm()); refreshes the DataTable query.
+  const columns = useMemo(
+    () =>
+      buildColumns(async (id) => {
+        if (!confirm('Delete this expense?')) return
+        await api.del(`/expenses/${id}`)
+        qc.invalidateQueries({ queryKey: ['expenses'] })
+      }),
+    [qc],
+  )
 
   function handleCancel() {
     setShowForm(false)
@@ -166,37 +215,19 @@ export function ExpensesList() {
       <PageHeader
         title="Expenses"
         action={
-          !showForm ? (
-            <button
-              type="button"
-              onClick={() => setShowForm(true)}
-              className="text-sm bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded"
-            >
-              + Add Expense
-            </button>
-          ) : undefined
+          <Button type="button" onClick={() => setShowForm(true)}>
+            + Add Expense
+          </Button>
         }
       />
 
-      {/* Property filter */}
-      <div className="mb-4 max-w-xs">
-        <Select
-          id="property-filter"
-          value={propertyFilter}
-          onChange={e => setPropertyFilter(e.target.value)}
-        >
-          <option value="">All properties</option>
-          {properties.map(p => (
-            <option key={p.id} value={p.id}>{p.name}</option>
-          ))}
-        </Select>
-      </div>
-
-      {/* Add Expense inline form */}
-      {showForm && (
-        <div className="bg-white rounded-lg border border-gray-200 p-4 mb-6">
-          <h3 className="text-sm font-medium text-gray-700 mb-3">Add Expense</h3>
-          <form onSubmit={handleSubmit} noValidate>
+      <Sheet open={showForm} onOpenChange={(open) => { if (!open) handleCancel() }}>
+        <SheetContent className="overflow-y-auto sm:max-w-lg">
+          <SheetHeader>
+            <SheetTitle>Add Expense</SheetTitle>
+            <SheetDescription>Log a property expense; mark it recoverable to feed CAM reconciliation.</SheetDescription>
+          </SheetHeader>
+          <form onSubmit={handleSubmit} noValidate className="px-4 pb-4">
             <div className="grid grid-cols-2 gap-3">
               <Field label="Property" htmlFor="exp-property" required error={errors.property_id}>
                 <Select
@@ -286,118 +317,33 @@ export function ExpensesList() {
             </Field>
 
             {mutation.error && (
-              <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded p-2 mb-3">
+              <p className="mb-3 rounded border border-status-danger/30 bg-status-danger/5 p-2 text-sm text-status-danger">
                 {mutation.error.message}
               </p>
             )}
 
-            <div className="flex items-center gap-3 mt-1">
-              <button
-                type="submit"
-                disabled={mutation.isPending}
-                className="bg-blue-600 hover:bg-blue-700 text-white rounded-md px-4 py-2 text-sm font-medium disabled:opacity-50 transition-colors"
-              >
+            <div className="mt-1 flex items-center gap-3">
+              <Button type="submit" disabled={mutation.isPending}>
                 {mutation.isPending ? 'Saving…' : 'Add Expense'}
-              </button>
-              <button
-                type="button"
-                onClick={handleCancel}
-                className="text-sm text-gray-600 hover:text-gray-900"
-              >
+              </Button>
+              <Button type="button" variant="ghost" onClick={handleCancel}>
                 Cancel
-              </button>
+              </Button>
             </div>
           </form>
-        </div>
-      )}
+        </SheetContent>
+      </Sheet>
 
-      {/* Expenses table */}
-      {isLoading ? (
-        <p className="text-gray-500 text-sm">Loading…</p>
-      ) : sorted.length === 0 ? (
-        <p className="text-gray-500 text-sm">No expenses logged.</p>
-      ) : (
-        <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="bg-gray-50 border-b border-gray-200">
-                <th className="text-left px-4 py-2 font-semibold text-gray-600">Date</th>
-                <th className="text-left px-4 py-2 font-semibold text-gray-600">Property</th>
-                <th className="text-left px-4 py-2 font-semibold text-gray-600">Category</th>
-                <th className="text-left px-4 py-2 font-semibold text-gray-600">Vendor</th>
-                <th className="text-right px-4 py-2 font-semibold text-gray-600">Amount</th>
-                <th className="text-center px-4 py-2 font-semibold text-gray-600">Recoverable</th>
-                <th className="px-4 py-2"></th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {sorted.map(e => (
-                <tr key={e.id} className="hover:bg-gray-50 transition-colors">
-                  <td className="px-4 py-2 text-gray-700 whitespace-nowrap">
-                    {formatDate(e.expense_date)}
-                  </td>
-                  <td className="px-4 py-2 text-gray-700">
-                    {e.properties?.name ?? '—'}
-                  </td>
-                  <td className="px-4 py-2 text-gray-700">
-                    {CATEGORY_LABELS[e.category]}
-                  </td>
-                  <td className="px-4 py-2 text-gray-500">
-                    {e.vendor ?? '—'}
-                  </td>
-                  <td className="px-4 py-2 text-right font-medium text-gray-900 tabular-nums">
-                    {formatCurrency(e.amount)}
-                  </td>
-                  <td className="px-4 py-2 text-center">
-                    {e.recoverable ? (
-                      <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700">
-                        ✓ CAM
-                      </span>
-                    ) : (
-                      <span className="text-gray-400">—</span>
-                    )}
-                  </td>
-                  <td className="px-4 py-2 text-right">
-                    <button
-                      type="button"
-                      onClick={() => handleDelete(e.id)}
-                      className="text-gray-400 hover:text-red-600 transition-colors"
-                      title="Delete expense"
-                      aria-label="Delete expense"
-                    >
-                      <svg
-                        xmlns="http://www.w3.org/2000/svg"
-                        className="h-4 w-4"
-                        fill="none"
-                        viewBox="0 0 24 24"
-                        stroke="currentColor"
-                        strokeWidth={2}
-                      >
-                        <path
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
-                        />
-                      </svg>
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-            <tfoot>
-              <tr className="bg-gray-50 border-t border-gray-200">
-                <td colSpan={4} className="px-4 py-2 text-sm font-semibold text-gray-600">
-                  Total ({sorted.length} expense{sorted.length !== 1 ? 's' : ''})
-                </td>
-                <td className="px-4 py-2 text-right font-semibold text-gray-900 tabular-nums">
-                  {formatCurrency(total)}
-                </td>
-                <td colSpan={2} />
-              </tr>
-            </tfoot>
-          </table>
-        </div>
-      )}
+      <DataTable<ExpenseRow>
+        columns={columns}
+        queryKey={['expenses', 'list']}
+        fetchPage={(p) => api.list<ExpenseRow>('/expenses', p)}
+        searchable={false}
+        filters={filters}
+        csvFilename={csvFilename('expenses')}
+        initialSort={{ id: 'expense_date', desc: true }}
+        emptyTitle="No expenses logged"
+      />
     </div>
   )
 }

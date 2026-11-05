@@ -1,60 +1,69 @@
-import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router'
 import { api } from '../../lib/api'
 import { PageHeader } from '../../components/PageHeader'
 import { StatusBadge } from '../../components/StatusBadge'
+import { Button } from '../../components/ui/Button'
+import { DataTable } from '../../components/data-table/DataTable'
+import { dataTableColumnHelper } from '../../components/data-table/columns'
+import { csvFilename } from '../../components/data-table/csv'
 import { formatDate, formatCurrency } from '../../lib/format'
 import type { InsuranceCertificate, Tenant } from '../../types'
 
 type CertRow = InsuranceCertificate & { tenants: Pick<Tenant, 'name'> }
 
+const h = dataTableColumnHelper<CertRow>()
+const muted = (v: string | null | undefined) => <span className="text-muted-foreground">{v ?? '—'}</span>
+
+// Sortable ids match the server allowlist: expiration_date, status.
+const columns = [
+  h.accessor((c) => c.tenants?.name, {
+    id: 'tenant',
+    header: 'Tenant',
+    cell: ({ row }) => <span className="font-medium text-foreground">{row.original.tenants?.name ?? '—'}</span>,
+  }),
+  h.accessor('policy_type', {
+    header: 'Policy Type',
+    cell: ({ row }) => <span className="capitalize text-muted-foreground">{row.original.policy_type.replace(/_/g, ' ')}</span>,
+  }),
+  h.accessor('carrier', { header: 'Carrier', cell: ({ row }) => muted(row.original.carrier) }),
+  h.accessor('coverage_amount', {
+    header: 'Coverage',
+    meta: { numeric: true },
+    cell: ({ row }) => formatCurrency(row.original.coverage_amount),
+  }),
+  h.accessor('expiration_date', {
+    header: 'Expiration',
+    enableSorting: true,
+    cell: ({ row }) => formatDate(row.original.expiration_date),
+  }),
+  h.accessor('status', {
+    header: 'Status',
+    enableSorting: true,
+    cell: ({ row }) => <StatusBadge status={row.original.status} />,
+  }),
+]
+
 export function InsuranceList() {
-  const { data, isLoading } = useQuery({
-    queryKey: ['insurance'],
-    queryFn: () => api.get<{ data: CertRow[] }>('/insurance').then(r => r.data),
-  })
-
-  if (isLoading) return <p className="text-gray-500 p-4">Loading…</p>
-
   return (
     <div>
       <PageHeader
         title="Insurance Certificates"
         action={
-          <Link
-            to="/insurance/new"
-            className="bg-blue-600 hover:bg-blue-700 text-white text-sm px-3 py-1.5 rounded"
-          >
-            + Add Certificate
-          </Link>
+          <Button asChild>
+            <Link to="/insurance/new">+ Add Certificate</Link>
+          </Button>
         }
       />
-      <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
-        <table className="min-w-full divide-y divide-gray-200 text-sm">
-          <thead className="bg-gray-50">
-            <tr>
-              {['Tenant', 'Policy Type', 'Carrier', 'Coverage', 'Expiration', 'Status'].map(h => (
-                <th key={h} className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-gray-200">
-            {data?.length === 0 && (
-              <tr><td colSpan={6} className="px-4 py-8 text-center text-gray-400">No certificates on file.</td></tr>
-            )}
-            {data?.map(cert => (
-              <tr key={cert.id} className={cert.status === 'expired' ? 'bg-red-50' : cert.status === 'expiring_soon' ? 'bg-orange-50' : ''}>
-                <td className="px-4 py-3 font-medium">{cert.tenants?.name ?? '—'}</td>
-                <td className="px-4 py-3 capitalize text-gray-600">{cert.policy_type.replace(/_/g, ' ')}</td>
-                <td className="px-4 py-3 text-gray-500">{cert.carrier ?? '—'}</td>
-                <td className="px-4 py-3">{formatCurrency(cert.coverage_amount)}</td>
-                <td className="px-4 py-3">{formatDate(cert.expiration_date)}</td>
-                <td className="px-4 py-3"><StatusBadge status={cert.status} /></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      <DataTable<CertRow>
+        columns={columns}
+        queryKey={['insurance', 'list']}
+        // /insurance is unpaged unless limit/offset are passed; DataTable always passes them.
+        fetchPage={(p) => api.list<CertRow>('/insurance', p)}
+        searchable={false}
+        csvFilename={csvFilename('insurance')}
+        initialSort={{ id: 'expiration_date', desc: false }}
+        emptyTitle="No certificates on file"
+      />
     </div>
   )
 }

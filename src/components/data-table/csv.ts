@@ -34,3 +34,11 @@ export function downloadCsv(filename: string, csv: string): void {
   // Defer so the browser can start the download before the URL is released.
   setTimeout(() => URL.revokeObjectURL(url), 0)
 }
+
+/** Standard export name for a list page: ora-<page>-YYYY-MM-DD.csv (local date). */
+export function csvFilename(page: string, now: Date = new Date()): string {
+  const y = now.getFullYear()
+  const m = String(now.getMonth() + 1).padStart(2, '0')
+  const d = String(now.getDate()).padStart(2, '0')
+  return `ora-${page}-${y}-${m}-${d}.csv`
+}

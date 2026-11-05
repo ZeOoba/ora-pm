@@ -1,6 +1,10 @@
-import { useQuery } from '@tanstack/react-query'
 import { api } from '../../lib/api'
 import { PageHeader } from '../../components/PageHeader'
+import { Badge, StatusBadge } from '../../components/ui/Badge'
+import { DataTable } from '../../components/data-table/DataTable'
+import { dataTableColumnHelper } from '../../components/data-table/columns'
+import { csvFilename } from '../../components/data-table/csv'
+import { cn } from '@/lib/utils'
 import { formatCurrency, formatDate } from '../../lib/format'
 import type { Charge } from '../../types'
 
@@ -18,67 +22,74 @@ const CHARGE_LABELS: Record<string, string> = {
   other: 'Other',
 }
 
+const h = dataTableColumnHelper<Charge>()
+
+// OI-278 / migration 0016: voided rows stay in the list as the audit trail but are
+// visibly retired — struck-through amount + "Voided" badge carrying the reason.
+// Sortable ids match the server allowlist: charge_date, amount, type.
+const columns = [
+  h.accessor('charge_date', {
+    header: 'Charge Date',
+    enableSorting: true,
+    cell: ({ row: { original: ch } }) => (
+      <span className={cn(ch.voided_at && 'text-muted-foreground')}>{formatDate(ch.charge_date)}</span>
+    ),
+  }),
+  h.accessor('due_date', {
+    header: 'Due Date',
+    cell: ({ row: { original: ch } }) => <span className="text-muted-foreground">{formatDate(ch.due_date)}</span>,
+  }),
+  h.accessor('type', {
+    header: 'Type',
+    enableSorting: true,
+    meta: { csv: (ch: Charge) => CHARGE_LABELS[ch.type] ?? ch.type },
+    cell: ({ row: { original: ch } }) => (
+      <span className={cn(ch.voided_at && 'text-muted-foreground')}>
+        {CHARGE_LABELS[ch.type] ?? ch.type}
+        {ch.voided_at && (
+          <span className="ml-2" title={`${ch.void_reason ?? ''} (${formatDate(ch.voided_at)})`}>
+            <Badge tone="danger">Voided</Badge>
+          </span>
+        )}
+      </span>
+    ),
+  }),
+  h.accessor('amount', {
+    header: 'Amount',
+    enableSorting: true,
+    meta: { numeric: true },
+    cell: ({ row: { original: ch } }) => (
+      <span className={cn('font-medium', ch.voided_at && 'text-muted-foreground line-through')}>
+        {formatCurrency(ch.amount)}
+      </span>
+    ),
+  }),
+  h.display({
+    id: 'period',
+    header: 'Period',
+    meta: { csv: (ch: Charge) => `${ch.period_start} – ${ch.period_end}`, csvHeader: 'Period' },
+    cell: ({ row: { original: ch } }) => (
+      <span className="text-xs text-muted-foreground">
+        {formatDate(ch.period_start)} – {formatDate(ch.period_end)}
+      </span>
+    ),
+  }),
+  h.accessor('source', { header: 'Source', cell: ({ row }) => <StatusBadge status={row.original.source} /> }),
+]
+
 export function BillingDashboard() {
-  const { data, isLoading } = useQuery({
-    queryKey: ['charges'],
-    queryFn: () => api.get<{ data: Charge[] }>('/charges').then(r => r.data),
-  })
-
-  if (isLoading) return <p className="text-gray-500 p-4">Loading…</p>
-
   return (
     <div>
       <PageHeader title="Billing" />
-      <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
-        <table className="min-w-full divide-y divide-gray-200 text-sm">
-          <thead className="bg-gray-50">
-            <tr>
-              {['Charge Date', 'Due Date', 'Type', 'Amount', 'Period', 'Source'].map(h => (
-                <th key={h} className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-gray-200">
-            {data?.length === 0 && (
-              <tr>
-                <td colSpan={6} className="px-4 py-8 text-center text-gray-400">No charges yet.</td>
-              </tr>
-            )}
-            {data?.map(ch => (
-              // OI-278 / migration 0016: voided rows stay in the list as the audit trail but are
-              // visibly retired — struck-through amount + "Voided" badge carrying the reason.
-              <tr key={ch.id} className={`hover:bg-gray-50 ${ch.voided_at ? 'text-gray-400' : ''}`}>
-                <td className="px-4 py-3">{formatDate(ch.charge_date)}</td>
-                <td className="px-4 py-3 text-gray-500">{formatDate(ch.due_date)}</td>
-                <td className="px-4 py-3">
-                  {CHARGE_LABELS[ch.type] ?? ch.type}
-                  {ch.voided_at && (
-                    <span
-                      className="ml-2 text-xs px-1.5 py-0.5 rounded bg-red-100 text-red-700"
-                      title={`${ch.void_reason ?? ''} (${formatDate(ch.voided_at)})`}
-                    >
-                      Voided
-                    </span>
-                  )}
-                </td>
-                <td className={`px-4 py-3 font-medium ${ch.voided_at ? 'line-through' : ''}`}>{formatCurrency(ch.amount)}</td>
-                <td className="px-4 py-3 text-gray-500 text-xs">
-                  {formatDate(ch.period_start)} – {formatDate(ch.period_end)}
-                </td>
-                <td className="px-4 py-3">
-                  <span className={`text-xs px-1.5 py-0.5 rounded ${
-                    ch.source === 'auto'
-                      ? 'bg-purple-100 text-purple-700'
-                      : 'bg-gray-100 text-gray-600'
-                  }`}>
-                    {ch.source}
-                  </span>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      <DataTable<Charge>
+        columns={columns}
+        queryKey={['charges', 'list']}
+        fetchPage={(p) => api.list<Charge>('/charges', p)}
+        searchable={false}
+        csvFilename={csvFilename('billing')}
+        initialSort={{ id: 'charge_date', desc: true }}
+        emptyTitle="No charges yet"
+      />
     </div>
   )
 }
