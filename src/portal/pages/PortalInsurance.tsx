@@ -4,6 +4,7 @@ import { portalSupabase } from '../lib/supabase-portal'
 import { portalApi } from '../lib/portal-api'
 import { Button } from '../../components/ui/Button'
 import { Card } from '../../components/ui/Card'
+import { QueryState } from '../../components/QueryState'
 
 export function PortalInsurance() {
   const [form, setForm] = useState({
@@ -23,7 +24,8 @@ export function PortalInsurance() {
   // keys the folder on public.tenants.id — NOT the Supabase auth user id
   // (session.user.id), which is a different uuid. Same query PortalPayNow and
   // PortalDashboard use.
-  const { data: meData, error: meError } = useQuery({ queryKey: ['portal-me'], queryFn: portalApi.getMe })
+  const meQuery = useQuery({ queryKey: ['portal-me'], queryFn: portalApi.getMe })
+  const { data: meData } = meQuery
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -97,11 +99,10 @@ export function PortalInsurance() {
       {status === 'error' && (
         <div role="alert" className="bg-status-danger/5 border border-status-danger/30 rounded p-4 text-status-danger text-sm">{errorMsg}</div>
       )}
-      {meError && (
-        <div role="alert" className="bg-status-danger/5 border border-status-danger/30 rounded p-4 text-status-danger text-sm">
-          Could not load your account: {meError.message}
-        </div>
-      )}
+
+      {/* portal-me status: skeleton, error + retry, stale warning. The form stays mounted: its submit
+          button is already disabled until the tenant profile has loaded. */}
+      <QueryState query={meQuery}>{null}</QueryState>
 
       <Card className="p-6">
       <form onSubmit={handleSubmit} className="space-y-4">

@@ -23,6 +23,7 @@ import { PortalMyLease } from '../../src/portal/pages/PortalMyLease'
 import { PortalPaymentHistory } from '../../src/portal/pages/PortalPaymentHistory'
 import { PortalPayNow } from '../../src/portal/pages/PortalPayNow'
 import { PortalAccount } from '../../src/portal/pages/PortalAccount'
+import { PortalInsurance } from '../../src/portal/pages/PortalInsurance'
 
 const pending = () => ({ isPending: true, isLoading: true, isError: false, error: null, data: undefined, refetch: vi.fn() })
 const failed = (msg: string) => ({ isPending: false, isLoading: false, isError: true, error: new Error(msg), data: undefined, refetch: vi.fn() })
@@ -47,6 +48,7 @@ const PAGES: [string, ComponentType][] = [
   ['PortalPaymentHistory', PortalPaymentHistory],
   ['PortalPayNow', PortalPayNow],
   ['PortalAccount', PortalAccount],
+  ['PortalInsurance', PortalInsurance],
 ]
 
 describe('portal pages: loading skeleton and error state', () => {
@@ -62,5 +64,34 @@ describe('portal pages: loading skeleton and error state', () => {
     expect(html).toContain('portal boom')
     expect(html).not.toContain('all caught up')
     expect(html).not.toContain('No payments on record')
+  })
+
+  it('PortalAccount: a failed profile read does not hide the autopay card (and vice versa)', () => {
+    const lease = { id: 'l1', autopay_enabled: false, autopay_payment_method_id: 'pm_1', units: { suite: '101', properties: { name: 'Acme Test Park' } } }
+    results.current = { 'portal-me': failed('me boom'), 'portal-lease': { isPending: false, isLoading: false, isError: false, error: null, data: { data: [lease] }, refetch: vi.fn() } }
+    let html = render(PortalAccount)
+    expect(html).toContain('me boom')
+    expect(html).toContain('Autopay OFF')
+    results.current = { 'portal-me': { isPending: false, isLoading: false, isError: false, error: null, data: { tenant: { name: 'Acme Test LLC' } }, refetch: vi.fn() }, 'portal-lease': failed('lease boom') }
+    html = render(PortalAccount)
+    expect(html).toContain('Acme Test LLC')
+    expect(html).toContain('lease boom')
+  })
+
+  it('PortalAccount: a failed refetch after data loaded keeps the autopay card', () => {
+    const lease = { id: 'l1', autopay_enabled: true, autopay_payment_method_id: 'pm_1', units: { suite: '101', properties: { name: 'Acme Test Park' } } }
+    const stale = (data: unknown) => ({ isPending: false, isLoading: false, isError: true, error: new Error('refetch boom'), data, refetch: vi.fn() })
+    results.current = { 'portal-me': stale({ tenant: { name: 'Acme Test LLC' } }), 'portal-lease': stale({ data: [lease] }) }
+    const html = render(PortalAccount)
+    expect(html).toContain('Autopay ON')
+    expect(html).toContain('showing last loaded data')
+  })
+
+  it('PortalInsurance: form stays rendered once portal-me loaded, even if a refetch failed', () => {
+    const stale = { isPending: false, isLoading: false, isError: true, error: new Error('refetch boom'), data: { tenant: { id: 't1' } }, refetch: vi.fn() }
+    results.current = { 'portal-me': stale }
+    const html = render(PortalInsurance)
+    expect(html).toContain('Submit Certificate')
+    expect(html).toContain('showing last loaded data')
   })
 })

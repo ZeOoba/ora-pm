@@ -10,3 +10,18 @@ export function singleLeaseId(charges: Pick<Charge, 'lease_id'>[]): string | nul
   const leaseIds = new Set(charges.map(ch => ch.lease_id))
   return leaseIds.size === 1 ? [...leaseIds][0] : null
 }
+
+/**
+ * What the charges read may hide on the Pay Now page. Only the select step can be replaced by the
+ * skeleton / error panel, and only for a first load or a first-load failure. A failed background
+ * refetch (isError with data kept) and any step past 'select' (processing, done, error) must never
+ * be hidden by the charges query state: a tenant returning to the tab mid-payment keeps the
+ * "Payment Initiated" / Stripe error screen.
+ */
+export function chargesGate(
+  step: 'select' | 'processing' | 'done' | 'error',
+  q: { isLoading: boolean; isError: boolean; data: unknown },
+): 'blocking' | 'content' {
+  if (step !== 'select') return 'content'
+  return q.isLoading || (q.isError && q.data === undefined) ? 'blocking' : 'content'
+}

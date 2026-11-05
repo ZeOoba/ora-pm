@@ -4,12 +4,12 @@ import { loadStripe } from '@stripe/stripe-js'
 import { portalApi } from '../lib/portal-api'
 import { formatCurrency } from '../../lib/format'
 import type { Charge } from '../lib/portal-api'
-import { singleLeaseId } from '../lib/charges'
+import { chargesGate, singleLeaseId } from '../lib/charges'
 import { runPayAttempt } from '../lib/pay-attempt'
 import { Button } from '../../components/ui/Button'
 import { Card } from '../../components/ui/Card'
 import { Skeleton } from '../../components/ui/skeleton'
-import { QueryState } from '../../components/QueryState'
+import { QueryState, StaleDataWarning } from '../../components/QueryState'
 
 const stripePromise = loadStripe(import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY as string)
 
@@ -113,8 +113,10 @@ export function PortalPayNow() {
     }
   }
 
-  // A failed charges read must not fall through to "no open charges - you are all caught up".
-  if (isLoading || chargesQuery.isError) {
+  // A failed first load must not fall through to "no open charges - you are all caught up". Only the
+  // select step is ever replaced (see chargesGate): the processing/done/error screens are never hidden
+  // by the charges query state, and a failed background refetch with data kept does not block.
+  if (chargesGate(step, { isLoading, isError: chargesQuery.isError, data: chargesData }) === 'blocking') {
     return (
       <div className="p-6 max-w-2xl space-y-6">
         <h1 className="font-display text-2xl text-navy">Pay Now</h1>
@@ -151,6 +153,8 @@ export function PortalPayNow() {
   return (
     <div className="p-6 max-w-2xl space-y-6">
       <h1 className="font-display text-2xl text-navy">Pay Now</h1>
+
+      <StaleDataWarning query={chargesQuery} />
 
       {step === 'error' && (
         <div role="alert" className="bg-status-danger/5 border border-status-danger/30 rounded p-4 text-status-danger text-sm">{errorMsg}</div>

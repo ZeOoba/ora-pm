@@ -159,7 +159,7 @@ export function PortalAccount() {
     <div className="p-6 max-w-lg space-y-6">
       <h1 className="font-display text-2xl text-navy">Account</h1>
 
-      <QueryState query={[meQuery, leaseQuery]}>
+      <QueryState query={meQuery}>
       <Card className="p-5 space-y-3">
         <h2 className="font-medium text-navy">Profile</h2>
         <div className="text-sm text-status-neutral space-y-1">
@@ -167,7 +167,9 @@ export function PortalAccount() {
           <p><span className="text-status-neutral">Email:</span> {tenant?.contact_email ?? '—'}</p>
         </div>
       </Card>
+      </QueryState>
 
+      <QueryState query={leaseQuery}>
       <Card className="p-5 space-y-3">
         <h2 className="font-medium text-navy">Autopay</h2>
         <p className="text-sm text-status-neutral">
