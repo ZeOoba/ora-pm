@@ -121,10 +121,12 @@ const TIMED_OUT = Symbol('admin_users role lookup timed out')
 async function lookupAdminRole(supabase: SupabaseClient, email: string): Promise<AdminRoleLookup> {
   const failed = (reason: string, ...detail: string[]): AdminRoleLookup => {
     // No email, user id or token in the log line — the same hygiene as the AAL and DB error logs.
-    // Every argument is a plain string, so logging cannot throw either.
+    // A PostgREST error message can echo the request URL (email=eq.<encoded email>), so every
+    // detail is scrubbed of the email, raw and encoded, and capped. Plain strings only, so
+    // logging cannot throw either.
     console.warn(
       `[ORA PM] admin_users role lookup failed (${reason}); adminRole=null, adminRoleSource=error, access unchanged`,
-      ...detail,
+      ...detail.map((d) => redactLogDetail(d, email)),
     )
     return { source: 'error', role: null, entityScope: null }
   }
@@ -146,7 +148,7 @@ async function lookupAdminRole(supabase: SupabaseClient, email: string): Promise
     const result = await Promise.race([query, timedOut])
     if (result === TIMED_OUT) return failed(`timed out after ${ROLE_LOOKUP_TIMEOUT_MS} ms; query aborted`)
     const { data, error } = result
-    if (error) return failed('query error', describeSafely(error.code), describeSafely(error.message))
+    if (error) return failed('query error', describeSafely(error.code ?? '-'), describeSafely(error.message))
     if (data === null) return { source: 'none', role: null, entityScope: null }
     if (typeof data !== 'object') return failed('malformed result')
     // Validate the whole row. A valid role with an unreadable scope must not be recorded as
@@ -160,6 +162,21 @@ async function lookupAdminRole(supabase: SupabaseClient, email: string): Promise
   } finally {
     if (timer !== undefined) clearTimeout(timer)
   }
+}
+
+const LOG_DETAIL_MAX = 300
+
+// Removes the admin email from a log detail in every form a PostgREST error can carry it (raw and
+// encodeURIComponent-encoded, any case), then caps the detail at LOG_DETAIL_MAX characters.
+// Redaction runs before the cap so a truncated tail cannot leave a partial email behind unscanned.
+function redactLogDetail(detail: string, email: string): string {
+  let out = detail
+  if (email) {
+    for (const form of new Set([email, encodeURIComponent(email)])) {
+      out = out.replace(new RegExp(form.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), '[email]')
+    }
+  }
+  return out.length > LOG_DETAIL_MAX ? `${out.slice(0, LOG_DETAIL_MAX - 1)}…` : out
 }
 
 function isEntityScope(value: unknown): value is string[] | null {

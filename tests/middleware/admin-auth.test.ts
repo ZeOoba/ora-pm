@@ -678,4 +678,61 @@ describe('adminAuthMiddleware — admin_users role lookup (T12, recorded not enf
     expect(seen!.source).toBe('error')
     expect(warnSpy).toHaveBeenCalledTimes(1)
   })
+
+  // --- log hygiene: the admin email never reaches a log line, even inside a PostgREST message --
+  describe('failed() detail redaction', () => {
+    const OTHER = 'admin@example.test'
+    const otherEnv = { ...env, ADMIN_EMAILS: `${env.ADMIN_EMAILS}, ${OTHER}` }
+    const allLogged = () =>
+      Object.values(consoleSpy)
+        .flatMap((spy) => spy.mock.calls)
+        .map((args) => args.map(render).join(' '))
+        .join('\n')
+
+    it.each([
+      ['URL-encoded', 'GET /rest/v1/admin_users?select=role&email=eq.admin%40example.test failed'],
+      ['URL-encoded, upper-case hex', 'email=eq.ADMIN%40EXAMPLE.TEST rejected'],
+      ['raw', 'duplicate key for admin@example.test'],
+      ['raw, mixed case', 'row for Admin@Example.Test is locked'],
+    ])('redacts the admin email (%s) from the error message as [email]', async (_label, message) => {
+      asUser(OTHER)
+      armTables({ adminUser: { data: null, error: { code: 'PGRST301', message } } })
+      const res = await request(otherEnv)
+      expect(res.status).toBe(200)
+      expect(seen!.source).toBe('error')
+      expect(warnSpy).toHaveBeenCalledTimes(1)
+      const logged = allLogged()
+      expect(logged).toContain('[email]')
+      expect(logged).toContain('PGRST301')
+      expect(logged).not.toMatch(/admin@example\.test/i)
+      expect(logged).not.toMatch(/admin%40example\.test/i)
+    })
+
+    it('redacts the admin email from a thrown error', async () => {
+      asUser(OTHER)
+      armTables({ adminUser: new Error('fetch failed for email=eq.admin%40example.test') })
+      await request(otherEnv)
+      const logged = allLogged()
+      expect(logged).toContain('[email]')
+      expect(logged).not.toMatch(/admin(@|%40)example\.test/i)
+    })
+
+    it("logs a missing error code as '-', never 'undefined'", async () => {
+      armTables({ adminUser: { data: null, error: { message: 'boom' } } })
+      await request()
+      expect(warnSpy).toHaveBeenCalledTimes(1)
+      const args = warnSpy.mock.calls[0].slice(1).map(String)
+      expect(args[0]).toBe('-')
+      expect(allLogged()).not.toContain('undefined')
+    })
+
+    it('caps every logged detail at 300 characters', async () => {
+      armTables({ adminUser: { data: null, error: { code: 'X'.repeat(500), message: 'm'.repeat(5000) } } })
+      await request()
+      expect(warnSpy).toHaveBeenCalledTimes(1)
+      for (const detail of warnSpy.mock.calls[0].slice(1)) {
+        expect(String(detail).length).toBeLessThanOrEqual(300)
+      }
+    })
+  })
 })
