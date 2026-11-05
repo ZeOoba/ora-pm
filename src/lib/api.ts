@@ -47,8 +47,26 @@ async function download(
   return { blob, filename }
 }
 
+export type ListQueryParams = Record<string, string | number | boolean | null | undefined>
+
+// Builds `?a=1&b=2` (or '' when empty), omitting undefined / null / '' values.
+function buildQuery(params: ListQueryParams): string {
+  const sp = new URLSearchParams()
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined || value === null || value === '') continue
+    sp.set(key, String(value))
+  }
+  return sp.toString()
+}
+
 export const api = {
   get: <T>(path: string) => request<T>(path),
+  // Paged list endpoints return { data, total } (total = full filtered row count).
+  list: <T>(path: string, params: ListQueryParams = {}) => {
+    const qs = buildQuery(params)
+    const sep = path.includes('?') ? '&' : '?'
+    return request<{ data: T[]; total: number }>(qs ? `${path}${sep}${qs}` : path)
+  },
   post: <T>(path: string, body: unknown) =>
     request<T>(path, { method: 'POST', body: JSON.stringify(body) }),
   put: <T>(path: string, body: unknown) =>
