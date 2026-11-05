@@ -13,8 +13,8 @@ type AgingRow = ARLedgerRow & { buckets: AgingBuckets }
 type AgingResponse = { data: AgingRow[]; totals: AgingTotals }
 
 export function ARDashboard() {
-  // Own key under the 'ar-aging' prefix: Dashboard caches the bare `data` array at ['ar-aging'],
-  // this page needs the whole response (rows + totals). invalidateQueries(['ar-aging']) hits both.
+  // Shares ['ar-aging', 'buckets'] (same full response: rows + totals) with Dashboard, so the two
+  // views read one cache entry. invalidateQueries(['ar-aging']) prefix-matches it.
   const query = useQuery({
     queryKey: ['ar-aging', 'buckets'],
     queryFn: () => api.get<AgingResponse>('/reports/ar-aging'),

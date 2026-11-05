@@ -98,3 +98,17 @@ export function expiryLadderExcluded(rows: RentRollRow[], fromYear: number, year
   }
   return out
 }
+
+/** Caption clause list for leases left out of the ladder; zero-count clauses are omitted, null when none. */
+export function expiryExcludedNote(ex: ExpiryExcluded): string | null {
+  const plural = (n: number, one: string, many: string) => (n === 1 ? one : many)
+  const clauses: string[] = []
+  if (ex.noEndDate > 0) clauses.push(`${ex.noEndDate} ${plural(ex.noEndDate, 'lease', 'leases')} with no end date`)
+  if (ex.expiredBeforeWindow > 0) {
+    clauses.push(`${ex.expiredBeforeWindow} active ${plural(ex.expiredBeforeWindow, 'lease past its end date', 'leases past their end date')} (holdover)`)
+  }
+  if (ex.beyondWindow > 0) clauses.push(`${ex.beyondWindow} ${plural(ex.beyondWindow, 'lease', 'leases')} ending after the ladder window`)
+  if (clauses.length === 0) return null
+  const body = clauses.length === 1 ? clauses[0] : `${clauses.slice(0, -1).join(', ')} and ${clauses[clauses.length - 1]}`
+  return `Excludes ${body}.`
+}

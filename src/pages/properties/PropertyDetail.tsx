@@ -14,6 +14,7 @@ import { Field } from '../../components/form/Field'
 import { TextInput, NumberInput, Select } from '../../components/form/inputs'
 import { formatCurrency, formatDate, formatSF } from '../../lib/format'
 import { UnitMatrix } from '../units/UnitMatrix'
+import { leaseRowsOf } from './property-leases'
 import type { Property, RentRollRow, Unit, UnitStatus } from '../../types'
 
 type PropertyWithUnits = Property & { units: Unit[] }
@@ -57,10 +58,10 @@ export function PropertyDetail() {
   })
   const data = query.data
 
-  // Leases tab: the unpaged rent-roll report filtered to this property (there is no per-property lease endpoint).
+  // Leases tab: the per-property rent-roll report (same pattern as CAMList); only rows with a lease_id are leases.
   const rentRoll = useQuery({
-    queryKey: ['rent-roll'],
-    queryFn: () => api.get<{ data: RentRollRow[] }>('/reports/rent-roll').then(r => r.data),
+    queryKey: ['rent-roll', id],
+    queryFn: () => api.get<{ data: RentRollRow[] }>(`/reports/rent-roll?property_id=${id}`).then(r => r.data),
     enabled: !!id,
   })
 
@@ -105,7 +106,7 @@ export function PropertyDetail() {
 
   const units = data?.units ?? []
   const occupiedCount = units.filter(u => u.status === 'occupied').length
-  const leaseRows = (rentRoll.data ?? []).filter(r => r.property_id === id && r.lease_id)
+  const leaseRows = leaseRowsOf(rentRoll.data)
 
   return (
     <QueryState query={query}>

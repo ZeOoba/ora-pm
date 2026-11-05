@@ -1,11 +1,12 @@
 import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from 'recharts'
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from '../ui/chart'
 import { formatSF } from '../../lib/format'
-import type { ExpiryBucket } from './derive'
+import { expiryExcludedNote, type ExpiryBucket, type ExpiryExcluded } from './derive'
 
 const config: ChartConfig = { sf: { label: 'SF expiring', color: 'var(--color-chart-1)' } }
 
-export function ExpiryLadderChart({ ladder }: { ladder: ExpiryBucket[] }) {
+export function ExpiryLadderChart({ ladder, excluded }: { ladder: ExpiryBucket[]; excluded?: ExpiryExcluded }) {
+  const note = excluded ? expiryExcludedNote(excluded) : null
   const totalSf = ladder.reduce((s, b) => s + b.sf, 0)
   const totalLeases = ladder.reduce((s, b) => s + b.leases, 0)
   const summary = ladder.map((b) => `${b.year} ${formatSF(b.sf)}`).join(', ')
@@ -24,8 +25,9 @@ export function ExpiryLadderChart({ ladder }: { ladder: ExpiryBucket[] }) {
           </BarChart>
         </ChartContainer>
       </div>
+      {note && <p className="mt-2 text-xs text-status-neutral">{note}</p>}
       <table className="sr-only">
-        <caption>Square feet of leases expiring per calendar year, SF-weighted; leases without an end date are excluded.</caption>
+        <caption>Square feet of leases expiring per calendar year, SF-weighted. {note ?? 'No active leases are excluded.'}</caption>
         <thead>
           <tr><th scope="col">Year</th><th scope="col">Square feet</th><th scope="col">Leases</th></tr>
         </thead>

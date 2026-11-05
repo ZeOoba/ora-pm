@@ -10,7 +10,7 @@ import { formatCurrency, formatDate } from '../lib/format'
 import { AgingChart } from '../components/charts/AgingChart'
 import { OccupancyDonut } from '../components/charts/OccupancyDonut'
 import { ExpiryLadderChart } from '../components/charts/ExpiryLadderChart'
-import { expiryLadder, occupancySplit } from '../components/charts/derive'
+import { expiryLadder, expiryLadderExcluded, occupancySplit } from '../components/charts/derive'
 import type { AgingTotals } from './ar/ar-aging-view'
 import type { RentRollRow, CriticalDateRow } from '../types'
 
@@ -39,7 +39,9 @@ export function Dashboard() {
   const arTotals      = arAging.data?.totals
   const totalAR       = arTotals?.balance ?? 0
   const split         = occupancySplit(units)
-  const ladder        = expiryLadder(units, new Date().getFullYear())
+  const thisYear      = new Date().getFullYear()
+  const ladder        = expiryLadder(units, thisYear)
+  const ladderExcluded = expiryLadderExcluded(units, thisYear)
   const urgentDates   = (critDates.data ?? []).filter(
     d => d.urgency === 'urgent' || d.urgency === 'overdue'
   )
@@ -53,7 +55,7 @@ export function Dashboard() {
 
       {/* KPI strip */}
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 mb-8">
-        <KpiStat label="Occupancy" value={`${occupancyPct}%`} sub={`${occupied} of ${totalUnits} units`} />
+        <KpiStat label="Unit occupancy" value={`${occupancyPct}%`} sub={`${occupied} of ${totalUnits} units`} />
         <KpiStat label="Monthly Rent Roll" value={formatCurrency(totalRentRoll)} sub="Active leases" />
         <KpiStat label="Outstanding AR" value={formatCurrency(totalAR)} sub="Unpaid charges" warn={totalAR > 0} />
         <KpiStat label="Critical Dates" value={urgentDates.length} sub="Urgent or overdue" warn={urgentDates.length > 0} />
@@ -62,7 +64,7 @@ export function Dashboard() {
       {/* Charts: all derived from the already-fetched rent roll and AR aging responses (no extra endpoints) */}
       <div className="mb-8 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
         <OccupancyDonut split={split} />
-        <ExpiryLadderChart ladder={ladder} />
+        <ExpiryLadderChart ladder={ladder} excluded={ladderExcluded} />
         {arTotals && <AgingChart totals={arTotals} className="" />}
       </div>
 

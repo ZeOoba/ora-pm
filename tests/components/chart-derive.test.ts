@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { occupancySplit, expiryLadder, expiryLadderExcluded } from '../../src/components/charts/derive'
+import { occupancySplit, expiryLadder, expiryLadderExcluded, expiryExcludedNote } from '../../src/components/charts/derive'
 import type { RentRollRow } from '../../src/types'
 
 let n = 0
@@ -84,5 +84,19 @@ describe('expiryLadder', () => {
   it('reads the year from the date string without timezone drift', () => {
     const l = expiryLadder([row({ sf: 10, end_date: '2027-01-01' })], 2026)
     expect(l.find((b) => b.year === 2027)?.sf).toBe(10)
+  })
+})
+
+describe('expiryExcludedNote', () => {
+  it('names both clauses with counts', () => {
+    expect(expiryExcludedNote({ noEndDate: 3, expiredBeforeWindow: 2, beyondWindow: 0 }))
+      .toBe('Excludes 3 leases with no end date and 2 active leases past their end date (holdover).')
+  })
+  it('omits zero clauses and pluralises', () => {
+    expect(expiryExcludedNote({ noEndDate: 1, expiredBeforeWindow: 0, beyondWindow: 0 })).toBe('Excludes 1 lease with no end date.')
+    expect(expiryExcludedNote({ noEndDate: 0, expiredBeforeWindow: 1, beyondWindow: 0 })).toBe('Excludes 1 active lease past its end date (holdover).')
+  })
+  it('is null when nothing is excluded from the ladder', () => {
+    expect(expiryExcludedNote({ noEndDate: 0, expiredBeforeWindow: 0, beyondWindow: 0 })).toBeNull()
   })
 })

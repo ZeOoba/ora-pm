@@ -125,22 +125,37 @@ describe('mutations on the detail pages are unchanged', () => {
 
   it('PropertyDetail add-unit', () => {
     const s = src('properties/PropertyDetail.tsx')
-    expect(s).toContain("path: '/units'")
-    expect(s).toContain("invalidate: [['units', id ?? ''], ['property', id ?? '']]")
+    expect(s).toMatch(/useSaveMutation<Unit>\(\{\s*method: 'post',\s*path: '\/units',\s*invalidate: \[\['units', id \?\? ''\], \['property', id \?\? ''\]\],/)
+    expect(s).toMatch(/const EMPTY_UNIT: UnitForm = \{\s*suite: '',\s*floor: '',\s*sf: '',\s*status: 'vacant',\s*\}/)
+    expect(s).toContain('useState<UnitForm>(EMPTY_UNIT)')
     expect(s).toMatch(/property_id: id,\s*suite: unitForm\.suite\.trim\(\),\s*floor: unitForm\.floor\.trim\(\) \|\| null,\s*sf: Number\(unitForm\.sf\),\s*status: unitForm\.status,/)
   })
 
-  it('LeaseDetail amendments and notices', () => {
+  it('PropertyDetail reads the per-property rent roll', () => {
+    const s = src('properties/PropertyDetail.tsx')
+    expect(s).toContain("queryKey: ['rent-roll', id]")
+    expect(s).toContain('/reports/rent-roll?property_id=${id}')
+  })
+
+  it('LeaseDetail amendments', () => {
     const s = src('leases/LeaseDetail.tsx')
-    expect(s).toContain('path: `/leases/${id}/amendments`')
+    expect(s).toMatch(/useSaveMutation<LeaseAmendment>\(\{\s*method: 'post',\s*path: `\/leases\/\$\{id\}\/amendments`,\s*invalidate: \[\['lease', id \?\? ''\]\],/)
+    expect(s).toMatch(/const EMPTY_AMENDMENT: AmendmentForm = \{\s*effective_date: '',\s*description: '',\s*document_path: '',\s*\}/)
+    expect(s).toContain('useState<AmendmentForm>(EMPTY_AMENDMENT)')
     expect(s).toMatch(/effective_date: amendForm\.effective_date,\s*description: amendForm\.description\.trim\(\),\s*document_path: amendForm\.document_path\.trim\(\) \|\| null,\s*changes: \{\},/)
-    expect(s).toContain('path: `/leases/${leaseId}/notices`')
+  })
+
+  it('LeaseDetail notices', () => {
+    const s = src('leases/LeaseDetail.tsx')
+    expect(s).toMatch(/useSaveMutation<TenantNotice>\(\{\s*method: 'post',\s*path: `\/leases\/\$\{leaseId\}\/notices`,\s*invalidate: \[\['lease', leaseId\]\],/)
+    expect(s).toMatch(/useState\(\{ notice_type: 'late_payment', sent_date: new Date\(\)\.toISOString\(\)\.slice\(0,10\), method: 'email', notes: '' \}\)/)
     expect(s).toContain('noticeMutation.mutate(form)')
   })
 
   it('TenantDetail correspondence and the portal admin component', () => {
     const s = src('tenants/TenantDetail.tsx')
-    expect(s).toContain('path: `/tenants/${tenantId}/correspondence`')
+    expect(s).toMatch(/useSaveMutation<CorrespondenceEntry>\(\{\s*method: 'post',\s*path: `\/tenants\/\$\{tenantId\}\/correspondence`,\s*invalidate: \[\['tenant', tenantId\]\],/)
+    expect(s).toMatch(/useState\(\{\s*direction: 'outbound', contact_date: new Date\(\)\.toISOString\(\)\.slice\(0,10\),\s*subject: '', summary: '', method: 'phone',\s*\}\)/)
     expect(s).toContain('mutation.mutate(form)')
     expect(s).toContain('<TenantPortalAdmin tenant={data} />')
   })

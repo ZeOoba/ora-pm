@@ -16,8 +16,8 @@ export function OccupancyDonut({ split }: { split: OccupancySplit }) {
 
   return (
     <div className="rounded-lg border border-border bg-card p-4">
-      <h2 className="mb-2 font-display text-base text-navy">Occupancy by SF</h2>
-      <div role="img" aria-label={`Occupancy donut chart. ${summary}`}>
+      <h2 className="mb-2 font-display text-base text-navy">SF occupancy</h2>
+      <div role="img" aria-label={`SF occupancy donut chart. ${summary}`}>
         <div className="relative">
           <ChartContainer config={config} className="aspect-auto h-44 w-full" aria-hidden="true">
             <PieChart>
@@ -40,7 +40,7 @@ export function OccupancyDonut({ split }: { split: OccupancySplit }) {
       </div>
       <table className="sr-only">
         <caption>
-          Occupied versus vacant square feet. Units with status notice count as occupied; unavailable units are excluded from both.
+          SF occupancy: occupied versus vacant square feet. Units with status notice count as occupied; unavailable units are excluded from both.
         </caption>
         <thead>
           <tr><th scope="col">Status</th><th scope="col">Square feet</th></tr>
