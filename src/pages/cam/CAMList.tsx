@@ -4,6 +4,7 @@ import { toast } from 'sonner'
 import { api } from '../../lib/api'
 import { runExclusive } from '../../lib/run-exclusive'
 import { ConfirmDialog } from '../../components/ConfirmDialog'
+import { TrueUpConfirmDescription } from './TrueUpConfirmDescription'
 import { PageHeader } from '../../components/PageHeader'
 import { StatusBadge } from '../../components/StatusBadge'
 import { Field } from '../../components/form/Field'
@@ -338,20 +339,7 @@ export function CAMList() {
         open={confirmRow !== null}
         onOpenChange={(open) => { if (!open) setConfirmRow(null) }}
         title="Approve & bill this true-up?"
-        description={dialogRow && (
-          dialogRow.true_up_amount < 0 ? (
-            <>
-              {dialogRow.leases?.tenants?.name ?? 'This tenant'} ({dialogRow.reconciliation_year}) is owed a credit of{' '}
-              <span className="font-mono">{formatCurrency(Math.abs(dialogRow.true_up_amount))}</span>. Approving marks it billed
-              and flags the credit for manual handling — nothing is posted to the ledger.
-            </>
-          ) : (
-            <>
-              Posts a <span className="font-mono">{formatCurrency(dialogRow.true_up_amount)}</span> true-up charge for{' '}
-              {dialogRow.leases?.tenants?.name ?? 'this tenant'} ({dialogRow.reconciliation_year}) to the tenant ledger.
-            </>
-          )
-        )}
+        description={dialogRow && <TrueUpConfirmDescription row={dialogRow} />}
         confirmLabel="Approve & Bill"
         pendingLabel="Billing…"
         pending={confirmRow !== null && approvingId === confirmRow.id}
