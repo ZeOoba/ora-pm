@@ -4,18 +4,8 @@ import { portalSupabase } from './lib/supabase-portal'
 import { checkAal2Guard, type AalGuardResult } from './lib/mfa-guard'
 import { PortalMfaChallenge } from './components/PortalMfaChallenge'
 import type { Session } from '@supabase/supabase-js'
-import { Toaster } from '@/components/ui/sonner'
 
 export function PortalApp() {
-  return (
-    <>
-      <PortalAppBody />
-      <Toaster />
-    </>
-  )
-}
-
-function PortalAppBody() {
   const [session, setSession] = useState<Session | null | undefined>(undefined)
   // 'checking' until the first getAuthenticatorAssuranceLevel() call resolves for a
   // given session, so a tenant who needs a step-up never flashes into the router
