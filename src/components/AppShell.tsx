@@ -1,72 +1,187 @@
-import { Link, useLocation } from 'react-router'
+import { Fragment, useEffect, useState } from 'react'
+import { Link, useLocation, useNavigate } from 'react-router'
+import { ChevronRight, LogOut, Menu, PanelLeftClose, PanelLeftOpen, Search, User } from 'lucide-react'
+import { supabase } from '@/lib/supabase'
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from '@/components/ui/sheet'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
+import { cn } from '@/lib/utils'
+import { NavList } from './NavList'
+import { CommandMenu } from './CommandMenu'
+import { breadcrumbFor } from './nav-config'
 
-type NavItem = { to: string; label: string }
-type NavGroup = { heading: string; items: NavItem[] }
+const RAIL_KEY = 'ora-pm.nav-collapsed'
 
-const NAV: NavGroup[] = [
-  { heading: 'Overview', items: [
-    { to: '/', label: 'Dashboard' },
-    { to: '/critical-dates', label: 'Critical Dates' },
-  ]},
-  { heading: 'Assets', items: [
-    { to: '/properties', label: 'Properties' },
-    { to: '/units', label: 'Unit Matrix' },
-    { to: '/tenants', label: 'Tenants' },
-    { to: '/leases', label: 'Leases' },
-    { to: '/renewals', label: 'Renewals' },
-    { to: '/insurance', label: 'Insurance' },
-  ]},
-  { heading: 'Financials', items: [
-    { to: '/billing', label: 'Billing' },
-    { to: '/payments', label: 'Payments' },
-    { to: '/ar', label: 'AR / Collections' },
-    { to: '/cam', label: 'CAM' },
-    { to: '/expenses', label: 'Expenses' },
-    { to: '/budgets', label: 'Budgets' },
-  ]},
-  { heading: 'Reports', items: [
-    { to: '/rent-roll', label: 'Rent Roll' },
-    { to: '/exports', label: 'QB Export' },
-  ]},
-]
+function readCollapsed(): boolean {
+  try {
+    return localStorage.getItem(RAIL_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
+function writeCollapsed(v: boolean) {
+  try {
+    localStorage.setItem(RAIL_KEY, v ? '1' : '0')
+  } catch {
+    /* storage unavailable (private mode / blocked): collapse state just isn't persisted */
+  }
+}
+
+function Brand({ compact = false }: { compact?: boolean }) {
+  return (
+    <div className={cn('border-b border-white/10 py-5', compact ? 'px-0 text-center' : 'px-5')}>
+      <p className="text-[10px] font-semibold uppercase tracking-[0.15em] text-gold">{compact ? 'ORA' : 'Oxford Realty'}</p>
+      {!compact && <p className="mt-0.5 font-display text-sm">Property Manager</p>}
+    </div>
+  )
+}
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const { pathname } = useLocation()
+  const navigate = useNavigate()
+  const [collapsed, setCollapsed] = useState(false)
+  const [mobileOpen, setMobileOpen] = useState(false)
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [email, setEmail] = useState<string | null>(null)
+  const [isMac, setIsMac] = useState(false)
+
+  useEffect(() => {
+    setCollapsed(readCollapsed())
+    setIsMac(/mac|iphone|ipad/i.test(navigator.platform || navigator.userAgent))
+  }, [])
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => setEmail(data.session?.user.email ?? null))
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, s) => setEmail(s?.user.email ?? null))
+    return () => subscription.unsubscribe()
+  }, [])
+
+  function toggleCollapsed() {
+    const next = !collapsed
+    setCollapsed(next)
+    writeCollapsed(next)
+  }
+
+  async function signOut() {
+    await supabase.auth.signOut()
+    navigate('/login', { replace: true })
+  }
+
+  const crumbs = breadcrumbFor(pathname)
+  const shortcut = isMac ? '⌘K' : 'Ctrl K'
+
   return (
-    <div className="flex h-screen bg-ivory">
-      <aside className="w-60 bg-navy text-white flex flex-col shrink-0">
-        <div className="px-5 py-5 border-b border-white/10">
-          <p className="text-[10px] font-semibold uppercase tracking-[0.15em] text-gold">Oxford Realty</p>
-          <p className="text-sm font-display mt-0.5">Property Manager</p>
-        </div>
-        <nav className="flex-1 overflow-y-auto py-3">
-          {NAV.map(group => (
-            <div key={group.heading} className="mb-4">
-              <p className="px-5 mb-1 text-[10px] font-semibold uppercase tracking-wider text-white/40">{group.heading}</p>
-              {group.items.map(({ to, label }) => {
-                const active = pathname === to
-                return (
-                  <Link
-                    key={to}
-                    to={to}
-                    className={`flex items-center pl-5 pr-4 py-1.5 text-sm transition-colors border-l-2 ${
-                      active
-                        ? 'border-gold bg-white/5 text-white font-medium'
-                        : 'border-transparent text-white/70 hover:text-white hover:bg-white/5'
-                    }`}
-                  >
-                    {label}
-                  </Link>
-                )
-              })}
-            </div>
-          ))}
-        </nav>
-        <div className="px-5 py-3 border-t border-white/10 text-[11px] text-white/40 font-mono">
-          ORA PM · v1
+    <div className="flex h-screen bg-background">
+      {/* >= md: collapsible rail (240px expanded / 64px icons-only) */}
+      <aside
+        className={cn(
+          'hidden shrink-0 flex-col bg-primary text-primary-foreground transition-[width] duration-200 md:flex',
+          collapsed ? 'w-16' : 'w-60',
+        )}
+      >
+        <Brand compact={collapsed} />
+        <NavList pathname={pathname} collapsed={collapsed} />
+        <div className={cn('flex items-center border-t border-white/10 py-2', collapsed ? 'justify-center' : 'justify-between px-5')}>
+          {!collapsed && <span className="font-mono text-[11px] text-white/40">ORA PM · v1</span>}
+          <button
+            type="button"
+            onClick={toggleCollapsed}
+            aria-label={collapsed ? 'Expand navigation' : 'Collapse navigation'}
+            className="rounded p-1.5 text-white/60 hover:bg-white/10 hover:text-white"
+          >
+            {collapsed ? <PanelLeftOpen className="size-4" /> : <PanelLeftClose className="size-4" />}
+          </button>
         </div>
       </aside>
-      <main className="flex-1 overflow-y-auto p-8">{children}</main>
+
+      <div className="flex min-w-0 flex-1 flex-col">
+        <header className="flex h-14 shrink-0 items-center gap-3 border-b border-border bg-card px-4 md:px-8">
+          {/* < md: menu button opens the nav in a sheet */}
+          <div className="md:hidden">
+            <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
+              <SheetTrigger asChild>
+                <button type="button" aria-label="Open navigation" className="rounded p-1.5 text-foreground hover:bg-muted">
+                  <Menu className="size-5" />
+                </button>
+              </SheetTrigger>
+              <SheetContent side="left" className="w-60 gap-0 border-r-0 bg-primary p-0 text-primary-foreground [&>button]:text-white">
+                <SheetHeader className="sr-only">
+                  <SheetTitle>Navigation</SheetTitle>
+                  <SheetDescription>Main navigation</SheetDescription>
+                </SheetHeader>
+                <Brand />
+                <NavList pathname={pathname} onNavigate={() => setMobileOpen(false)} />
+              </SheetContent>
+            </Sheet>
+          </div>
+          <span className="font-display text-sm font-semibold text-primary md:hidden">Property Manager</span>
+
+          <nav aria-label="Breadcrumb" className="hidden min-w-0 md:block">
+            <ol className="flex items-center gap-1.5 text-sm text-muted-foreground">
+              {crumbs.map((c, i) => {
+                const last = i === crumbs.length - 1
+                return (
+                  <Fragment key={`${c.label}-${i}`}>
+                    {i > 0 && (
+                      <li aria-hidden="true" className="flex">
+                        <ChevronRight className="size-3.5 shrink-0" />
+                      </li>
+                    )}
+                    <li className={cn('truncate', last && 'font-medium text-foreground')} aria-current={last ? 'page' : undefined}>
+                      {c.to && !last ? (
+                        <Link to={c.to} className="hover:text-foreground">
+                          {c.label}
+                        </Link>
+                      ) : (
+                        c.label
+                      )}
+                    </li>
+                  </Fragment>
+                )
+              })}
+            </ol>
+          </nav>
+
+          <div className="ml-auto flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setSearchOpen(true)}
+              aria-label="Search"
+              className="flex items-center gap-2 rounded-md border border-border bg-background px-3 py-1.5 text-sm text-muted-foreground hover:bg-muted"
+            >
+              <Search className="size-4" aria-hidden="true" />
+              <span className="hidden sm:inline">Search</span>
+              <kbd className="hidden rounded border border-border bg-muted px-1.5 font-mono text-[11px] sm:inline">{shortcut}</kbd>
+            </button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button type="button" aria-label="User menu" className="rounded-full border border-border bg-background p-1.5 text-foreground hover:bg-muted">
+                  <User className="size-4" />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="min-w-48">
+                <DropdownMenuLabel className="truncate font-normal text-muted-foreground">{email ?? 'Signed in'}</DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onSelect={() => void signOut()}>
+                  <LogOut className="size-4" />
+                  Sign out
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+        </header>
+        <main className="flex-1 overflow-y-auto bg-background p-4 md:p-8">{children}</main>
+      </div>
+      <CommandMenu open={searchOpen} onOpenChange={setSearchOpen} />
     </div>
   )
 }
