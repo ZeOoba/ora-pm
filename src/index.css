@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "tw-animate-css";
 
 @theme {
   /* Brand */
@@ -65,5 +66,17 @@
   }
   h1, h2, h3 {
     @apply font-display;
+  }
+}
+
+/* Respect reduced motion: disable shadcn enter/exit animations and transitions globally. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }
