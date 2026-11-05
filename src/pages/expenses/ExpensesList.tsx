@@ -2,6 +2,7 @@ import { useCallback, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { api } from '../../lib/api'
+import { runExclusive } from '../../lib/run-exclusive'
 import { ConfirmDialog } from '../../components/ConfirmDialog'
 import { useSaveMutation } from '../../lib/mutations'
 import { formatCurrency, formatDate } from '../../lib/format'
@@ -207,20 +208,20 @@ export function ExpensesList() {
   const columns = useMemo(() => buildColumns((id) => setDeleteId(id)), [])
 
   async function confirmDelete() {
-    if (!deleteId || deleteInFlight.current) return
-    deleteInFlight.current = true
-    setDeleting(true)
-    try {
-      await api.del(`/expenses/${deleteId}`)
-      await qc.invalidateQueries({ queryKey: ['expenses'] })
-      toast.success('Expense deleted')
-    } catch (e) {
-      toast.error(`Failed to delete expense: ${(e as Error).message}`)
-    } finally {
-      deleteInFlight.current = false
-      setDeleting(false)
-      setDeleteId(null)
-    }
+    if (!deleteId) return
+    await runExclusive(deleteInFlight, async () => {
+      setDeleting(true)
+      try {
+        await api.del(`/expenses/${deleteId}`)
+        await qc.invalidateQueries({ queryKey: ['expenses'] })
+        toast.success('Expense deleted')
+      } catch (e) {
+        toast.error(`Failed to delete expense: ${(e as Error).message}`)
+      } finally {
+        setDeleting(false)
+        setDeleteId(null)
+      }
+    })
   }
 
   function handleCancel() {

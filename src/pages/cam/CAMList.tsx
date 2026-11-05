@@ -2,6 +2,7 @@ import { useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { api } from '../../lib/api'
+import { runExclusive } from '../../lib/run-exclusive'
 import { ConfirmDialog } from '../../components/ConfirmDialog'
 import { PageHeader } from '../../components/PageHeader'
 import { StatusBadge } from '../../components/StatusBadge'
@@ -28,10 +29,9 @@ export function CAMList() {
   const [calcError, setCalcError] = useState<string | null>(null)
   const [approvingId, setApprovingId] = useState<string | null>(null)
   const [confirmRow, setConfirmRow] = useState<CAMRow | null>(null)
-  // Last confirmed row, kept after close so the dialog text doesn't blank during the exit animation.
-  const lastConfirmRow = useRef<CAMRow | null>(null)
-  if (confirmRow) lastConfirmRow.current = confirmRow
-  const dialogRow = confirmRow ?? lastConfirmRow.current
+  // Row shown in the dialog text. Set alongside confirmRow but NOT cleared on close, so the text
+  // doesn't blank during the exit animation.
+  const [dialogRow, setDialogRow] = useState<CAMRow | null>(null)
   // Synchronous in-flight guard (state updates are async, so a fast double click could slip past `approvingId`).
   const approveInFlight = useRef(false)
 
@@ -117,25 +117,24 @@ export function CAMList() {
   // Endpoint and payload unchanged (POST /cam/:id/approve, {}) — only the confirmation UI moved
   // from the browser confirm prompt to ConfirmDialog, and the error from a browser alert to a toast.
   async function handleApprove(row: CAMRow) {
-    if (approveInFlight.current) return
-    approveInFlight.current = true
-    setApprovingId(row.id)
-    try {
-      await api.post<{ success: boolean; true_up_amount: number }>(`/cam/${row.id}/approve`, {})
-      await Promise.all([
-        qc.invalidateQueries({ queryKey: ['cam'] }),
-        qc.invalidateQueries({ queryKey: ['ar-aging'] }),
-        qc.invalidateQueries({ queryKey: ['charges'] }),
-      ])
-      toast.success('True-up approved and posted to the tenant ledger')
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Approve failed.')
-    } finally {
-      // Closed on failure too: re-posting a ledger charge must be a fresh, deliberate click.
-      approveInFlight.current = false
-      setApprovingId(null)
-      setConfirmRow(null)
-    }
+    await runExclusive(approveInFlight, async () => {
+      setApprovingId(row.id)
+      try {
+        await api.post<{ success: boolean; true_up_amount: number }>(`/cam/${row.id}/approve`, {})
+        await Promise.all([
+          qc.invalidateQueries({ queryKey: ['cam'] }),
+          qc.invalidateQueries({ queryKey: ['ar-aging'] }),
+          qc.invalidateQueries({ queryKey: ['charges'] }),
+        ])
+        toast.success('True-up approved and posted to the tenant ledger')
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : 'Approve failed.')
+      } finally {
+        // Closed on failure too: re-posting a ledger charge must be a fresh, deliberate click.
+        setApprovingId(null)
+        setConfirmRow(null)
+      }
+    })
   }
 
   // ── Render ─────────────────────────────────────────────────────────────────
@@ -306,7 +305,7 @@ export function CAMList() {
                   <td className="px-4 py-3">
                     {row.status === 'draft' ? (
                       <button
-                        onClick={() => setConfirmRow(row)}
+                        onClick={() => { setDialogRow(row); setConfirmRow(row) }}
                         disabled={isApproving}
                         className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium transition-colors
                           ${isApproving

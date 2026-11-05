@@ -1,7 +1,8 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { api } from '../../lib/api'
+import { runExclusive } from '../../lib/run-exclusive'
 import { ConfirmDialog } from '../../components/ConfirmDialog'
 
 interface Tenant {
@@ -16,6 +17,8 @@ export function TenantPortalAdmin({ tenant }: { tenant: Tenant }) {
   const [errorMsg, setErrorMsg] = useState('')
   const [confirmRevoke, setConfirmRevoke] = useState(false)
   const [revoking, setRevoking] = useState(false)
+  // Synchronous in-flight guard (state updates are async, so a fast double click could slip past `revoking`).
+  const revokeInFlight = useRef(false)
   const qc = useQueryClient()
 
   async function invite() {
@@ -32,18 +35,20 @@ export function TenantPortalAdmin({ tenant }: { tenant: Tenant }) {
   }
 
   async function revoke() {
-    setRevoking(true)
-    try {
-      await api.del(`/admin/tenants/${tenant.id}/revoke-access`)
-      await qc.invalidateQueries({ queryKey: ['tenant', tenant.id] })
-      toast.success(`Portal access revoked for ${tenant.name}`)
-    } catch (e) {
-      // Surface the failure so a revoke can't silently no-op.
-      toast.error(`Failed to revoke access: ${(e as Error).message}`)
-    } finally {
-      setRevoking(false)
-      setConfirmRevoke(false)
-    }
+    await runExclusive(revokeInFlight, async () => {
+      setRevoking(true)
+      try {
+        await api.del(`/admin/tenants/${tenant.id}/revoke-access`)
+        await qc.invalidateQueries({ queryKey: ['tenant', tenant.id] })
+        toast.success(`Portal access revoked for ${tenant.name}`)
+      } catch (e) {
+        // Surface the failure so a revoke can't silently no-op.
+        toast.error(`Failed to revoke access: ${(e as Error).message}`)
+      } finally {
+        setRevoking(false)
+        setConfirmRevoke(false)
+      }
+    })
   }
 
   const hasAccess = !!tenant.auth_user_id
