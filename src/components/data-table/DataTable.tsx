@@ -9,8 +9,8 @@ import { Button } from '@/components/ui/Button'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import { columnLabel, tableFeaturesConfig, type DataTableColumnDef } from './columns'
-import { toCsv, downloadCsv, type CsvColumn } from './csv'
+import { buildCsvColumns, columnLabel, tableFeaturesConfig, type DataTableColumnDef } from './columns'
+import { toCsv, downloadCsv } from './csv'
 import { DataTablePager } from './DataTablePager'
 import { DataTableToolbar, type FilterDef } from './DataTableToolbar'
 import {
@@ -39,7 +39,11 @@ export type DataTableProps<T extends RowData> = {
   bulkActions?: (selected: T[], clearSelection: () => void) => ReactNode
   /** Enables the Export CSV button (filename without extension is fine). */
   csvFilename?: string
-  /** Defaults to row.id when present, else the row index. */
+  /**
+   * Defaults to row.id when present, else the row index. The index fallback is
+   * unstable across pages/sorts (selection would follow position, not the row),
+   * so pass getRowId for any rows without an `id`.
+   */
   getRowId?: (row: T, index: number) => string
   initialPageSize?: number
   initialSort?: { id: string; desc: boolean }
@@ -142,10 +146,13 @@ export function DataTable<T extends RowData>({
   // Debounced (300 ms) search -> state.q, resetting to the first page.
   useEffect(() => {
     const t = setTimeout(() => {
-      setState((s) => (s.q === searchText ? s : { ...s, q: searchText, pageIndex: 0 }))
+      // Compare trimmed values: whitespace-only edits must not reset paging/selection.
+      if (state.q?.trim() === searchText.trim()) return
+      setState((s) => ({ ...s, q: searchText, pageIndex: 0 }))
       setRowSelection({})
     }, 300)
     return () => clearTimeout(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- re-arm on searchText only; state.q read at fire time
   }, [searchText])
 
   const params = useMemo(() => toListParams(state), [state])
@@ -164,9 +171,16 @@ export function DataTable<T extends RowData>({
     }
   }, [query.data, state.pageIndex, update])
 
+  // Sorting is opt-in. A table-level `enableSorting: false` would override
+  // column-level `true` in v9, so normalise per column instead.
+  const sortableOptIn = useMemo(
+    () => columns.map((c) => ({ ...c, enableSorting: c.enableSorting === true })) as typeof columns,
+    [columns],
+  )
+
   const table = useTable<typeof tableFeaturesConfig, T>({
     features: tableFeaturesConfig,
-    columns,
+    columns: sortableOptIn,
     data: rows,
     getRowId,
     rowCount: total,
@@ -199,16 +213,7 @@ export function DataTable<T extends RowData>({
     setExporting(true)
     try {
       const { rows: all, total: grand, truncated } = await collectPages(fetchPage, state)
-      const cols: CsvColumn<T>[] = []
-      for (const col of visibleColumns) {
-        const meta = col.columnDef.meta
-        const accessor = meta?.csv ?? col.accessorFn
-        if (!accessor) continue
-        cols.push({
-          header: columnLabel(col),
-          accessor: (row: T) => (meta?.csv ? meta.csv(row) : col.accessorFn?.(row, 0)),
-        })
-      }
+      const cols = buildCsvColumns<T>(visibleColumns)
       downloadCsv(csvFilename ?? 'export', toCsv(all, cols))
       if (truncated) {
         toast.warning(
@@ -383,6 +388,7 @@ export function DataTable<T extends RowData>({
         pageIndex={state.pageIndex}
         pageSize={state.pageSize}
         total={total}
+        hideRange={query.isError && !query.data}
         onPageChange={(pageIndex) => update((s) => ({ ...s, pageIndex }))}
         onPageSizeChange={(pageSize) => update((s) => ({ ...s, pageSize, pageIndex: 0 }))}
       />

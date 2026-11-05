@@ -98,3 +98,18 @@ describe('collectPages', () => {
     expect(fetchPage).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('toListParams reserved keys', () => {
+  it('ignores filters that collide with reserved keys', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const p = toListParams({
+      ...base,
+      pageIndex: 1,
+      sort: { id: 'name', desc: false },
+      q: 'x',
+      filters: { limit: '999', offset: '7', sort: 'evil', dir: 'desc', q: 'y', status: 'open' },
+    })
+    expect(p).toMatchObject({ limit: 50, offset: 50, sort: 'name', dir: 'asc', q: 'x', status: 'open' })
+    warn.mockRestore()
+  })
+})

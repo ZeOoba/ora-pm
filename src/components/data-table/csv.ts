@@ -2,9 +2,14 @@
 
 export type CsvColumn<T> = { header: string; accessor: (row: T) => unknown }
 
+// Spreadsheet formula injection: strings starting with these are neutralised
+// with a leading apostrophe. Numbers are never touched (negatives stay numeric).
+const FORMULA_START = /^[=+\-@\t\r]/
+
 function cell(value: unknown): string {
   if (value === null || value === undefined) return ''
-  const s = typeof value === 'string' ? value : String(value)
+  let s = typeof value === 'string' ? value : String(value)
+  if (typeof value === 'string' && FORMULA_START.test(s)) s = `'${s}`
   return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
 }
 
@@ -18,7 +23,7 @@ export function toCsv<T>(rows: T[], columns: CsvColumn<T>[]): string {
 
 export function downloadCsv(filename: string, csv: string): void {
   // BOM so Excel reads UTF-8 correctly.
-  const blob = new Blob(['﻿', csv], { type: 'text/csv;charset=utf-8' })
+  const blob = new Blob(['\uFEFF', csv], { type: 'text/csv;charset=utf-8' })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
@@ -26,5 +31,6 @@ export function downloadCsv(filename: string, csv: string): void {
   document.body.appendChild(a)
   a.click()
   a.remove()
-  URL.revokeObjectURL(url)
+  // Defer so the browser can start the download before the URL is released.
+  setTimeout(() => URL.revokeObjectURL(url), 0)
 }

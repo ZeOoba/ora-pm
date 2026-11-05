@@ -26,6 +26,8 @@ export const DEFAULT_PAGE_SIZE = 50
 export const EXPORT_PAGE_LIMIT = 200
 export const EXPORT_MAX_ROWS = 2000
 
+const RESERVED_KEYS = new Set(['limit', 'offset', 'sort', 'dir', 'q'])
+
 export function toListParams(state: TableState): ListParams {
   const params: ListParams = {
     limit: state.pageSize,
@@ -38,9 +40,19 @@ export function toListParams(state: TableState): ListParams {
   const q = state.q?.trim()
   if (q) params.q = q
   for (const [key, value] of Object.entries(state.filters)) {
+    if (RESERVED_KEYS.has(key)) {
+      if (import.meta.env?.DEV) console.warn(`DataTable: filter id "${key}" is reserved and was ignored`)
+      continue
+    }
     if (value !== '' && value !== undefined) params[key] = value
   }
   return params
+}
+
+/** Page-size choices; includes a non-standard current size so the Select can show it. */
+export function pageSizeOptions(pageSize: number): number[] {
+  const base: number[] = [...PAGE_SIZES]
+  return base.includes(pageSize) ? base : [...base, pageSize].sort((a, b) => a - b)
 }
 
 export function pageCount(total: number, pageSize: number): number {

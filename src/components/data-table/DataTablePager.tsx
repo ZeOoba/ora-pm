@@ -1,6 +1,6 @@
 import { Button } from '@/components/ui/Button'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { PAGE_SIZES, pageCount, rangeLabel } from './table-state'
+import { pageCount, pageSizeOptions, rangeLabel } from './table-state'
 
 export function DataTablePager({
   pageIndex,
@@ -8,18 +8,22 @@ export function DataTablePager({
   total,
   onPageChange,
   onPageSizeChange,
+  hideRange = false,
 }: {
   pageIndex: number
   pageSize: number
   total: number
   onPageChange: (pageIndex: number) => void
   onPageSizeChange: (pageSize: number) => void
+  /** Hide the "Showing x of y" label (e.g. query errored with no data). */
+  hideRange?: boolean
 }) {
   const pages = pageCount(total, pageSize)
+  const sizes = pageSizeOptions(pageSize)
   return (
     <div className="flex flex-wrap items-center justify-between gap-3 px-1 py-3 text-sm text-status-neutral">
       <span className="font-mono tabular-nums" aria-live="polite">
-        {rangeLabel(pageIndex, pageSize, total)}
+        {hideRange ? '' : rangeLabel(pageIndex, pageSize, total)}
       </span>
       <div className="flex items-center gap-3">
         <label className="flex items-center gap-2">
@@ -29,7 +33,7 @@ export function DataTablePager({
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              {PAGE_SIZES.map((n) => (
+              {sizes.map((n) => (
                 <SelectItem key={n} value={String(n)}>
                   {n}
                 </SelectItem>

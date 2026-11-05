@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest'
-import { toCsv } from '../../src/components/data-table/csv'
+import { describe, it, expect, vi } from 'vitest'
+import { toCsv, downloadCsv } from '../../src/components/data-table/csv'
 
 type Row = { name: string; rent: number | null; note?: string | null }
 const cols = [
@@ -36,5 +36,39 @@ describe('toCsv', () => {
 
   it('quotes headers that need it', () => {
     expect(toCsv([], [{ header: 'Rent, $', accessor: () => 1 }])).toBe('"Rent, $"')
+  })
+})
+
+describe('toCsv formula injection', () => {
+  it.each(['=1+1', '+SUM(A1)', '-2+3', '@cmd', '\tx', '\rx'])('prefixes %j with an apostrophe', (v) => {
+    const out = toCsv([{ name: v, rent: 1 }], cols).slice('Name,Rent,Note\r\n'.length)
+    expect(out.startsWith("'") || out.startsWith('"\'')).toBe(true)
+  })
+
+  it('leaves negative numbers as numbers', () => {
+    expect(toCsv([{ name: 'A', rent: -5 }], cols)).toContain('A,-5,')
+  })
+
+  it('does not touch strings that merely contain a trigger char', () => {
+    expect(toCsv([{ name: 'a=b', rent: 1 }], cols)).toContain('\r\na=b,')
+  })
+})
+
+describe('downloadCsv', () => {
+  it('writes the BOM as an escape and defers revokeObjectURL', () => {
+    vi.useFakeTimers()
+    const el = { click: vi.fn(), remove: vi.fn(), href: '', download: '' }
+    const blobs: unknown[][] = []
+    vi.stubGlobal('Blob', class { constructor(parts: unknown[]) { blobs.push(parts) } })
+    const revoke = vi.fn()
+    vi.stubGlobal('URL', { createObjectURL: () => 'blob:x', revokeObjectURL: revoke })
+    vi.stubGlobal('document', { createElement: () => el, body: { appendChild: vi.fn() } })
+    downloadCsv('f', 'a,b')
+    expect(blobs[0][0]).toBe('\uFEFF')
+    expect(revoke).not.toHaveBeenCalled()
+    vi.runAllTimers()
+    expect(revoke).toHaveBeenCalledWith('blob:x')
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
   })
 })

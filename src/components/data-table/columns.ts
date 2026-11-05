@@ -28,6 +28,8 @@ export const tableFeaturesConfig = tableFeatures({
   columnMeta: metaHelper<DataTableColumnMeta>(),
 })
 
+import type { CsvColumn } from './csv'
+
 export type DataTableFeatures = typeof tableFeaturesConfig
 
 // TValue is `any` so accessor columns of differing value types fit in one array.
@@ -41,6 +43,32 @@ export function columnLabel(column: {
 }): string {
   const { header, meta } = column.columnDef
   return typeof header === 'string' ? header : (meta?.csvHeader ?? column.id)
+}
+
+/** Minimal column shape needed to build CSV columns (TanStack Column satisfies it). */
+export type CsvSourceColumn = {
+  id: string
+  columnDef: { header?: unknown; meta?: DataTableColumnMeta }
+  accessorFn?: ((row: any, index: number) => unknown) | undefined // eslint-disable-line @typescript-eslint/no-explicit-any
+}
+
+/**
+ * Pure: turn (visible) columns into CSV columns. Skips display columns (no
+ * accessor and no meta.csv, e.g. checkbox/action columns); meta.csv wins over
+ * the accessor.
+ */
+export function buildCsvColumns<T>(columns: CsvSourceColumn[]): CsvColumn<T>[] {
+  const out: CsvColumn<T>[] = []
+  for (const col of columns) {
+    const csv = col.columnDef.meta?.csv
+    const accessorFn = col.accessorFn
+    if (!csv && !accessorFn) continue
+    out.push({
+      header: columnLabel(col),
+      accessor: (row: T) => (csv ? csv(row) : accessorFn?.(row, 0)),
+    })
+  }
+  return out
 }
 
 /**
