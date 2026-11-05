@@ -16,7 +16,8 @@ export function OccupancyDonut({ split }: { split: OccupancySplit }) {
 
   return (
     <div className="rounded-lg border border-border bg-card p-4">
-      <h2 className="mb-2 font-display text-base text-navy">SF occupancy</h2>
+      <h2 className="font-display text-base text-navy">SF occupancy</h2>
+      <p className="mb-2 text-xs text-status-neutral">SF occupancy = (occupied + notice SF) ÷ SF excluding unavailable units.</p>
       <div role="img" aria-label={`SF occupancy donut chart. ${summary}`}>
         <div className="relative">
           <ChartContainer config={config} className="aspect-auto h-44 w-full" aria-hidden="true">

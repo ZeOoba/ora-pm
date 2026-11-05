@@ -55,7 +55,7 @@ export function Dashboard() {
 
       {/* KPI strip */}
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 mb-8">
-        <KpiStat label="Unit occupancy" value={`${occupancyPct}%`} sub={`${occupied} of ${totalUnits} units`} />
+        <KpiStat label="Unit occupancy" value={`${occupancyPct}%`} sub={`${occupied} of ${totalUnits} units · occupied units ÷ all units`} />
         <KpiStat label="Monthly Rent Roll" value={formatCurrency(totalRentRoll)} sub="Active leases" />
         <KpiStat label="Outstanding AR" value={formatCurrency(totalAR)} sub="Unpaid charges" warn={totalAR > 0} />
         <KpiStat label="Critical Dates" value={urgentDates.length} sub="Urgent or overdue" warn={urgentDates.length > 0} />

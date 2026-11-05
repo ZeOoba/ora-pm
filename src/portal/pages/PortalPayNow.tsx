@@ -40,9 +40,10 @@ export function PortalPayNow() {
     clientRequestIdRef.current = null
   }, [selected])
 
-  const { data: meData } = useQuery({ queryKey: ['portal-me'], queryFn: portalApi.getMe })
+  const meQuery = useQuery({ queryKey: ['portal-me'], queryFn: portalApi.getMe })
+  const { data: meData } = meQuery
   const chargesQuery = useQuery({ queryKey: ['portal-charges'], queryFn: portalApi.getCharges })
-  const { data: chargesData, isLoading } = chargesQuery
+  const { data: chargesData } = chargesQuery
 
   const charges = (chargesData?.data ?? []) as Charge[]
   // `charges` has no per-row paid/open column and `payments` isn't linked to a specific charge
@@ -116,7 +117,7 @@ export function PortalPayNow() {
   // A failed first load must not fall through to "no open charges - you are all caught up". Only the
   // select step is ever replaced (see chargesGate): the processing/done/error screens are never hidden
   // by the charges query state, and a failed background refetch with data kept does not block.
-  if (chargesGate(step, { isLoading, isError: chargesQuery.isError, data: chargesData }) === 'blocking') {
+  if (chargesGate(step, { isError: chargesQuery.isError, data: chargesData }) === 'blocking') {
     return (
       <div className="p-6 max-w-2xl space-y-6">
         <h1 className="font-display text-2xl text-navy">Pay Now</h1>
@@ -155,6 +156,9 @@ export function PortalPayNow() {
       <h1 className="font-display text-2xl text-navy">Pay Now</h1>
 
       <StaleDataWarning query={chargesQuery} />
+
+      {/* portal-me status only: makes a pending/failed profile read visible. Pay button logic is untouched. */}
+      <QueryState query={meQuery} skeleton={<p className="text-xs text-status-neutral" aria-busy="true">Loading your account…</p>}>{null}</QueryState>
 
       {step === 'error' && (
         <div role="alert" className="bg-status-danger/5 border border-status-danger/30 rounded p-4 text-status-danger text-sm">{errorMsg}</div>

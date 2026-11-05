@@ -24,16 +24,24 @@ const q = (over: Record<string, unknown>) => ({ isPending: false, isLoading: fal
 const render = () => renderToStaticMarkup(createElement(QueryClientProvider, { client: new QueryClient() }, createElement(MemoryRouter, null, createElement(PortalPayNow))))
 
 describe('chargesGate (what may hide the pay flow)', () => {
-  it('blocks on first load and on first-load failure at step select', () => {
-    expect(chargesGate('select', { isLoading: true, isError: false, data: undefined })).toBe('blocking')
-    expect(chargesGate('select', { isLoading: false, isError: true, data: undefined })).toBe('blocking')
+  const states = [
+    { name: 'paused first load', isError: false, data: undefined },
+    { name: 'first-load error', isError: true, data: undefined },
+    { name: 'loaded', isError: false, data: { data: [charge] } },
+    { name: 'refetch error with data', isError: true, data: { data: [charge] } },
+  ]
+  it('blocks the select step on a paused first load (pending, not fetching, no data, no error)', () => {
+    expect(chargesGate('select', { isError: false, data: undefined })).toBe('blocking')
   })
-  it('does not block when a background refetch failed but data is kept', () => {
-    expect(chargesGate('select', { isLoading: false, isError: true, data: { data: [charge] } })).toBe('content')
+  it('blocks the select step on first-load failure', () => {
+    expect(chargesGate('select', { isError: true, data: undefined })).toBe('blocking')
   })
-  it.each(['processing', 'done', 'error'] as const)('never blocks step %s whatever the charges query state', (step) => {
-    expect(chargesGate(step, { isLoading: true, isError: true, data: undefined })).toBe('content')
-    expect(chargesGate(step, { isLoading: false, isError: true, data: undefined })).toBe('content')
+  it('shows content on select when data is present, including a failed background refetch', () => {
+    expect(chargesGate('select', { isError: false, data: { data: [charge] } })).toBe('content')
+    expect(chargesGate('select', { isError: true, data: { data: [charge] } })).toBe('content')
+  })
+  it.each(['processing', 'done', 'error'] as const)('never blocks step %s whatever the charges state', (step) => {
+    for (const st of states) expect(chargesGate(step, st)).toBe('content')
   })
 })
 
@@ -48,5 +56,15 @@ describe('<PortalPayNow> with a failed background refetch', () => {
     expect(html).toContain('Acme Test rent')
     expect(html).toContain('showing last loaded data')
     expect(html).not.toContain('role="alert"')
+  })
+
+  it('does not claim "all caught up" when the first charges load is paused offline', () => {
+    results.current = {
+      'portal-me': q({ data: { tenant: { id: 't1', name: 'Acme Test LLC' } } }),
+      'portal-charges': q({ isPending: true, isLoading: false, isFetching: false }),
+    }
+    const html = render()
+    expect(html).not.toContain('all caught up')
+    expect(html).toContain('Loading charges')
   })
 })

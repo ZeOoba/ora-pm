@@ -5,8 +5,8 @@ import { expiryExcludedNote, type ExpiryBucket, type ExpiryExcluded } from './de
 
 const config: ChartConfig = { sf: { label: 'SF expiring', color: 'var(--color-chart-1)' } }
 
-export function ExpiryLadderChart({ ladder, excluded }: { ladder: ExpiryBucket[]; excluded?: ExpiryExcluded }) {
-  const note = excluded ? expiryExcludedNote(excluded) : null
+export function ExpiryLadderChart({ ladder, excluded }: { ladder: ExpiryBucket[]; excluded: ExpiryExcluded }) {
+  const note = expiryExcludedNote(excluded, ladder[0]?.year)
   const totalSf = ladder.reduce((s, b) => s + b.sf, 0)
   const totalLeases = ladder.reduce((s, b) => s + b.leases, 0)
   const summary = ladder.map((b) => `${b.year} ${formatSF(b.sf)}`).join(', ')
@@ -25,7 +25,7 @@ export function ExpiryLadderChart({ ladder, excluded }: { ladder: ExpiryBucket[]
           </BarChart>
         </ChartContainer>
       </div>
-      {note && <p className="mt-2 text-xs text-status-neutral">{note}</p>}
+      {note && <p className="mt-2 text-xs text-status-neutral" aria-hidden="true">{note}</p>}
       <table className="sr-only">
         <caption>Square feet of leases expiring per calendar year, SF-weighted. {note ?? 'No active leases are excluded.'}</caption>
         <thead>

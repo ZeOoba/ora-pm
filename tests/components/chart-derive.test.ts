@@ -88,15 +88,20 @@ describe('expiryLadder', () => {
 })
 
 describe('expiryExcludedNote', () => {
-  it('names both clauses with counts', () => {
-    expect(expiryExcludedNote({ noEndDate: 3, expiredBeforeWindow: 2, beyondWindow: 0 }))
-      .toBe('Excludes 3 leases with no end date and 2 active leases past their end date (holdover).')
+  it('names the first two clauses with counts', () => {
+    expect(expiryExcludedNote({ noEndDate: 3, expiredBeforeWindow: 2, beyondWindow: 0 }, 2026))
+      .toBe('Excludes 3 leases with no end date and 2 active leases that ended before 2026 (holdover).')
   })
   it('omits zero clauses and pluralises', () => {
-    expect(expiryExcludedNote({ noEndDate: 1, expiredBeforeWindow: 0, beyondWindow: 0 })).toBe('Excludes 1 lease with no end date.')
-    expect(expiryExcludedNote({ noEndDate: 0, expiredBeforeWindow: 1, beyondWindow: 0 })).toBe('Excludes 1 active lease past its end date (holdover).')
+    expect(expiryExcludedNote({ noEndDate: 1, expiredBeforeWindow: 0, beyondWindow: 0 }, 2026)).toBe('Excludes 1 lease with no end date.')
+    expect(expiryExcludedNote({ noEndDate: 0, expiredBeforeWindow: 1, beyondWindow: 0 }, 2026)).toBe('Excludes 1 active lease that ended before 2026 (holdover).')
+  })
+  it('states the ending-after-window clause alone and in the three-clause sentence', () => {
+    expect(expiryExcludedNote({ noEndDate: 0, expiredBeforeWindow: 0, beyondWindow: 1 }, 2026)).toBe('Excludes 1 lease ending after the ladder window.')
+    expect(expiryExcludedNote({ noEndDate: 2, expiredBeforeWindow: 1, beyondWindow: 4 }, 2026))
+      .toBe('Excludes 2 leases with no end date, 1 active lease that ended before 2026 (holdover) and 4 leases ending after the ladder window.')
   })
   it('is null when nothing is excluded from the ladder', () => {
-    expect(expiryExcludedNote({ noEndDate: 0, expiredBeforeWindow: 0, beyondWindow: 0 })).toBeNull()
+    expect(expiryExcludedNote({ noEndDate: 0, expiredBeforeWindow: 0, beyondWindow: 0 }, 2026)).toBeNull()
   })
 })

@@ -102,7 +102,7 @@ export function PortalInsurance() {
 
       {/* portal-me status: skeleton, error + retry, stale warning. The form stays mounted: its submit
           button is already disabled until the tenant profile has loaded. */}
-      <QueryState query={meQuery}>{null}</QueryState>
+      <QueryState query={meQuery} skeleton={<p className="text-xs text-status-neutral" aria-busy="true">Loading your account…</p>}>{null}</QueryState>
 
       <Card className="p-6">
       <form onSubmit={handleSubmit} className="space-y-4">
@@ -183,7 +183,7 @@ export function PortalInsurance() {
           disabled={status === 'uploading' || !meData?.tenant}
           className="w-full py-2.5"
         >
-          {status === 'uploading' ? 'Uploading…' : meData?.tenant ? 'Submit Certificate' : 'Loading account…'}
+          {status === 'uploading' ? 'Uploading…' : meData?.tenant ? 'Submit Certificate' : meQuery.isError ? 'Unavailable' : 'Loading account…'}
         </Button>
       </form>
       </Card>

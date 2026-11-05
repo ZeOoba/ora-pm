@@ -74,7 +74,7 @@ describe('Dashboard error state', () => {
     ]
     results.current = { 'rent-roll': ok(rr), 'critical-dates': ok([]), 'ar-aging': arOk() }
     const html = render()
-    const note = 'Excludes 1 lease with no end date and 1 active lease past its end date (holdover).'
+    const note = `Excludes 1 lease with no end date and 1 active lease that ended before ${year} (holdover).`
     expect(html.split(note).length - 1).toBeGreaterThanOrEqual(2)
   })
 
