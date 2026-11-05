@@ -29,7 +29,9 @@ export default tseslint.config(
       '@typescript-eslint/consistent-type-imports': 'error',
     },
   },
-  // Design-system guard: no raw gray/blue palette utilities in app source (tokens only).
+  // Design-system guard (src/ only; selectors in eslint.palette.js): bans raw gray/blue/green/red
+  // palette utilities and arbitrary-hex color utilities (bg-/text-/border-/ring-/fill-/stroke-[#...])
+  // in string and template literals. Use design tokens instead (docs/design-system.md).
   {
     files: ['src/**/*.{ts,tsx}'],
     rules: { 'no-restricted-syntax': ['error', ...PALETTE_RESTRICTED_SYNTAX] },

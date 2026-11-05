@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { supabase } from '../../lib/supabase'
+import { Button } from '../../components/ui/Button'
 
 export function AdminLogin() {
   const [email, setEmail] = useState('')
@@ -50,13 +51,9 @@ export function AdminLogin() {
               />
             </div>
             {error && <p className="text-sm text-status-danger">{error}</p>}
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full bg-[#1B2A4A] text-white rounded py-2 text-sm font-medium hover:bg-[#243660] disabled:opacity-50"
-            >
+            <Button type="submit" variant="navy" disabled={loading} className="w-full">
               {loading ? 'Sending…' : 'Send Magic Link'}
-            </button>
+            </Button>
           </form>
         )}
       </div>

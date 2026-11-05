@@ -4,6 +4,7 @@ import { toast } from 'sonner'
 import { api } from '../../lib/api'
 import { runExclusive } from '../../lib/run-exclusive'
 import { ConfirmDialog } from '../../components/ConfirmDialog'
+import { Button } from '../../components/ui/Button'
 
 interface Tenant {
   id: string
@@ -79,13 +80,14 @@ export function TenantPortalAdmin({ tenant }: { tenant: Tenant }) {
           {status === 'error' && (
             <p className="text-xs text-status-danger">{errorMsg}</p>
           )}
-          <button
+          <Button
+            variant="navy"
             onClick={invite}
             disabled={status === 'sending' || !tenant.contact_email}
-            className="text-sm bg-[#1B2A4A] text-white px-4 py-1.5 rounded hover:bg-[#243660] disabled:opacity-50"
+            className="py-1.5"
           >
             {status === 'sending' ? 'Sending…' : 'Send portal invite'}
-          </button>
+          </Button>
         </div>
       )}
       <ConfirmDialog

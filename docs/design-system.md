@@ -16,7 +16,7 @@ Defined once in `src/index.css` under `@theme`; use the utility classes, never r
 
 Common mappings: secondary text `text-muted-foreground`; body text `text-foreground`; panels and table stripes `bg-muted`; hairlines `border-border` / `divide-border`; primary action `bg-primary text-primary-foreground`; focus `ring-ring`.
 
-**Lint guard:** `bg-/text-/border-/divide-/ring-` with `gray-` or `blue-` fails `npm run lint` anywhere in `src/` (string literals, template literals, `cn()`/`clsx()` args). Rule: `eslint.palette.js`, tested in `tests/config/lint-palette-rule.test.ts`.
+**Lint guard:** `bg-/text-/border-/divide-/ring-` with `gray-`, `blue-`, `green-` or `red-`, and any arbitrary-hex color utility (`bg-/text-/border-/ring-/fill-/stroke-[#...]`), fail `npm run lint` anywhere in `src/` (string literals, template literals, `cn()`/`clsx()` args). Rule: `eslint.palette.js`, tested in `tests/config/lint-palette-rule.test.ts`.
 
 ## Components
 

@@ -4,7 +4,7 @@ import tseslint from 'typescript-eslint'
 import { PALETTE_RESTRICTED_SYNTAX } from '../../eslint.palette.js'
 
 // Runs the real selector list (shared with eslint.config.js) against snippets, so the
-// "no raw gray/blue/green/red palette classes in src/" rule cannot silently stop working.
+// "no raw gray/blue/green/red palette or arbitrary-hex color classes in src/" rule cannot silently stop working.
 const linter = new Linter()
 function lint(code: string) {
   return linter.verify(
@@ -49,6 +49,14 @@ describe('palette lint rule', () => {
     ['border-b-gray with variant', `const a = <p className="md:border-b-gray-300" />`],
     ['border-l-red', `const a = <p className="border-l-red-500" />`],
     ['ring-blue', `const a = <input className="focus:ring-blue-500" />`],
+    ['arbitrary hex bg', `const a = <button className="text-sm bg-[#1B2A4A] text-white" />`],
+    ['arbitrary hex hover bg', `const a = <button className="hover:bg-[#243660]" />`],
+    ['arbitrary hex text', `const a = <p className="text-[#C9A96E]" />`],
+    ['arbitrary hex border', `const a = <p className="border-[#e5e7eb]" />`],
+    ['arbitrary hex ring', `const a = <p className="focus:ring-[#1B2A4A]" />`],
+    ['arbitrary hex fill', `const a = <path className="fill-[#15803D]" />`],
+    ['arbitrary hex stroke', `const a = <path className="stroke-[#475569]" />`],
+    ['arbitrary hex in cn()', `const a = cn('p-2', on && 'bg-[#F5F3EF]')`],
   ])('flags %s', (_name, code) => {
     const msgs = lint(code)
     expect(msgs.some((m) => m.ruleId === 'no-restricted-syntax')).toBe(true)
@@ -63,6 +71,8 @@ describe('palette lint rule', () => {
     ['side border tokens', `const a = <p className="border-t border-b-border border-l-primary" />`],
     ['unrelated words 2', `const a = 'text-redacted bg-greenhouse'`],
     ['bg-white', `const a = <div className="bg-white border-border" />`],
+    ['arbitrary non-color values', `const a = <div className="w-[320px] grid-cols-[1fr_auto] text-[13px]" />`],
+    ['hex outside a class', `const fill = '#1B2A4A'`],
   ])('allows %s', (_name, code) => {
     expect(lint(code)).toEqual([])
   })
