@@ -298,17 +298,29 @@ describe('out-of-range page (PGRST103)', () => {
     expect(head.range).not.toHaveBeenCalled()
   })
 
-  it('applies the same filters and q to the head count', async () => {
-    const head = builder({ data: null, count: 7 })
-    mockFrom.mockReturnValueOnce(builder({ data: null, error: OOR })).mockReturnValueOnce(head)
-    await get('/api/properties?offset=500&q=abc')
-    expect(head.or).toHaveBeenCalledTimes(1)
-    expect(head.or.mock.calls[0][0]).toContain('name.ilike.')
+  // Every filtered list route: the PGRST103 fallback head count must carry the SAME filter as the
+  // page query, or total would count the unfiltered table.
+  const FILTERED: Array<{ route: string; qs: string; method: 'or' | 'eq'; expected: unknown[] }> = [
+    { route: '/api/properties', qs: 'q=abc', method: 'or', expected: ['name.ilike."%abc%",city.ilike."%abc%",entity_llc.ilike."%abc%"'] },
+    { route: '/api/tenants', qs: 'q=abc', method: 'or', expected: ['name.ilike."%abc%",contact_name.ilike."%abc%",contact_email.ilike."%abc%"'] },
+    { route: '/api/leases', qs: 'status=active', method: 'eq', expected: ['status', 'active'] },
+    { route: '/api/charges', qs: 'lease_id=L1', method: 'eq', expected: ['lease_id', 'L1'] },
+    { route: '/api/payments', qs: 'lease_id=L1', method: 'eq', expected: ['lease_id', 'L1'] },
+    { route: '/api/expenses', qs: 'property_id=P1', method: 'eq', expected: ['property_id', 'P1'] },
+    { route: '/api/units', qs: 'property_id=P1', method: 'eq', expected: ['property_id', 'P1'] },
+  ]
 
-    const head2 = builder({ data: null, count: 3 })
-    mockFrom.mockReturnValueOnce(builder({ data: null, error: OOR })).mockReturnValueOnce(head2)
-    await get('/api/charges?offset=500&lease_id=L1')
-    expect(head2.eq).toHaveBeenCalledWith('lease_id', 'L1')
+  it.each(FILTERED)('$route ($qs): the head count carries the same filter as the page query', async ({ route, qs, method, expected }) => {
+    const main = builder({ data: null, error: OOR })
+    const head = builder({ data: null, count: 7 })
+    mockFrom.mockReturnValueOnce(main).mockReturnValueOnce(head)
+    const res = await get(`${route}?limit=20&offset=500&${qs}`)
+    expect(await res.json()).toEqual({ data: [], total: 7 })
+    expect(main[method]).toHaveBeenCalledWith(...expected)
+    expect(head[method]).toHaveBeenCalledWith(...expected)
+    // Same filter calls, not merely a superset/subset of them.
+    expect(head.eq.mock.calls).toEqual(main.eq.mock.calls)
+    expect(head.or.mock.calls).toEqual(main.or.mock.calls)
   })
 
   it('insurance paged: out-of-range returns empty data without enrichment crash', async () => {
