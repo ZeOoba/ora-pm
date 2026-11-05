@@ -41,10 +41,10 @@ function isIncomeCategory(cat: BudgetCategory): boolean {
 function varianceClass(category: BudgetCategory, variance: number): string {
   if (variance === 0) return 'text-muted-foreground'
   if (isIncomeCategory(category)) {
-    return variance > 0 ? 'text-green-600 font-semibold' : 'text-red-600 font-semibold'
+    return variance > 0 ? 'text-status-active font-semibold' : 'text-status-danger font-semibold'
   } else {
     // expenses: positive variance = over budget = bad
-    return variance < 0 ? 'text-green-600 font-semibold' : 'text-red-600 font-semibold'
+    return variance < 0 ? 'text-status-active font-semibold' : 'text-status-danger font-semibold'
   }
 }
 
@@ -271,7 +271,7 @@ export function BudgetsList() {
                   <td className="px-4 py-2.5 text-xs font-semibold text-primary uppercase">Total Income</td>
                   <td className="px-4 py-2.5 text-right font-semibold text-primary">{formatCurrency(budgetedIncome)}</td>
                   <td className="px-4 py-2.5 text-right font-semibold text-primary">{formatCurrency(actualIncome)}</td>
-                  <td className={`px-4 py-2.5 text-right font-semibold ${(actualIncome - budgetedIncome) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                  <td className={`px-4 py-2.5 text-right font-semibold ${(actualIncome - budgetedIncome) >= 0 ? 'text-status-active' : 'text-status-danger'}`}>
                     {actualIncome === budgetedIncome ? '—' : formatCurrency(actualIncome - budgetedIncome)}
                   </td>
                 </tr>
@@ -311,7 +311,7 @@ export function BudgetsList() {
                   <td className="px-4 py-2.5 text-xs font-semibold text-orange-700 uppercase">Total Expenses</td>
                   <td className="px-4 py-2.5 text-right font-semibold text-orange-700">{formatCurrency(budgetedExpense)}</td>
                   <td className="px-4 py-2.5 text-right font-semibold text-orange-700">{formatCurrency(actualExpense)}</td>
-                  <td className={`px-4 py-2.5 text-right font-semibold ${(actualExpense - budgetedExpense) <= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                  <td className={`px-4 py-2.5 text-right font-semibold ${(actualExpense - budgetedExpense) <= 0 ? 'text-status-active' : 'text-status-danger'}`}>
                     {actualExpense === budgetedExpense ? '—' : formatCurrency(actualExpense - budgetedExpense)}
                   </td>
                 </tr>
@@ -321,7 +321,7 @@ export function BudgetsList() {
                   <td className="px-4 py-3 text-xs font-bold text-foreground uppercase">Net Operating</td>
                   <td className="px-4 py-3 text-right font-bold text-foreground">{formatCurrency(budgetedNet)}</td>
                   <td className="px-4 py-3 text-right font-bold text-foreground">{formatCurrency(actualNet)}</td>
-                  <td className={`px-4 py-3 text-right font-bold ${actualNet >= budgetedNet ? 'text-green-600' : 'text-red-600'}`}>
+                  <td className={`px-4 py-3 text-right font-bold ${actualNet >= budgetedNet ? 'text-status-active' : 'text-status-danger'}`}>
                     {actualNet === budgetedNet ? '—' : formatCurrency(actualNet - budgetedNet)}
                   </td>
                 </tr>
@@ -332,7 +332,7 @@ export function BudgetsList() {
 
           {/* Save controls */}
           {saveError && (
-            <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded p-2 mb-3">
+            <p className="text-sm text-status-danger bg-status-danger/10 border border-status-danger/30 rounded p-2 mb-3">
               {saveError}
             </p>
           )}

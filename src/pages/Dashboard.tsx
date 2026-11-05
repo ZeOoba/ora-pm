@@ -85,7 +85,7 @@ export function Dashboard() {
                 key={`${d.date_type}-${d.reference_id}`}
                 className={`flex items-center justify-between p-3 rounded-lg border ${
                   d.urgency === 'overdue'
-                    ? 'border-red-300 bg-red-50'
+                    ? 'border-status-danger/30 bg-status-danger/10'
                     : 'border-orange-300 bg-orange-50'
                 }`}
               >

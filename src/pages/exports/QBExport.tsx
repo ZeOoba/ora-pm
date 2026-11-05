@@ -88,7 +88,7 @@ export function QBExport() {
         </div>
 
         {error && (
-          <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded p-2">{error}</p>
+          <p className="text-sm text-status-danger bg-status-danger/10 border border-status-danger/30 rounded p-2">{error}</p>
         )}
 
         <button

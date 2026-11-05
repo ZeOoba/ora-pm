@@ -6,7 +6,7 @@ import { formatDate } from '../../lib/format'
 import type { CriticalDateRow } from '../../types'
 
 const URGENCY_BG: Record<string, string> = {
-  overdue: 'border-red-300 bg-red-50',
+  overdue: 'border-status-danger/30 bg-status-danger/10',
   urgent:  'border-orange-300 bg-orange-50',
   warning: 'border-yellow-300 bg-yellow-50',
   notice:  'border-border bg-white',

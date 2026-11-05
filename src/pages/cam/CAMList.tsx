@@ -188,7 +188,7 @@ export function CAMList() {
             </p>
 
             {recoverable.isError && (
-              <p className="text-xs text-red-600 mt-1">
+              <p className="text-xs text-status-danger mt-1">
                 Could not load recoverable expenses — calculation is disabled until they load.
               </p>
             )}
@@ -200,7 +200,7 @@ export function CAMList() {
             )}
 
             {totalLeasedSF === 0 && activeLeases.length > 0 && (
-              <p className="text-xs text-red-600 mt-1">
+              <p className="text-xs text-status-danger mt-1">
                 Active leases found but total leased SF is 0 — check unit SF values.
               </p>
             )}
@@ -214,7 +214,7 @@ export function CAMList() {
         )}
 
         {calcError && (
-          <p className="text-sm text-red-600 mb-3">{calcError}</p>
+          <p className="text-sm text-status-danger mb-3">{calcError}</p>
         )}
 
         <button
@@ -295,7 +295,7 @@ export function CAMList() {
                   <td className="px-4 py-3 font-mono text-foreground">
                     {formatCurrency(row.actual_cam_owed)}
                   </td>
-                  <td className={`px-4 py-3 font-mono font-semibold ${isCredit ? 'text-green-700' : trueUp > 0 ? 'text-red-700' : 'text-foreground'}`}>
+                  <td className={`px-4 py-3 font-mono font-semibold ${isCredit ? 'text-status-active' : trueUp > 0 ? 'text-status-danger' : 'text-foreground'}`}>
                     {formatCurrency(Math.abs(trueUp))}
                     {isCredit && <span className="ml-1 text-xs font-normal">(credit)</span>}
                   </td>
@@ -310,7 +310,7 @@ export function CAMList() {
                         className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium transition-colors
                           ${isApproving
                             ? 'bg-muted text-muted-foreground cursor-not-allowed'
-                            : 'bg-green-600 text-white hover:bg-green-700'
+                            : 'bg-status-active text-white hover:bg-status-active/90'
                           }`}
                       >
                         {isApproving && (

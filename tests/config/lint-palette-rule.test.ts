@@ -4,7 +4,7 @@ import tseslint from 'typescript-eslint'
 import { PALETTE_RESTRICTED_SYNTAX } from '../../eslint.palette.js'
 
 // Runs the real selector list (shared with eslint.config.js) against snippets, so the
-// "no raw gray/blue palette classes in src/" rule cannot silently stop working.
+// "no raw gray/blue/green/red palette classes in src/" rule cannot silently stop working.
 const linter = new Linter()
 function lint(code: string) {
   return linter.verify(
@@ -37,6 +37,17 @@ describe('palette lint rule', () => {
     ['ternary in expression container', `const a = <div className={x ? 'bg-gray-100' : 'bg-white'} />`],
     ['object map value', `const m = { notice: 'border-gray-200 bg-white' }`],
     ['divide-gray', `const a = <table className="divide-y divide-gray-200" />`],
+    ['text-red', `const a = <p className="text-sm text-red-600" />`],
+    ['bg-red with variant', `const a = <p className="hover:bg-red-50" />`],
+    ['border-red', `const a = <p className="border border-red-200" />`],
+    ['text-green', `const a = <p className="text-green-700" />`],
+    ['bg-green', `const a = <p className="bg-green-600 text-white" />`],
+    ['border-green', `const a = <p className="border-green-200" />`],
+    ['divide-red', `const a = <p className="divide-red-200" />`],
+    ['ring-green', `const a = <p className="ring-green-500" />`],
+    ['border-t-gray', `const a = <p className="border-t-gray-200" />`],
+    ['border-b-gray with variant', `const a = <p className="md:border-b-gray-300" />`],
+    ['border-l-red', `const a = <p className="border-l-red-500" />`],
     ['ring-blue', `const a = <input className="focus:ring-blue-500" />`],
   ])('flags %s', (_name, code) => {
     const msgs = lint(code)
@@ -48,6 +59,9 @@ describe('palette lint rule', () => {
     ['brand classes', `const a = <div className="bg-primary text-primary-foreground text-status-danger" />`],
     ['unrelated words', `const a = 'text-grayscale bluetooth'`],
     ['template literal with tokens', 'const a = <div className={`p-2 ${x} bg-muted`} />'],
+    ['status tokens', `const a = <p className="text-status-danger bg-status-active/10 border-status-danger/30" />`],
+    ['side border tokens', `const a = <p className="border-t border-b-border border-l-primary" />`],
+    ['unrelated words 2', `const a = 'text-redacted bg-greenhouse'`],
     ['bg-white', `const a = <div className="bg-white border-border" />`],
   ])('allows %s', (_name, code) => {
     expect(lint(code)).toEqual([])

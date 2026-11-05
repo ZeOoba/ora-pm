@@ -92,4 +92,4 @@ The ref flag is set synchronously, so a second click in the same tick is skipped
 
 ## Code splitting
 
-Pages are `React.lazy` in `src/router.tsx`; `AppShell`, the auth guard and `AdminLogin` stay eager, and `Suspense` sits inside the shell with `PageSkeleton`. Add new pages with the same `lazy(() => import(...).then(m => ({ default: m.Name })))` pattern. Heavy vendors are split in `vite.config.ts` (`manualChunks`); keep every chunk under 500 kB.
+Pages are `React.lazy` in `src/router.tsx`; only `AppShell`, the auth guard, `AdminLogin` and the `RouteError` boundary stay eager; every page (including Payments, CAM, Expenses, Budgets, Insurance) is lazy, and `Suspense` sits inside the shell with `PageSkeleton`. Add new pages with the same `lazy(() => import(...).then(m => ({ default: m.Name })))` pattern. Heavy vendors are split in `vite.config.ts` (`manualChunks`); keep every chunk under 500 kB. Every route has `errorElement: <RouteError />`: a stale-chunk failure after a deploy auto-reloads once (sessionStorage-guarded) and otherwise shows a branded "Couldn't load this page" notice with Reload/Home; the raw error is never shown.

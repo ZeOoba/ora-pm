@@ -4,13 +4,10 @@ import { AppShell } from './components/AppShell'
 import { AdminAuthGuard } from './components/AdminAuthGuard'
 import { PageSkeleton } from './components/PageSkeleton'
 import { AdminLogin } from './pages/auth/AdminLogin'
-import { PaymentsList }     from './pages/payments/PaymentsList'
-import { CAMList }          from './pages/cam/CAMList'
-import { ExpensesList }     from './pages/expenses/ExpensesList'
-import { BudgetsList }      from './pages/budgets/BudgetsList'
-import { InsuranceList }    from './pages/insurance/InsuranceList'
+import { RouteError } from './components/RouteError'
+import { ChunkLoadedMarker } from './components/ChunkLoadedMarker'
 
-// Route-level code splitting: pages load on demand; AppShell, the auth guard and AdminLogin stay eager.
+// Route-level code splitting: every page loads on demand; only AppShell, the auth guard, AdminLogin and RouteError stay eager.
 // All pages use named exports, so adapt each to React.lazy's default-export contract.
 const Dashboard = lazy(() => import('./pages/Dashboard').then((m) => ({ default: m.Dashboard })))
 const PropertiesList = lazy(() => import('./pages/properties/PropertiesList').then((m) => ({ default: m.PropertiesList })))
@@ -32,6 +29,11 @@ const RenewalsPipeline = lazy(() => import('./pages/renewals/RenewalsPipeline').
 const PortalApp = lazy(() => import('./portal/PortalApp').then((m) => ({ default: m.PortalApp })))
 const UnitsPage = lazy(() => import('./pages/units/UnitsPage').then((m) => ({ default: m.UnitsPage })))
 const RentRoll = lazy(() => import('./pages/reports/RentRoll').then((m) => ({ default: m.RentRoll })))
+const PaymentsList = lazy(() => import('./pages/payments/PaymentsList').then((m) => ({ default: m.PaymentsList })))
+const CAMList = lazy(() => import('./pages/cam/CAMList').then((m) => ({ default: m.CAMList })))
+const ExpensesList = lazy(() => import('./pages/expenses/ExpensesList').then((m) => ({ default: m.ExpensesList })))
+const BudgetsList = lazy(() => import('./pages/budgets/BudgetsList').then((m) => ({ default: m.BudgetsList })))
+const InsuranceList = lazy(() => import('./pages/insurance/InsuranceList').then((m) => ({ default: m.InsuranceList })))
 const StyleGuide = lazy(() => import('./pages/StyleGuide').then((m) => ({ default: m.StyleGuide })))
 
 // Layout is route glue local to this file; `router` (a non-component export) is the real export,
@@ -41,41 +43,44 @@ function Layout({ children }: { children: React.ReactNode }) {
   return (
     <AdminAuthGuard>
       <AppShell>
-        <Suspense fallback={<PageSkeleton />}>{children}</Suspense>
+        <Suspense fallback={<PageSkeleton />}>
+          {children}
+          <ChunkLoadedMarker />
+        </Suspense>
       </AppShell>
     </AdminAuthGuard>
   )
 }
 
 export const router = createBrowserRouter([
-  { path: '/login', element: <AdminLogin /> },
-  { path: '/styleguide', element: <Suspense fallback={<PageSkeleton />}><StyleGuide /></Suspense> },
-  { path: '/', element: <Layout><Dashboard /></Layout> },
-  { path: '/properties', element: <Layout><PropertiesList /></Layout> },
-  { path: '/properties/new', element: <Layout><PropertyForm /></Layout> },
-  { path: '/properties/:id/edit', element: <Layout><PropertyForm /></Layout> },
-  { path: '/properties/:id', element: <Layout><PropertyDetail /></Layout> },
-  { path: '/tenants', element: <Layout><TenantsList /></Layout> },
-  { path: '/tenants/new', element: <Layout><TenantForm /></Layout> },
-  { path: '/tenants/:id/edit', element: <Layout><TenantForm /></Layout> },
-  { path: '/tenants/:id', element: <Layout><TenantDetail /></Layout> },
-  { path: '/leases', element: <Layout><LeasesList /></Layout> },
-  { path: '/leases/new', element: <Layout><LeaseForm /></Layout> },
-  { path: '/leases/intake', element: <Layout><LeaseIntake /></Layout> },
-  { path: '/leases/:id', element: <Layout><LeaseDetail /></Layout> },
-  { path: '/billing', element: <Layout><BillingDashboard /></Layout> },
-  { path: '/ar', element: <Layout><ARDashboard /></Layout> },
-  { path: '/critical-dates', element: <Layout><CriticalDatesFeed /></Layout> },
-  { path: '/exports', element: <Layout><QBExport /></Layout> },
-  { path: '/payments',  element: <Layout><PaymentsList /></Layout> },
-  { path: '/cam',       element: <Layout><CAMList /></Layout> },
-  { path: '/expenses',  element: <Layout><ExpensesList /></Layout> },
-  { path: '/budgets',   element: <Layout><BudgetsList /></Layout> },
-  { path: '/renewals',  element: <Layout><RenewalsPipeline /></Layout> },
-  { path: '/insurance', element: <Layout><InsuranceList /></Layout> },
-  { path: '/insurance/new', element: <Layout><InsuranceForm /></Layout> },
-  { path: '/units', element: <Layout><UnitsPage /></Layout> },
-  { path: '/rent-roll', element: <Layout><RentRoll /></Layout> },
-  { path: '/portal/*', element: <Suspense fallback={<PageSkeleton />}><PortalApp /></Suspense> },
-  { path: '/portal', element: <Suspense fallback={<PageSkeleton />}><PortalApp /></Suspense> },
+  { path: '/login', errorElement: <RouteError />, element: <AdminLogin /> },
+  { path: '/styleguide', errorElement: <RouteError />, element: <Suspense fallback={<PageSkeleton />}><StyleGuide /></Suspense> },
+  { path: '/', errorElement: <RouteError />, element: <Layout><Dashboard /></Layout> },
+  { path: '/properties', errorElement: <RouteError />, element: <Layout><PropertiesList /></Layout> },
+  { path: '/properties/new', errorElement: <RouteError />, element: <Layout><PropertyForm /></Layout> },
+  { path: '/properties/:id/edit', errorElement: <RouteError />, element: <Layout><PropertyForm /></Layout> },
+  { path: '/properties/:id', errorElement: <RouteError />, element: <Layout><PropertyDetail /></Layout> },
+  { path: '/tenants', errorElement: <RouteError />, element: <Layout><TenantsList /></Layout> },
+  { path: '/tenants/new', errorElement: <RouteError />, element: <Layout><TenantForm /></Layout> },
+  { path: '/tenants/:id/edit', errorElement: <RouteError />, element: <Layout><TenantForm /></Layout> },
+  { path: '/tenants/:id', errorElement: <RouteError />, element: <Layout><TenantDetail /></Layout> },
+  { path: '/leases', errorElement: <RouteError />, element: <Layout><LeasesList /></Layout> },
+  { path: '/leases/new', errorElement: <RouteError />, element: <Layout><LeaseForm /></Layout> },
+  { path: '/leases/intake', errorElement: <RouteError />, element: <Layout><LeaseIntake /></Layout> },
+  { path: '/leases/:id', errorElement: <RouteError />, element: <Layout><LeaseDetail /></Layout> },
+  { path: '/billing', errorElement: <RouteError />, element: <Layout><BillingDashboard /></Layout> },
+  { path: '/ar', errorElement: <RouteError />, element: <Layout><ARDashboard /></Layout> },
+  { path: '/critical-dates', errorElement: <RouteError />, element: <Layout><CriticalDatesFeed /></Layout> },
+  { path: '/exports', errorElement: <RouteError />, element: <Layout><QBExport /></Layout> },
+  { path: '/payments',  errorElement: <RouteError />, element: <Layout><PaymentsList /></Layout> },
+  { path: '/cam',       errorElement: <RouteError />, element: <Layout><CAMList /></Layout> },
+  { path: '/expenses',  errorElement: <RouteError />, element: <Layout><ExpensesList /></Layout> },
+  { path: '/budgets',   errorElement: <RouteError />, element: <Layout><BudgetsList /></Layout> },
+  { path: '/renewals',  errorElement: <RouteError />, element: <Layout><RenewalsPipeline /></Layout> },
+  { path: '/insurance', errorElement: <RouteError />, element: <Layout><InsuranceList /></Layout> },
+  { path: '/insurance/new', errorElement: <RouteError />, element: <Layout><InsuranceForm /></Layout> },
+  { path: '/units', errorElement: <RouteError />, element: <Layout><UnitsPage /></Layout> },
+  { path: '/rent-roll', errorElement: <RouteError />, element: <Layout><RentRoll /></Layout> },
+  { path: '/portal/*', errorElement: <RouteError />, element: <Suspense fallback={<PageSkeleton />}><PortalApp /></Suspense> },
+  { path: '/portal', errorElement: <RouteError />, element: <Suspense fallback={<PageSkeleton />}><PortalApp /></Suspense> },
 ])

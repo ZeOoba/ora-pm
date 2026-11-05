@@ -59,12 +59,12 @@ export function TenantPortalAdmin({ tenant }: { tenant: Tenant }) {
       {hasAccess ? (
         <div className="flex items-center justify-between">
           <div>
-            <span className="inline-block bg-green-100 text-green-700 text-xs px-2 py-0.5 rounded-full">
+            <span className="inline-block bg-status-active/10 text-status-active text-xs px-2 py-0.5 rounded-full">
               Access granted
             </span>
             <p className="text-xs text-muted-foreground mt-1 font-mono">{tenant.auth_user_id}</p>
           </div>
-          <button onClick={() => setConfirmRevoke(true)} className="text-xs text-red-600 hover:underline">
+          <button onClick={() => setConfirmRevoke(true)} className="text-xs text-status-danger hover:underline">
             Revoke access
           </button>
         </div>
@@ -74,10 +74,10 @@ export function TenantPortalAdmin({ tenant }: { tenant: Tenant }) {
             <p className="text-xs text-amber-600">No contact email — add one to the tenant record first.</p>
           )}
           {status === 'done' && (
-            <p className="text-xs text-green-700">Invite sent to {tenant.contact_email}</p>
+            <p className="text-xs text-status-active">Invite sent to {tenant.contact_email}</p>
           )}
           {status === 'error' && (
-            <p className="text-xs text-red-600">{errorMsg}</p>
+            <p className="text-xs text-status-danger">{errorMsg}</p>
           )}
           <button
             onClick={invite}

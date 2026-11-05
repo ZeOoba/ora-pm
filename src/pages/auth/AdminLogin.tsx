@@ -33,7 +33,7 @@ export function AdminLogin() {
         <h1 className="text-xl font-bold text-foreground mt-1 mb-6">Property Manager</h1>
 
         {sent ? (
-          <div className="text-sm text-green-700 bg-green-50 border border-green-200 rounded p-4">
+          <div className="text-sm text-status-active bg-status-active/10 border border-status-active/30 rounded p-4">
             Check your email — a magic link has been sent to <strong>{email}</strong>.
           </div>
         ) : (
@@ -49,7 +49,7 @@ export function AdminLogin() {
                 className="w-full rounded border border-border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
               />
             </div>
-            {error && <p className="text-sm text-red-600">{error}</p>}
+            {error && <p className="text-sm text-status-danger">{error}</p>}
             <button
               type="submit"
               disabled={loading}
