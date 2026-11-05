@@ -89,14 +89,16 @@ describe('allocateOldestFirst', () => {
     expect(allocateOldestFirst(1500_00, shuffled, AS_OF)).toEqual({ current: 1000_00, d1_30: 500_00, d31_60: 0, d61_90: 0, d90_plus: 0, unallocated: 0 })
   })
 
-  it('same due_date: tie-break on id DESC (deterministic)', () => {
+  it('same due_date: output is independent of tie order (every permutation yields identical buckets)', () => {
     const due = dueDaysAgo(10)
     const a = { id: 'c_a', due_date: due, amountCents: 300_00 }
-    const z = { id: 'c_z', due_date: due, amountCents: 300_00 }
-    // Same bucket either way; prove determinism via a split across an older charge.
+    const z = { id: 'c_z', due_date: due, amountCents: 200_00 }
     const old = { id: 'c_m', due_date: dueDaysAgo(100), amountCents: 300_00 }
-    expect(allocateOldestFirst(700_00, [a, old, z], AS_OF)).toEqual(allocateOldestFirst(700_00, [z, a, old], AS_OF))
-    expect(allocateOldestFirst(700_00, [a, old, z], AS_OF)).toEqual({ current: 0, d1_30: 600_00, d31_60: 0, d61_90: 0, d90_plus: 100_00, unallocated: 0 })
+    // Same-due-date charges always share a bucket, so which one is consumed first cannot change
+    // the result: assert that explicitly across every input ordering.
+    const expected = { current: 0, d1_30: 500_00, d31_60: 0, d61_90: 0, d90_plus: 100_00, unallocated: 0 }
+    const perms = [[a, z, old], [a, old, z], [z, a, old], [z, old, a], [old, a, z], [old, z, a]]
+    for (const p of perms) expect(allocateOldestFirst(600_00, p, AS_OF)).toEqual(expected)
   })
 
   it('balance greater than Σ charges: the excess is reported as unallocated, never hidden in current', () => {

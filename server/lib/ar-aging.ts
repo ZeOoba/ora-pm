@@ -163,3 +163,30 @@ export function allocateOldestFirst(balanceCents: number, charges: AllocationCha
   out.unallocated = remaining
   return out
 }
+
+// ── Snapshot cross-check ────────────────────────────────────────────────────────────────────────
+//
+// ar_ledger and charges are read in separate requests, so a charge inserted/voided/edited between
+// them — or a hosted PostgREST max_rows below the page size silently truncating the charge read —
+// can mis-age a balance with no signal. Each ar_ledger row carries total_charged = Σ non-voided
+// charges for the lease from the ledger's own snapshot (0016_charges_void.sql), so the fetched
+// charges must sum to it exactly. Returns the first lease that does not (both values in cents;
+// ledgerCents is null when total_charged is not numeric), or null when every lease ties.
+export interface ChargeTotalMismatch {
+  leaseId: string
+  ledgerCents: number | null
+  chargeCents: number
+}
+
+export function findChargeTotalMismatch(
+  ledgerRows: ReadonlyArray<{ lease_id: string; total_charged: unknown }>,
+  chargesByLease: ReadonlyMap<string, ReadonlyArray<AllocationCharge>>
+): ChargeTotalMismatch | null {
+  for (const row of ledgerRows) {
+    const ledgerCents = toCents(row.total_charged)
+    let chargeCents = 0
+    for (const c of chargesByLease.get(row.lease_id) ?? []) chargeCents += c.amountCents
+    if (ledgerCents === null || ledgerCents !== chargeCents) return { leaseId: row.lease_id, ledgerCents, chargeCents }
+  }
+  return null
+}

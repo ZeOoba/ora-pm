@@ -49,14 +49,36 @@ const get = (qs = '') => app.request(`/api/reports/ar-aging${qs}`, {}, env)
 const cents = (n: number) => Math.round(n * 100)
 const bucketSumCents = (b: Buckets) => cents(b.current) + cents(b.d1_30) + cents(b.d31_60) + cents(b.d61_90) + cents(b.d90_plus) + cents(b.unallocated)
 
-function world(ledgerRows: Row[], charges: Row[], opts: { errorOn?: 'ar_ledger' | 'charges' } = {}) {
+// Fixture invariant (ar_ledger, 0016): total_charged = Σ non-voided charges for the lease. world()
+// derives it from the charge fixtures so every ordinary fixture is internally consistent; tests of
+// the snapshot cross-check pass `raw: true` to keep total_charged exactly as written.
+const nonVoidedCents = (charges: Row[], leaseId: unknown) =>
+  charges.filter(c => c.lease_id === leaseId && c.voided_at === null).reduce((a, c) => a + Math.round(Number(c.amount) * 100), 0)
+const consistent = (ledgerRows: Row[], charges: Row[]): Row[] =>
+  ledgerRows.map(r => ({ ...r, total_charged: nonVoidedCents(charges, r.lease_id) / 100 }))
+
+function world(ledgerRows: Row[], charges: Row[], opts: { errorOn?: 'ar_ledger' | 'charges'; raw?: boolean } = {}) {
   const err = { message: 'relation exploded' }
   const t: Tables = {
-    ar_ledger: pgTable(ledgerRows, opts.errorOn === 'ar_ledger' ? { error: err } : {}),
+    ar_ledger: pgTable(opts.raw ? ledgerRows : consistent(ledgerRows, charges), opts.errorOn === 'ar_ledger' ? { error: err } : {}),
     charges: pgTable(charges, opts.errorOn === 'charges' ? { error: err } : {}),
   }
   install(t)
   return t
+}
+
+// One world per read attempt: attempt N uses reads[N] (the last one repeats). An attempt = one full
+// ledger+charges read; each attempt here fits one page, so it begins at each ar_ledger select.
+function worldSequence(reads: { ledger: Row[]; charges: Row[] }[]) {
+  const tables = reads.map(r => ({ ar_ledger: pgTable(r.ledger), charges: pgTable(r.charges) }))
+  let attempt = -1
+  mockFrom.mockImplementation((table: string) => {
+    if (table === 'ar_ledger') attempt++
+    const t = tables[Math.min(Math.max(attempt, 0), tables.length - 1)] as Tables
+    if (!t[table]) throw new Error(`unexpected table ${table}`)
+    return t[table]
+  })
+  return tables
 }
 
 describe('GET /api/reports/ar-aging — buckets', () => {
@@ -98,7 +120,8 @@ describe('GET /api/reports/ar-aging — buckets', () => {
   })
 
   it('balance greater than Σ charges surfaces as unallocated (row and totals)', async () => {
-    const a = ledger(700)
+    // A negative (credit) payment lets balance exceed Σ charges while total_charged still ties.
+    const a = ledger(700, { total_paid: -200 })
     world([a], [charge(a.lease_id, 10, 500)])
     const body = await (await get()).json() as Body
     expect(body.data![0].buckets).toEqual({ current: 0, d1_30: 500, d31_60: 0, d61_90: 0, d90_plus: 0, unallocated: 200 })
@@ -198,5 +221,62 @@ describe('GET /api/reports/ar-aging — buckets', () => {
     const res = await get()
     expect(res.status).toBe(500)
     expect((await res.json() as Body).data).toBeUndefined()
+  })
+})
+
+describe('GET /api/reports/ar-aging — snapshot cross-check (total_charged vs fetched charges)', () => {
+  it('mismatch on the first read, consistent on the retry → 200 with the retried buckets', async () => {
+    const a = ledger(300)
+    const fresh = [charge(a.lease_id, 100, 300), charge(a.lease_id, 0, 50)] // a charge landed between the reads
+    // First attempt: ledger snapshot says 300 charged but the charge read saw 350. Retry: both say 350, 50 of it paid.
+    const l1 = { ...a, total_charged: 300 }
+    const l2 = { ...a, total_charged: 350, total_paid: 50, balance: 300 }
+    worldSequence([{ ledger: [l1], charges: fresh }, { ledger: [l2], charges: fresh }])
+    const res = await get()
+    expect(res.status).toBe(200)
+    const body = await res.json() as Body
+    expect(body.data![0].buckets).toEqual({ current: 50, d1_30: 0, d31_60: 0, d61_90: 0, d90_plus: 250, unallocated: 0 })
+    expect(body.totals!.balance).toBe(300)
+    expect(bucketSumCents(body.totals!)).toBe(cents(body.totals!.balance))
+  })
+
+  it('persistent mismatch → 500 with a generic client message (no cents, no lease id)', async () => {
+    const a = ledger(300, { total_charged: 300 })
+    worldSequence([{ ledger: [a], charges: [charge(a.lease_id, 10, 123.45)] }])
+    const res = await get()
+    expect(res.status).toBe(500)
+    const text = await res.text()
+    expect(JSON.parse(text)).toEqual({ error: 'Failed to load AR aging report' })
+    expect(text).not.toContain(String(a.lease_id))
+    expect(text).not.toMatch(/30000|12345|123\.45/)
+    // the internal log names the first mismatching lease and both cent values
+    const logged = JSON.stringify((console.error as unknown as { mock: { calls: unknown[][] } }).mock.calls)
+    expect(logged).toContain(String(a.lease_id))
+    expect(logged).toContain('30000')
+    expect(logged).toContain('12345')
+  })
+
+  it('a truncated charge read (fewer charges than total_charged) → 500, never a mis-aged 200', async () => {
+    const a = ledger(1000, { total_charged: 1000 })
+    // Full history is 10 × 100; a max_rows-truncated read only returned the oldest 7.
+    const truncated = Array.from({ length: 7 }, (_, i) => charge(a.lease_id, 200 - i, 100))
+    world([a], truncated, { raw: true })
+    const res = await get()
+    expect(res.status).toBe(500)
+    expect((await res.json() as Body).data).toBeUndefined()
+  })
+
+  it('re-runs the whole read exactly once (two ledger reads, no third)', async () => {
+    const a = ledger(100, { total_charged: 999 })
+    const t = world([a], [charge(a.lease_id, 1, 100)], { raw: true })
+    expect((await get()).status).toBe(500)
+    expect(t.ar_ledger.pages.length).toBe(2)
+  })
+
+  it('consistent first read does not retry', async () => {
+    const a = ledger(100)
+    const t = world([a], [charge(a.lease_id, 1, 100)])
+    expect((await get()).status).toBe(200)
+    expect(t.ar_ledger.pages.length).toBe(1)
   })
 })
