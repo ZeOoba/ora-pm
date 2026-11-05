@@ -1,6 +1,8 @@
 import { useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
+import { toast } from 'sonner'
 import { api } from '../../lib/api'
+import { ConfirmDialog } from '../../components/ConfirmDialog'
 
 interface Tenant {
   id: string
@@ -12,6 +14,8 @@ interface Tenant {
 export function TenantPortalAdmin({ tenant }: { tenant: Tenant }) {
   const [status, setStatus] = useState<'idle' | 'sending' | 'done' | 'error'>('idle')
   const [errorMsg, setErrorMsg] = useState('')
+  const [confirmRevoke, setConfirmRevoke] = useState(false)
+  const [revoking, setRevoking] = useState(false)
   const qc = useQueryClient()
 
   async function invite() {
@@ -28,13 +32,17 @@ export function TenantPortalAdmin({ tenant }: { tenant: Tenant }) {
   }
 
   async function revoke() {
-    if (!confirm(`Revoke portal access for ${tenant.name}? They will be signed out immediately.`)) return
+    setRevoking(true)
     try {
       await api.del(`/admin/tenants/${tenant.id}/revoke-access`)
-      qc.invalidateQueries({ queryKey: ['tenant', tenant.id] })
+      await qc.invalidateQueries({ queryKey: ['tenant', tenant.id] })
+      toast.success(`Portal access revoked for ${tenant.name}`)
     } catch (e) {
       // Surface the failure so a revoke can't silently no-op.
-      alert(`Failed to revoke access: ${(e as Error).message}`)
+      toast.error(`Failed to revoke access: ${(e as Error).message}`)
+    } finally {
+      setRevoking(false)
+      setConfirmRevoke(false)
     }
   }
 
@@ -51,7 +59,7 @@ export function TenantPortalAdmin({ tenant }: { tenant: Tenant }) {
             </span>
             <p className="text-xs text-gray-400 mt-1 font-mono">{tenant.auth_user_id}</p>
           </div>
-          <button onClick={revoke} className="text-xs text-red-600 hover:underline">
+          <button onClick={() => setConfirmRevoke(true)} className="text-xs text-red-600 hover:underline">
             Revoke access
           </button>
         </div>
@@ -75,6 +83,17 @@ export function TenantPortalAdmin({ tenant }: { tenant: Tenant }) {
           </button>
         </div>
       )}
+      <ConfirmDialog
+        open={confirmRevoke}
+        onOpenChange={setConfirmRevoke}
+        title="Revoke portal access?"
+        description={`${tenant.name} will be signed out of the tenant portal immediately.`}
+        confirmLabel="Revoke access"
+        pendingLabel="Revoking…"
+        destructive
+        pending={revoking}
+        onConfirm={() => void revoke()}
+      />
     </div>
   )
 }

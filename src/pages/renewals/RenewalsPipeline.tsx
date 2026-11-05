@@ -1,11 +1,11 @@
 import { api } from '../../lib/api'
 import { PageHeader } from '../../components/PageHeader'
-import { StatusBadge } from '../../components/StatusBadge'
 import { DataTable } from '../../components/data-table/DataTable'
 import { dataTableColumnHelper } from '../../components/data-table/columns'
 import { csvFilename } from '../../components/data-table/csv'
 import { formatDate } from '../../lib/format'
 import type { Renewal } from '../../types'
+import { RenewalStatusSelect } from './RenewalStatusSelect'
 
 type RenewalRow = Renewal & {
   leases: {
@@ -44,7 +44,8 @@ const columns = [
   h.accessor('status', {
     header: 'Status',
     enableSorting: true,
-    cell: ({ row }) => <StatusBadge status={row.original.status} />,
+    // Inline edit via PUT /api/renewals/:id (status only); CSV export still reads the raw status value.
+    cell: ({ row }) => <RenewalStatusSelect id={row.original.id} status={row.original.status} tenantName={row.original.leases?.tenants?.name} />,
   }),
 ]
 

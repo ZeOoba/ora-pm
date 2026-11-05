@@ -1,6 +1,8 @@
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { toast } from 'sonner'
 import { api } from '../../lib/api'
+import { ConfirmDialog } from '../../components/ConfirmDialog'
 import { PageHeader } from '../../components/PageHeader'
 import { StatusBadge } from '../../components/StatusBadge'
 import { Field } from '../../components/form/Field'
@@ -25,6 +27,7 @@ export function CAMList() {
   const [calculating, setCalculating] = useState(false)
   const [calcError, setCalcError] = useState<string | null>(null)
   const [approvingId, setApprovingId] = useState<string | null>(null)
+  const [confirmRow, setConfirmRow] = useState<CAMRow | null>(null)
 
   // ── Properties list ────────────────────────────────────────────────────────
   const { data: properties } = useQuery({
@@ -105,8 +108,9 @@ export function CAMList() {
   }
 
   // ── Approve & bill ─────────────────────────────────────────────────────────
+  // Endpoint and payload unchanged (POST /cam/:id/approve, {}) — only the confirmation UI moved
+  // from the browser confirm prompt to ConfirmDialog, and the error from a browser alert to a toast.
   async function handleApprove(row: CAMRow) {
-    if (!confirm('Approve and post this true-up charge to the tenant ledger?')) return
     setApprovingId(row.id)
     try {
       await api.post<{ success: boolean; true_up_amount: number }>(`/cam/${row.id}/approve`, {})
@@ -115,10 +119,13 @@ export function CAMList() {
         qc.invalidateQueries({ queryKey: ['ar-aging'] }),
         qc.invalidateQueries({ queryKey: ['charges'] }),
       ])
+      toast.success('True-up approved and posted to the tenant ledger')
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Approve failed.')
+      toast.error(err instanceof Error ? err.message : 'Approve failed.')
     } finally {
+      // Closed on failure too: re-posting a ledger charge must be a fresh, deliberate click.
       setApprovingId(null)
+      setConfirmRow(null)
     }
   }
 
@@ -290,7 +297,7 @@ export function CAMList() {
                   <td className="px-4 py-3">
                     {row.status === 'draft' ? (
                       <button
-                        onClick={() => handleApprove(row)}
+                        onClick={() => setConfirmRow(row)}
                         disabled={isApproving}
                         className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium transition-colors
                           ${isApproving
@@ -318,6 +325,30 @@ export function CAMList() {
           </tbody>
         </table>
       </div>
+
+      <ConfirmDialog
+        open={confirmRow !== null}
+        onOpenChange={(open) => { if (!open) setConfirmRow(null) }}
+        title="Approve & bill this true-up?"
+        description={confirmRow && (
+          confirmRow.true_up_amount < 0 ? (
+            <>
+              {confirmRow.leases?.tenants?.name ?? 'This tenant'} ({confirmRow.reconciliation_year}) is owed a credit of{' '}
+              <span className="font-mono">{formatCurrency(Math.abs(confirmRow.true_up_amount))}</span>. Approving marks it billed
+              and flags the credit for manual handling — nothing is posted to the ledger.
+            </>
+          ) : (
+            <>
+              Posts a <span className="font-mono">{formatCurrency(confirmRow.true_up_amount)}</span> true-up charge for{' '}
+              {confirmRow.leases?.tenants?.name ?? 'this tenant'} ({confirmRow.reconciliation_year}) to the tenant ledger.
+            </>
+          )
+        )}
+        confirmLabel="Approve & Bill"
+        pendingLabel="Billing…"
+        pending={confirmRow !== null && approvingId === confirmRow.id}
+        onConfirm={() => { if (confirmRow) void handleApprove(confirmRow) }}
+      />
     </div>
   )
 }

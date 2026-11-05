@@ -5,6 +5,7 @@ import { PageHeader } from '../components/PageHeader'
 import { StatusBadge } from '../components/StatusBadge'
 import { KpiStat } from '../components/ui/KpiStat'
 import { EmptyState } from '../components/ui/EmptyState'
+import { QueryState } from '../components/QueryState'
 import { formatCurrency, formatDate } from '../lib/format'
 import type { RentRollRow, CriticalDateRow, ARLedgerRow } from '../types'
 
@@ -33,13 +34,12 @@ export function Dashboard() {
     d => d.urgency === 'urgent' || d.urgency === 'overdue'
   )
 
-  const isLoading = rentRoll.isLoading || critDates.isLoading || arAging.isLoading
-
-  if (isLoading) return <p className="text-gray-500 p-4">Loading portfolio…</p>
-
+  // Any failed read shows the error banner instead of KPIs: a failed AR or rent-roll query used to
+  // render as $0 outstanding / 0% occupancy, indistinguishable from a healthy portfolio.
   return (
     <div>
       <PageHeader title="Portfolio Overview" />
+      <QueryState query={[rentRoll, critDates, arAging]}>
 
       {/* KPI strip */}
       <div className="grid grid-cols-4 gap-4 mb-8">
@@ -97,6 +97,7 @@ export function Dashboard() {
       {urgentDates.length === 0 && totalAR === 0 && (
         <EmptyState title="Portfolio is healthy" message="No urgent dates or outstanding AR." />
       )}
+      </QueryState>
     </div>
   )
 }

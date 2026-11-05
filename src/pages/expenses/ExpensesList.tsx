@@ -1,6 +1,8 @@
 import { useCallback, useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { toast } from 'sonner'
 import { api } from '../../lib/api'
+import { ConfirmDialog } from '../../components/ConfirmDialog'
 import { useSaveMutation } from '../../lib/mutations'
 import { formatCurrency, formatDate } from '../../lib/format'
 import { PageHeader } from '../../components/PageHeader'
@@ -138,6 +140,8 @@ export function ExpensesList() {
   const [showForm, setShowForm] = useState(false)
   const [form, setForm] = useState<ExpenseForm>(EMPTY_FORM)
   const [errors, setErrors] = useState<ExpenseErrors>({})
+  const [deleteId, setDeleteId] = useState<string | null>(null)
+  const [deleting, setDeleting] = useState(false)
   // Whole-filter total from the list response (all pages, current property filter).
   const [totalAmount, setTotalAmount] = useState<string | null>(null)
   const handlePageData = useCallback((page: Record<string, unknown>) => {
@@ -196,16 +200,24 @@ export function ExpensesList() {
     })
   }
 
-  // Delete behavior unchanged (Task 6 replaces confirm()); refreshes the DataTable query.
-  const columns = useMemo(
-    () =>
-      buildColumns(async (id) => {
-        if (!confirm('Delete this expense?')) return
-        await api.del(`/expenses/${id}`)
-        qc.invalidateQueries({ queryKey: ['expenses'] })
-      }),
-    [qc],
-  )
+  // Same DELETE /expenses/:id as before; the confirmation is a ConfirmDialog and the outcome a toast
+  // (a failed delete used to be an unhandled promise rejection). Refreshes the DataTable query.
+  const columns = useMemo(() => buildColumns((id) => setDeleteId(id)), [])
+
+  async function confirmDelete() {
+    if (!deleteId) return
+    setDeleting(true)
+    try {
+      await api.del(`/expenses/${deleteId}`)
+      await qc.invalidateQueries({ queryKey: ['expenses'] })
+      toast.success('Expense deleted')
+    } catch (e) {
+      toast.error(`Failed to delete expense: ${(e as Error).message}`)
+    } finally {
+      setDeleting(false)
+      setDeleteId(null)
+    }
+  }
 
   function handleCancel() {
     setShowForm(false)
@@ -350,6 +362,18 @@ export function ExpensesList() {
         csvFilename={csvFilename('expenses')}
         initialSort={{ id: 'expense_date', desc: true }}
         emptyTitle="No expenses logged"
+      />
+
+      <ConfirmDialog
+        open={deleteId !== null}
+        onOpenChange={(open) => { if (!open) setDeleteId(null) }}
+        title="Delete this expense?"
+        description="This permanently removes the expense (and its share of any CAM recoverable total). It cannot be undone."
+        confirmLabel="Delete"
+        pendingLabel="Deleting…"
+        destructive
+        pending={deleting}
+        onConfirm={() => void confirmDelete()}
       />
     </div>
   )
