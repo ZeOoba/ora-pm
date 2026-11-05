@@ -55,7 +55,7 @@ export function StyleGuide() {
       <header className="mb-10">
         <p className="text-xs font-semibold uppercase tracking-wider text-gold">Oxford Realty Advisors</p>
         <h1 className="text-3xl font-display text-navy">P1 design system</h1>
-        <p className="font-mono text-xs text-status-neutral mt-1">/styleguide · P1 design system</p>
+        <p className="font-mono text-xs text-status-neutral mt-1">/styleguide</p>
       </header>
 
       <section className="mb-10">
