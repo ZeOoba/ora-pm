@@ -1,6 +1,8 @@
+import path from 'node:path'
 import { defineConfig, configDefaults } from 'vitest/config'
 
 export default defineConfig({
+  resolve: { alias: { '@': path.resolve(__dirname, 'src') } },
   test: {
     exclude: [...configDefaults.exclude, '**/.worktrees/**'],
     environment: 'node',
