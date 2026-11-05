@@ -24,15 +24,23 @@ const env = {
 const app = createApp()
 
 // Chainable, awaitable PostgREST builder double.
-type Builder = Record<'select' | 'eq' | 'or' | 'order' | 'range', Mock> & { then: unknown }
+type Builder = Record<'select' | 'eq' | 'or' | 'order' | 'range' | 'gt' | 'limit', Mock> & { then: unknown }
 type ListBody = { data: Array<Record<string, unknown>>; total: number }
 
 function builder(result: { data: unknown; count?: number | null; error?: unknown }): Builder {
   const b = {} as Builder
-  for (const m of ['select', 'eq', 'or', 'order', 'range'] as const) b[m] = vi.fn().mockReturnValue(b)
+  for (const m of ['select', 'eq', 'or', 'order', 'range', 'gt', 'limit'] as const) b[m] = vi.fn().mockReturnValue(b)
   b.then = (resolve: (v: unknown) => unknown, reject?: (e: unknown) => unknown) =>
     Promise.resolve({ error: null, count: null, ...result }).then(resolve, reject)
   return b
+}
+
+// Expenses also issues amount-chunk queries after the page query; give it an empty chunk
+// (keyset paging stops on 0 rows) while every other route reuses the single builder.
+function wireList(route: string, b: Builder) {
+  if (route !== '/api/expenses') return mockFrom.mockReturnValue(b)
+  const queue = [b]
+  return mockFrom.mockImplementation(() => queue.shift() ?? builder({ data: [] }))
 }
 
 function get(path: string) {
@@ -68,7 +76,7 @@ const CASES: Case[] = [
 describe.each(CASES)('GET $route list contract', ({ route, table, defaultOrder, sortField }) => {
   it('returns { data, total } using the exact count and applies range(offset, offset+limit-1)', async () => {
     const b = builder({ data: ROWS, count: 137 })
-    mockFrom.mockReturnValue(b)
+    wireList(route, b)
     const res = await get(`${route}?limit=20&offset=40`)
     expect(res.status).toBe(200)
     const body = (await res.json()) as ListBody
@@ -82,7 +90,7 @@ describe.each(CASES)('GET $route list contract', ({ route, table, defaultOrder, 
 
   it('uses the pre-existing default order when no sort is given', async () => {
     const b = builder({ data: ROWS, count: 2 })
-    mockFrom.mockReturnValue(b)
+    wireList(route, b)
     const res = await get(`${route}?limit=50`)
     expect(res.status).toBe(200)
     expect(b.range).toHaveBeenCalledWith(0, 49)
@@ -92,13 +100,17 @@ describe.each(CASES)('GET $route list contract', ({ route, table, defaultOrder, 
   it('falls back to total 0 when count is null', async () => {
     mockFrom.mockReturnValue(builder({ data: [], count: null }))
     const body = (await (await get(route)).json()) as ListBody
-    // expenses additionally returns total_amount (whole-filter sum)
-    expect(body).toMatchObject({ data: [], total: 0 })
+    if (route === '/api/expenses') {
+      // expenses additionally returns total_amount (whole-filter sum)
+      expect(body).toEqual({ data: [], total: 0, total_amount: '0.00' })
+    } else {
+      expect(body).toEqual({ data: [], total: 0 })
+    }
   })
 
   it('applies sort/dir from the allow-list', async () => {
     const b = builder({ data: ROWS, count: 2 })
-    mockFrom.mockReturnValue(b)
+    wireList(route, b)
     const res = await get(`${route}?sort=${sortField}&dir=desc`)
     expect(res.status).toBe(200)
     expect(b.order).toHaveBeenCalledWith(sortField, { ascending: false })

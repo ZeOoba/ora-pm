@@ -70,15 +70,20 @@ export const api = {
     const sep = path.includes('?') ? '&' : '?'
     return request<{ data: T[]; total: number }>(qs ? `${path}${sep}${qs}` : path)
   },
-  // Fetches EVERY row of a paged list endpoint for pickers/selectors (pages of 200 until
-  // rows.length >= total, an empty page, or the 5,000-row hard cap). Caller limit/offset are ignored.
+  // Fetches EVERY row of a paged list endpoint for pickers/selectors (pages of 200). Stops on a
+  // short/empty page, or when rows.length >= total (only trusted when total > 0, since a null
+  // count falls back to 0), or at the 5,000-row hard cap (warns). Caller limit/offset are ignored.
   listAll: async <T>(path: string, params: ListQueryParams = {}): Promise<T[]> => {
     const rows: T[] = []
     for (;;) {
       const res = await api.list<T>(path, { ...params, limit: LIST_ALL_PAGE, offset: rows.length })
-      if (res.data.length === 0) break
       rows.push(...res.data)
-      if (rows.length >= res.total || rows.length >= LIST_ALL_MAX_ROWS) break
+      if (res.data.length < LIST_ALL_PAGE) break
+      if (res.total > 0 && rows.length >= res.total) break
+      if (rows.length >= LIST_ALL_MAX_ROWS) {
+        console.warn(`api.listAll(${path}) hit the ${LIST_ALL_MAX_ROWS}-row cap; results truncated`)
+        break
+      }
     }
     return rows.slice(0, LIST_ALL_MAX_ROWS)
   },

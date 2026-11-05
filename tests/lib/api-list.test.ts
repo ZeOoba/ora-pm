@@ -109,6 +109,24 @@ describe('api.listAll', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
+  it('stops on a short page even if total is larger', async () => {
+    const fetchMock = stubPages([
+      { data: items(0, 200), total: 999 },
+      { data: items(200, 120), total: 999 },
+    ])
+    expect(await api.listAll('/tenants')).toHaveLength(320)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not stop after page 1 when total is 0 (null-count fallback): 200 then 50 rows', async () => {
+    const fetchMock = stubPages([
+      { data: items(0, 200), total: 0 },
+      { data: items(200, 50), total: 0 },
+    ])
+    expect(await api.listAll('/tenants')).toHaveLength(250)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
   it('stops on an empty page even if total is larger', async () => {
     const fetchMock = stubPages([
       { data: items(0, 200), total: 999 },
@@ -119,11 +137,13 @@ describe('api.listAll', () => {
   })
 
   it('hard-caps at 5,000 rows', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const pages = Array.from({ length: 30 }, (_, i) => ({ data: items(i * 200, 200), total: 100000 }))
     const fetchMock = stubPages(pages)
     const rows = await api.listAll('/tenants')
     expect(rows).toHaveLength(5000)
     expect(fetchMock).toHaveBeenCalledTimes(25)
+    expect(warn).toHaveBeenCalled()
   })
 
   it('overrides caller-supplied limit/offset', async () => {

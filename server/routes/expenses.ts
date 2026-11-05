@@ -8,9 +8,11 @@ type Env = { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string }
 
 export const expensesRouter = new Hono<{ Bindings: Env }>()
 
-// PostgREST caps rows per request (max-rows ~1000), so a whole-filter sum pages
-// through the amounts in chunks of this size until a short chunk comes back.
+// PostgREST caps rows per request (max-rows, possibly < 1000), so a whole-filter sum
+// keyset-pages through the amounts in chunks of this size until a chunk comes back empty.
 const AMOUNT_CHUNK = 1000
+// Safety cap (200 chunks): fail loudly rather than return a partial total.
+const MAX_AMOUNT_CHUNKS = 200
 
 // One filter function shared by the page query, the count fallback and every
 // amount chunk so the Total always reflects exactly the rows the list is filtered to.
@@ -40,18 +42,32 @@ expensesRouter.get('/', async (c) => {
   }
 
   // Whole-filter total (not just this page), summed in integer cents to avoid float drift.
+  // Keyset-paged on id (not offset/short-chunk): PostgREST max-rows may be below AMOUNT_CHUNK, so a
+  // short chunk does not mean the end. Only an empty chunk stops the loop.
   let cents = 0
-  for (let from = 0; ; from += AMOUNT_CHUNK) {
-    const { data: chunk, error: sumError } = await applyExpenseFilter(
-      db.from('expenses').select('amount'),
-      propertyId,
-    )
-      .order('id')
-      .range(from, from + AMOUNT_CHUNK - 1)
+  let lastId: string | undefined
+  let finished = false
+  for (let i = 0; i < MAX_AMOUNT_CHUNKS; i++) {
+    let q = applyExpenseFilter(db.from('expenses').select('id, amount'), propertyId).order('id')
+    if (lastId !== undefined) q = q.gt('id', lastId)
+    const { data: chunk, error: sumError } = await q.limit(AMOUNT_CHUNK)
     if (sumError) return dbError(c, sumError, 'Failed to load expenses')
-    const amounts = (chunk ?? []) as Array<{ amount: number | string | null }>
-    for (const row of amounts) cents += Math.round(Number(row.amount ?? 0) * 100) || 0
-    if (amounts.length < AMOUNT_CHUNK) break
+    const amounts = (chunk ?? []) as Array<{ id: string; amount: number | string | null }>
+    if (amounts.length === 0) {
+      finished = true
+      break
+    }
+    for (const row of amounts) {
+      const n = Number(row.amount)
+      if (row.amount === null || !Number.isFinite(n)) {
+        return dbError(c, { message: `non-numeric expense amount (id ${row.id})` }, 'Failed to load expenses')
+      }
+      cents += Math.round(n * 100)
+    }
+    lastId = amounts[amounts.length - 1].id
+  }
+  if (!finished) {
+    return dbError(c, { message: `expense total exceeded ${MAX_AMOUNT_CHUNKS} chunks` }, 'Failed to load expenses')
   }
 
   return c.json({ data, total: count ?? 0, total_amount: (cents / 100).toFixed(2) })
