@@ -41,7 +41,7 @@ describe('AR aging chart colors come from theme tokens', () => {
     })
   })
   it('<Bar fill> uses the ChartConfig-generated var, not the raw color', () => {
-    const dash = read('../../src/pages/ar/ARDashboard.tsx')
+    const dash = read('../../src/components/charts/AgingChart.tsx')
     expect(dash).toContain('fill={`var(--color-${s.key}, ${s.color})`}')
     expect(dash).not.toContain('fill={s.color}')
   })

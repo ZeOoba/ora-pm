@@ -7,7 +7,12 @@ import { KpiStat } from '../components/ui/KpiStat'
 import { EmptyState } from '../components/ui/EmptyState'
 import { QueryState } from '../components/QueryState'
 import { formatCurrency, formatDate } from '../lib/format'
-import type { RentRollRow, CriticalDateRow, ARLedgerRow } from '../types'
+import { AgingChart } from '../components/charts/AgingChart'
+import { OccupancyDonut } from '../components/charts/OccupancyDonut'
+import { ExpiryLadderChart } from '../components/charts/ExpiryLadderChart'
+import { expiryLadder, occupancySplit } from '../components/charts/derive'
+import type { AgingTotals } from './ar/ar-aging-view'
+import type { RentRollRow, CriticalDateRow } from '../types'
 
 export function Dashboard() {
   const rentRoll  = useQuery({
@@ -18,9 +23,11 @@ export function Dashboard() {
     queryKey: ['critical-dates'],
     queryFn: () => api.get<{ data: CriticalDateRow[] }>('/reports/critical-dates').then(r => r.data),
   })
+  // Same key + response shape as the AR page: the whole response (rows + server-computed totals).
+  // invalidateQueries(['ar-aging']) elsewhere prefix-matches it.
   const arAging = useQuery({
-    queryKey: ['ar-aging'],
-    queryFn: () => api.get<{ data: ARLedgerRow[] }>('/reports/ar-aging').then(r => r.data),
+    queryKey: ['ar-aging', 'buckets'],
+    queryFn: () => api.get<{ data: unknown[]; totals: AgingTotals }>('/reports/ar-aging'),
   })
 
   // Derived stats
@@ -29,7 +36,10 @@ export function Dashboard() {
   const totalUnits  = units.length
   const occupancyPct = totalUnits > 0 ? Math.round((occupied / totalUnits) * 100) : 0
   const totalRentRoll = units.reduce((s, u) => s + (u.total_monthly ?? 0), 0)
-  const totalAR       = (arAging.data ?? []).reduce((s, r) => s + r.balance, 0)
+  const arTotals      = arAging.data?.totals
+  const totalAR       = arTotals?.balance ?? 0
+  const split         = occupancySplit(units)
+  const ladder        = expiryLadder(units, new Date().getFullYear())
   const urgentDates   = (critDates.data ?? []).filter(
     d => d.urgency === 'urgent' || d.urgency === 'overdue'
   )
@@ -42,11 +52,18 @@ export function Dashboard() {
       <QueryState query={[rentRoll, critDates, arAging]}>
 
       {/* KPI strip */}
-      <div className="grid grid-cols-4 gap-4 mb-8">
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 mb-8">
         <KpiStat label="Occupancy" value={`${occupancyPct}%`} sub={`${occupied} of ${totalUnits} units`} />
         <KpiStat label="Monthly Rent Roll" value={formatCurrency(totalRentRoll)} sub="Active leases" />
         <KpiStat label="Outstanding AR" value={formatCurrency(totalAR)} sub="Unpaid charges" warn={totalAR > 0} />
         <KpiStat label="Critical Dates" value={urgentDates.length} sub="Urgent or overdue" warn={urgentDates.length > 0} />
+      </div>
+
+      {/* Charts: all derived from the already-fetched rent roll and AR aging responses (no extra endpoints) */}
+      <div className="mb-8 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+        <OccupancyDonut split={split} />
+        <ExpiryLadderChart ladder={ladder} />
+        {arTotals && <AgingChart totals={arTotals} className="" />}
       </div>
 
       {/* Urgent critical dates */}
