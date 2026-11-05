@@ -54,3 +54,39 @@ describe('AppShell', () => {
     expect(html).toContain('aria-current="page"')
   })
 })
+
+// The rail's collapsed state is read from localStorage in the useState initializer, so the very
+// first render is already collapsed (no expanded-then-collapsed flash after an effect).
+describe('AppShell collapsed rail (first render)', () => {
+  function withStorage(storage: unknown, fn: () => void) {
+    const had = Object.prototype.hasOwnProperty.call(globalThis, 'localStorage')
+    const prev = (globalThis as { localStorage?: unknown }).localStorage
+    Object.defineProperty(globalThis, 'localStorage', { value: storage, configurable: true, writable: true })
+    try {
+      fn()
+    } finally {
+      if (had) Object.defineProperty(globalThis, 'localStorage', { value: prev, configurable: true, writable: true })
+      else delete (globalThis as { localStorage?: unknown }).localStorage
+    }
+  }
+
+  it('renders collapsed on the first render when storage says so', () => {
+    withStorage({ getItem: () => '1', setItem: () => {} }, () => {
+      const html = render('/leases')
+      expect(html).toContain('aria-label="Expand navigation"')
+      expect(html).not.toContain('aria-label="Collapse navigation"')
+    })
+  })
+
+  it('renders expanded when storage throws (private mode)', () => {
+    const throwing = {
+      getItem: () => {
+        throw new Error('SecurityError')
+      },
+      setItem: () => {},
+    }
+    withStorage(throwing, () => {
+      expect(render('/leases')).toContain('aria-label="Collapse navigation"')
+    })
+  })
+})

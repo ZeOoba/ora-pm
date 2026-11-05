@@ -46,14 +46,15 @@ function Brand({ compact = false }: { compact?: boolean }) {
 export function AppShell({ children }: { children: React.ReactNode }) {
   const { pathname } = useLocation()
   const navigate = useNavigate()
-  const [collapsed, setCollapsed] = useState(false)
+  // Lazy initializer: the first render already has the stored state, so the rail never flashes
+  // expanded before collapsing. readCollapsed() swallows storage errors (private mode / blocked).
+  const [collapsed, setCollapsed] = useState(readCollapsed)
   const [mobileOpen, setMobileOpen] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
   const [email, setEmail] = useState<string | null>(null)
   const [isMac, setIsMac] = useState(false)
 
   useEffect(() => {
-    setCollapsed(readCollapsed())
     setIsMac(/mac|iphone|ipad/i.test(navigator.platform || navigator.userAgent))
   }, [])
 
