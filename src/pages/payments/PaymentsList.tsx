@@ -138,7 +138,7 @@ export function PaymentsList() {
   const leasesQ = useQuery({
     queryKey: ['leases', 'active', 'picker'],
     queryFn: () =>
-      api.list<LeaseWithJoins>('/leases', { status: 'active', limit: 200 }).then(r => r.data),
+      api.listAll<LeaseWithJoins>('/leases', { status: 'active' }),
   })
 
   const mutation = useSaveMutation<Payment>({

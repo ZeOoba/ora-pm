@@ -42,7 +42,12 @@ const columns = [
   h.accessor('type', {
     header: 'Type',
     enableSorting: true,
-    meta: { csv: (ch: Charge) => CHARGE_LABELS[ch.type] ?? ch.type },
+    meta: {
+      csv: (ch: Charge) => {
+        const label = CHARGE_LABELS[ch.type] ?? ch.type
+        return ch.voided_at ? `${label} (VOIDED)` : label
+      },
+    },
     cell: ({ row: { original: ch } }) => (
       <span className={cn(ch.voided_at && 'text-muted-foreground')}>
         {CHARGE_LABELS[ch.type] ?? ch.type}

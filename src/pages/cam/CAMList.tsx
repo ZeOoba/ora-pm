@@ -29,7 +29,7 @@ export function CAMList() {
   // ── Properties list ────────────────────────────────────────────────────────
   const { data: properties } = useQuery({
     queryKey: ['properties'],
-    queryFn: () => api.get<{ data: Property[] }>('/properties').then(r => r.data),
+    queryFn: () => api.listAll<Property>('/properties'),
   })
 
   // ── Rent roll for selected property (active leases) ────────────────────────

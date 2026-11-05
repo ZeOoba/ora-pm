@@ -92,7 +92,8 @@ describe.each(CASES)('GET $route list contract', ({ route, table, defaultOrder, 
   it('falls back to total 0 when count is null', async () => {
     mockFrom.mockReturnValue(builder({ data: [], count: null }))
     const body = (await (await get(route)).json()) as ListBody
-    expect(body).toEqual({ data: [], total: 0 })
+    // expenses additionally returns total_amount (whole-filter sum)
+    expect(body).toMatchObject({ data: [], total: 0 })
   })
 
   it('applies sort/dir from the allow-list', async () => {

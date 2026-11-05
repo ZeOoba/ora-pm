@@ -29,9 +29,9 @@ export function LeaseIntake() {
   const [confidence, setConfidence] = useState<Record<string, number>>({})
   const [warnings, setWarnings] = useState<string[]>([])
 
-  const tenantsQ = useQuery({ queryKey: ['tenants'], queryFn: () => api.get<{ data: Tenant[] }>('/tenants').then(r => r.data) })
-  const unitsQ = useQuery({ queryKey: ['units', 'all'], queryFn: () => api.get<{ data: Unit[] }>('/units').then(r => r.data) })
-  const propsQ = useQuery({ queryKey: ['properties'], queryFn: () => api.get<{ data: Property[] }>('/properties').then(r => r.data) })
+  const tenantsQ = useQuery({ queryKey: ['tenants'], queryFn: () => api.listAll<Tenant>('/tenants') })
+  const unitsQ = useQuery({ queryKey: ['units', 'all'], queryFn: () => api.listAll<Unit>('/units') })
+  const propsQ = useQuery({ queryKey: ['properties'], queryFn: () => api.listAll<Property>('/properties') })
 
   async function handleFile(file: File) {
     if (stage === 'extracting') return  // avoid a second egress call mid-extraction

@@ -57,7 +57,7 @@ export function InsuranceForm() {
 
   const { data: tenants, isLoading: tenantsLoading } = useQuery({
     queryKey: ['tenants'],
-    queryFn: () => api.get<{ data: Tenant[] }>('/tenants').then(r => r.data),
+    queryFn: () => api.listAll<Tenant>('/tenants'),
   })
 
   const mutation = useSaveMutation<InsuranceCertificate>({

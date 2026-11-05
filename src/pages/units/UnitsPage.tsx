@@ -48,7 +48,7 @@ export function UnitsPage() {
   // Properties feed both the filter dropdown and the Property column.
   const { data: properties } = useQuery({
     queryKey: ['properties', 'picker'],
-    queryFn: () => api.list<Property>('/properties', { limit: 200, sort: 'name', dir: 'asc' }).then((r) => r.data),
+    queryFn: () => api.listAll<Property>('/properties', { sort: 'name', dir: 'asc' }),
   })
 
   const propertyNames = useMemo(() => new Map((properties ?? []).map((p) => [p.id, p.name])), [properties])

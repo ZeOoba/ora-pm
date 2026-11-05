@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../../lib/api'
 import { useSaveMutation } from '../../lib/mutations'
@@ -138,11 +138,16 @@ export function ExpensesList() {
   const [showForm, setShowForm] = useState(false)
   const [form, setForm] = useState<ExpenseForm>(EMPTY_FORM)
   const [errors, setErrors] = useState<ExpenseErrors>({})
+  // Whole-filter total from the list response (all pages, current property filter).
+  const [totalAmount, setTotalAmount] = useState<string | null>(null)
+  const handlePageData = useCallback((page: Record<string, unknown>) => {
+    setTotalAmount(typeof page.total_amount === 'string' ? page.total_amount : null)
+  }, [])
 
   // Properties feed the filter dropdown and the form picker.
   const { data: propertiesData } = useQuery({
     queryKey: ['properties', 'picker'],
-    queryFn: () => api.list<Property>('/properties', { limit: 200, sort: 'name', dir: 'asc' }).then(r => r.data),
+    queryFn: () => api.listAll<Property>('/properties', { sort: 'name', dir: 'asc' }),
   })
   const properties = useMemo(() => propertiesData ?? [], [propertiesData])
   const filters = useMemo<FilterDef[]>(
@@ -214,6 +219,7 @@ export function ExpensesList() {
     <div>
       <PageHeader
         title="Expenses"
+        subtitle={totalAmount !== null ? `Total: ${formatCurrency(Number(totalAmount))}` : undefined}
         action={
           <Button type="button" onClick={() => setShowForm(true)}>
             + Add Expense
@@ -338,6 +344,7 @@ export function ExpensesList() {
         columns={columns}
         queryKey={['expenses', 'list']}
         fetchPage={(p) => api.list<ExpenseRow>('/expenses', p)}
+        onPageData={handlePageData}
         searchable={false}
         filters={filters}
         csvFilename={csvFilename('expenses')}

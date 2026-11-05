@@ -91,17 +91,17 @@ export function LeaseForm({
 
   const tenantsQ = useQuery({
     queryKey: ['tenants'],
-    queryFn: () => api.get<{ data: Tenant[] }>('/tenants').then(r => r.data),
+    queryFn: () => api.listAll<Tenant>('/tenants'),
   })
 
   const unitsQ = useQuery({
     queryKey: ['units', 'all'],
-    queryFn: () => api.get<{ data: Unit[] }>('/units').then(r => r.data),
+    queryFn: () => api.listAll<Unit>('/units'),
   })
 
   const propsQ = useQuery({
     queryKey: ['properties'],
-    queryFn: () => api.get<{ data: Property[] }>('/properties').then(r => r.data),
+    queryFn: () => api.listAll<Property>('/properties'),
   })
 
   const mutation = useSaveMutation<Lease>({

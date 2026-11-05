@@ -8,6 +8,16 @@ type Env = { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string }
 
 export const expensesRouter = new Hono<{ Bindings: Env }>()
 
+// PostgREST caps rows per request (max-rows ~1000), so a whole-filter sum pages
+// through the amounts in chunks of this size until a short chunk comes back.
+const AMOUNT_CHUNK = 1000
+
+// One filter function shared by the page query, the count fallback and every
+// amount chunk so the Total always reflects exactly the rows the list is filtered to.
+function applyExpenseFilter<Q>(q: Q, propertyId: string | undefined): Q {
+  return propertyId ? (q as unknown as { eq(col: string, val: string): Q }).eq('property_id', propertyId) : q
+}
+
 expensesRouter.get('/', async (c) => {
   const db = getDb(c.env)
   const propertyId = c.req.query('property_id')
@@ -16,18 +26,35 @@ expensesRouter.get('/', async (c) => {
     defaultSort: 'expense_date',
     defaultDir: 'desc',
   })
-  const base = db.from('expenses').select('*, properties(name)', { count: 'exact' })
-  const { data, error, count } = await (propertyId ? base.eq('property_id', propertyId) : base)
+  const { data, error, count } = await applyExpenseFilter(
+    db.from('expenses').select('*, properties(name)', { count: 'exact' }),
+    propertyId,
+  )
     .order(lq.sort, { ascending: lq.ascending })
     .order('id')
     .range(...lq.range!)
   if (error) {
-    return listErrorResponse(c, error, 'Failed to load expenses', () => {
-      const head = db.from('expenses').select('id', { count: 'exact', head: true })
-      return propertyId ? head.eq('property_id', propertyId) : head
-    })
+    return listErrorResponse(c, error, 'Failed to load expenses', () =>
+      applyExpenseFilter(db.from('expenses').select('id', { count: 'exact', head: true }), propertyId),
+    )
   }
-  return c.json({ data, total: count ?? 0 })
+
+  // Whole-filter total (not just this page), summed in integer cents to avoid float drift.
+  let cents = 0
+  for (let from = 0; ; from += AMOUNT_CHUNK) {
+    const { data: chunk, error: sumError } = await applyExpenseFilter(
+      db.from('expenses').select('amount'),
+      propertyId,
+    )
+      .order('id')
+      .range(from, from + AMOUNT_CHUNK - 1)
+    if (sumError) return dbError(c, sumError, 'Failed to load expenses')
+    const amounts = (chunk ?? []) as Array<{ amount: number | string | null }>
+    for (const row of amounts) cents += Math.round(Number(row.amount ?? 0) * 100) || 0
+    if (amounts.length < AMOUNT_CHUNK) break
+  }
+
+  return c.json({ data, total: count ?? 0, total_amount: (cents / 100).toFixed(2) })
 })
 
 expensesRouter.post('/', async (c) => {

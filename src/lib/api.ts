@@ -59,6 +59,9 @@ function buildQuery(params: ListQueryParams): string {
   return sp.toString()
 }
 
+const LIST_ALL_PAGE = 200
+const LIST_ALL_MAX_ROWS = 5000
+
 export const api = {
   get: <T>(path: string) => request<T>(path),
   // Paged list endpoints return { data, total } (total = full filtered row count).
@@ -66,6 +69,18 @@ export const api = {
     const qs = buildQuery(params)
     const sep = path.includes('?') ? '&' : '?'
     return request<{ data: T[]; total: number }>(qs ? `${path}${sep}${qs}` : path)
+  },
+  // Fetches EVERY row of a paged list endpoint for pickers/selectors (pages of 200 until
+  // rows.length >= total, an empty page, or the 5,000-row hard cap). Caller limit/offset are ignored.
+  listAll: async <T>(path: string, params: ListQueryParams = {}): Promise<T[]> => {
+    const rows: T[] = []
+    for (;;) {
+      const res = await api.list<T>(path, { ...params, limit: LIST_ALL_PAGE, offset: rows.length })
+      if (res.data.length === 0) break
+      rows.push(...res.data)
+      if (rows.length >= res.total || rows.length >= LIST_ALL_MAX_ROWS) break
+    }
+    return rows.slice(0, LIST_ALL_MAX_ROWS)
   },
   post: <T>(path: string, body: unknown) =>
     request<T>(path, { method: 'POST', body: JSON.stringify(body) }),

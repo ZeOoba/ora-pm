@@ -71,7 +71,7 @@ export function BudgetsList() {
 
   const { data: properties, isLoading: propsLoading } = useQuery({
     queryKey: ['properties'],
-    queryFn: () => api.get<{ data: Property[] }>('/properties').then(r => r.data),
+    queryFn: () => api.listAll<Property>('/properties'),
   })
 
   const yearNum = Number(year)

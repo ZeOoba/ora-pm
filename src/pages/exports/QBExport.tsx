@@ -13,7 +13,7 @@ export function QBExport() {
   const now = new Date()
   const { data: properties } = useQuery({
     queryKey: ['properties'],
-    queryFn: () => api.get<{ data: Property[] }>('/properties').then(r => r.data),
+    queryFn: () => api.listAll<Property>('/properties'),
   })
 
   const [propertyId, setPropertyId] = useState('')

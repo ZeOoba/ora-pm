@@ -21,6 +21,7 @@ import {
   collectPages,
   toListParams,
   type FetchPage,
+  type PageResult,
   type TableState,
 } from './table-state'
 
@@ -45,6 +46,11 @@ export type DataTableProps<T extends RowData> = {
   /** Client mode: error to show in the banner (with `onRetry`). */
   error?: Error | null
   onRetry?: () => void
+  /**
+   * Server mode: called with each settled page response (including cache hits, not
+   * placeholder data) so callers can read extra fields such as a whole-filter total.
+   */
+  onPageData?: (page: PageResult<T> & Record<string, unknown>) => void
   searchable?: boolean
   searchPlaceholder?: string
   filters?: FilterDef[]
@@ -133,6 +139,7 @@ export function DataTable<T extends RowData>({
   clientFilterFn,
   error: clientError,
   onRetry,
+  onPageData,
   searchable: searchableProp,
 
   searchPlaceholder = 'Search…',
@@ -222,6 +229,12 @@ export function DataTable<T extends RowData>({
   const refetch = () => (isClient ? onRetry?.() : void serverQuery.refetch())
   const rows = data?.data ?? (EMPTY as T[])
   const total = data?.total ?? 0
+
+  const serverData = serverQuery.data
+  const serverPlaceholder = serverQuery.isPlaceholderData
+  useEffect(() => {
+    if (!isClient && serverData && !serverPlaceholder) onPageData?.(serverData as PageResult<T> & Record<string, unknown>)
+  }, [isClient, serverData, serverPlaceholder, onPageData])
 
   // Deleted rows can leave us past the last page; fall back to the first.
   useEffect(() => {
