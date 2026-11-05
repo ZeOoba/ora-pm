@@ -3,12 +3,18 @@ import { useParams, Link } from 'react-router'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../../lib/api'
 import { useSaveMutation } from '../../lib/mutations'
-import { PageHeader } from '../../components/PageHeader'
+import { EntityPage, DetailList, DetailRow, SectionCard } from '../../components/EntityPage'
+import { QueryState } from '../../components/QueryState'
+import { Button } from '../../components/ui/Button'
+import { EmptyState } from '../../components/ui/EmptyState'
+import { StatusBadge } from '../../components/StatusBadge'
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '../../components/ui/sheet'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../../components/ui/table'
 import { Field } from '../../components/form/Field'
 import { TextInput, NumberInput, Select } from '../../components/form/inputs'
-import { formatSF } from '../../lib/format'
+import { formatCurrency, formatDate, formatSF } from '../../lib/format'
 import { UnitMatrix } from '../units/UnitMatrix'
-import type { Property, Unit, UnitStatus } from '../../types'
+import type { Property, RentRollRow, Unit, UnitStatus } from '../../types'
 
 type PropertyWithUnits = Property & { units: Unit[] }
 
@@ -44,9 +50,17 @@ export function PropertyDetail() {
   const [unitForm, setUnitForm] = useState<UnitForm>(EMPTY_UNIT)
   const [unitErrors, setUnitErrors] = useState<UnitErrors>({})
 
-  const { data, isLoading } = useQuery({
+  const query = useQuery({
     queryKey: ['property', id],
     queryFn: () => api.get<{ data: PropertyWithUnits }>(`/properties/${id}`).then(r => r.data),
+    enabled: !!id,
+  })
+  const data = query.data
+
+  // Leases tab: the unpaged rent-roll report filtered to this property (there is no per-property lease endpoint).
+  const rentRoll = useQuery({
+    queryKey: ['rent-roll'],
+    queryFn: () => api.get<{ data: RentRollRow[] }>('/reports/rent-roll').then(r => r.data),
     enabled: !!id,
   })
 
@@ -83,149 +97,173 @@ export function PropertyDetail() {
     })
   }
 
-  if (isLoading) return <p className="text-gray-500 p-4">Loading…</p>
-  if (!data) return <p className="text-gray-500 p-4">Property not found.</p>
+  function closeUnitForm() {
+    setShowUnitForm(false)
+    setUnitForm(EMPTY_UNIT)
+    setUnitErrors({})
+  }
 
-  const occupiedCount = data.units.filter(u => u.status === 'occupied').length
+  const units = data?.units ?? []
+  const occupiedCount = units.filter(u => u.status === 'occupied').length
+  const leaseRows = (rentRoll.data ?? []).filter(r => r.property_id === id && r.lease_id)
 
   return (
-    <div>
-      <PageHeader
-        title={data.name}
-        action={
-          <Link
-            to={`/properties/${id}/edit`}
-            className="text-sm bg-gray-100 hover:bg-gray-200 px-3 py-1.5 rounded"
-          >
-            Edit
-          </Link>
-        }
-      />
-
-      {/* Summary card */}
-      <div className="bg-white rounded-lg border border-gray-200 p-4 mb-6">
-        <h2 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">
-          Property Summary
-        </h2>
-        <dl className="grid grid-cols-2 gap-x-8 gap-y-2">
-          <SummaryRow label="Address">
-            {data.address}, {data.city}, {data.state} {data.zip}
-          </SummaryRow>
-          <SummaryRow label="Type">
-            <span className="capitalize">{data.property_type}</span>
-          </SummaryRow>
-          <SummaryRow label="Total SF">{formatSF(data.total_sf)}</SummaryRow>
-          <SummaryRow label="Entity LLC">{data.entity_llc ?? '—'}</SummaryRow>
-          <SummaryRow label="Units">{data.units.length}</SummaryRow>
-          <SummaryRow label="Occupied">{occupiedCount} of {data.units.length}</SummaryRow>
-        </dl>
-        {data.notes && (
-          <p className="text-sm text-gray-500 mt-3 pt-3 border-t border-gray-100">{data.notes}</p>
-        )}
-      </div>
-
-      {/* Units section */}
-      <div>
-        <div className="flex items-center justify-between mb-3">
-          <h2 className="text-base font-semibold text-gray-800">Units</h2>
-          {!showUnitForm && (
-            <button
-              type="button"
-              onClick={() => setShowUnitForm(true)}
-              className="text-sm bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded"
-            >
-              + Add Unit
-            </button>
-          )}
-        </div>
-
-        {showUnitForm && (
-          <div className="bg-white rounded-lg border border-gray-200 p-4 mb-4">
-            <h3 className="text-sm font-medium text-gray-700 mb-3">Add Unit</h3>
-            <form onSubmit={handleUnitSubmit} noValidate>
-              <div className="grid grid-cols-4 gap-3">
+    <QueryState query={query}>
+      {!data ? (
+        <EmptyState title="Property not found" message="It may have been removed." />
+      ) : (
+        <EntityPage
+          title={data.name}
+          subtitle={`${data.address}, ${data.city}, ${data.state} ${data.zip}`}
+          status={<span className="text-sm capitalize text-status-neutral">{data.property_type}</span>}
+          actions={
+            <Button asChild variant="ghost" className="border border-border">
+              <Link to={`/properties/${id}/edit`}>Edit</Link>
+            </Button>
+          }
+          kpis={[
+            { label: 'Total SF', value: formatSF(data.total_sf) },
+            { label: 'Units', value: units.length },
+            { label: 'Occupied', value: `${occupiedCount} of ${units.length}` },
+            { label: 'Entity LLC', value: data.entity_llc ?? '—' },
+          ]}
+          tabs={[
+            {
+              value: 'overview',
+              label: 'Overview',
+              content: (
+                <SectionCard title="Property Summary">
+                  <DetailList>
+                    <DetailRow label="Address">
+                      {data.address}, {data.city}, {data.state} {data.zip}
+                    </DetailRow>
+                    <DetailRow label="Type">
+                      <span className="capitalize">{data.property_type}</span>
+                    </DetailRow>
+                    <DetailRow label="Total SF">{formatSF(data.total_sf)}</DetailRow>
+                    <DetailRow label="Entity LLC">{data.entity_llc ?? '—'}</DetailRow>
+                    <DetailRow label="Units">{units.length}</DetailRow>
+                    <DetailRow label="Occupied">{occupiedCount} of {units.length}</DetailRow>
+                  </DetailList>
+                  {data.notes && (
+                    <p className="mt-3 border-t border-border pt-3 text-sm text-status-neutral">{data.notes}</p>
+                  )}
+                </SectionCard>
+              ),
+            },
+            {
+              value: 'units',
+              label: 'Units',
+              content: (
                 <div>
-                  <Field label="Suite" htmlFor="unit-suite" required error={unitErrors.suite}>
-                    <TextInput
-                      id="unit-suite"
-                      value={unitForm.suite}
-                      onChange={e => setUnitField('suite', e.target.value)}
-                      placeholder="101"
-                    />
-                  </Field>
+                  <div className="mb-3 flex items-center justify-between">
+                    <h2 className="font-display text-base text-navy">Units</h2>
+                    <Button type="button" onClick={() => setShowUnitForm(true)}>+ Add Unit</Button>
+                  </div>
+                  <UnitMatrix propertyId={id!} />
                 </div>
-                <div>
-                  <Field label="Floor" htmlFor="unit-floor">
-                    <TextInput
-                      id="unit-floor"
-                      value={unitForm.floor}
-                      onChange={e => setUnitField('floor', e.target.value)}
-                      placeholder="1"
-                    />
-                  </Field>
-                </div>
-                <div>
-                  <Field label="SF" htmlFor="unit-sf" required error={unitErrors.sf}>
-                    <NumberInput
-                      id="unit-sf"
-                      value={unitForm.sf}
-                      onChange={e => setUnitField('sf', e.target.value)}
-                      placeholder="2400"
-                      min={1}
-                    />
-                  </Field>
-                </div>
-                <div>
-                  <Field label="Status" htmlFor="unit-status">
-                    <Select
-                      id="unit-status"
-                      value={unitForm.status}
-                      onChange={e => setUnitField('status', e.target.value)}
-                    >
-                      <option value="vacant">Vacant</option>
-                      <option value="occupied">Occupied</option>
-                      <option value="notice">Notice</option>
-                      <option value="unavailable">Unavailable</option>
-                    </Select>
-                  </Field>
-                </div>
-              </div>
-              {unitMutation.error && (
-                <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded p-2 mb-3">
-                  {unitMutation.error.message}
-                </p>
-              )}
-              <div className="flex items-center gap-3 mt-1">
-                <button
-                  type="submit"
-                  disabled={unitMutation.isPending}
-                  className="bg-blue-600 hover:bg-blue-700 text-white rounded-md px-4 py-2 text-sm font-medium disabled:opacity-50 transition-colors"
+              ),
+            },
+            {
+              value: 'leases',
+              label: 'Leases',
+              content: (
+                <QueryState
+                  query={rentRoll}
+                  isEmpty={() => leaseRows.length === 0}
+                  empty={<EmptyState title="No active leases" message="No unit at this property has an active lease." />}
                 >
-                  {unitMutation.isPending ? 'Saving…' : 'Add Unit'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => { setShowUnitForm(false); setUnitForm(EMPTY_UNIT); setUnitErrors({}) }}
-                  className="text-sm text-gray-600 hover:text-gray-900"
-                >
-                  Cancel
-                </button>
-              </div>
-            </form>
-          </div>
-        )}
+                  <div className="overflow-x-auto rounded-lg border border-border bg-card">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Suite</TableHead>
+                          <TableHead>Tenant</TableHead>
+                          <TableHead className="text-right">Monthly rent</TableHead>
+                          <TableHead>End date</TableHead>
+                          <TableHead>Status</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {leaseRows.map(r => (
+                          <TableRow key={r.lease_id}>
+                            <TableCell className="font-medium">
+                              <Link to={`/leases/${r.lease_id}`} className="text-navy underline-offset-2 hover:underline">{r.suite}</Link>
+                            </TableCell>
+                            <TableCell>{r.tenant_name ?? '—'}</TableCell>
+                            <TableCell className="text-right font-mono">{formatCurrency(r.total_monthly)}</TableCell>
+                            <TableCell>{formatDate(r.end_date)}</TableCell>
+                            <TableCell>{r.lease_status ? <StatusBadge status={r.lease_status} /> : '—'}</TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                </QueryState>
+              ),
+            },
+          ]}
+        />
+      )}
 
-        <UnitMatrix propertyId={id!} />
-      </div>
-    </div>
-  )
-}
-
-function SummaryRow({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="flex items-start text-sm">
-      <dt className="text-gray-500 w-28 shrink-0">{label}</dt>
-      <dd className="font-medium text-gray-900">{children}</dd>
-    </div>
+      <Sheet open={showUnitForm} onOpenChange={(open) => { if (!open) closeUnitForm() }}>
+        <SheetContent>
+          <SheetHeader>
+            <SheetTitle>Add Unit</SheetTitle>
+            <SheetDescription>Create a new unit at this property.</SheetDescription>
+          </SheetHeader>
+          <form onSubmit={handleUnitSubmit} noValidate className="flex-1 overflow-y-auto px-4 pb-4">
+            <Field label="Suite" htmlFor="unit-suite" required error={unitErrors.suite}>
+              <TextInput
+                id="unit-suite"
+                value={unitForm.suite}
+                onChange={e => setUnitField('suite', e.target.value)}
+                placeholder="101"
+              />
+            </Field>
+            <Field label="Floor" htmlFor="unit-floor">
+              <TextInput
+                id="unit-floor"
+                value={unitForm.floor}
+                onChange={e => setUnitField('floor', e.target.value)}
+                placeholder="1"
+              />
+            </Field>
+            <Field label="SF" htmlFor="unit-sf" required error={unitErrors.sf}>
+              <NumberInput
+                id="unit-sf"
+                value={unitForm.sf}
+                onChange={e => setUnitField('sf', e.target.value)}
+                placeholder="2400"
+                min={1}
+              />
+            </Field>
+            <Field label="Status" htmlFor="unit-status">
+              <Select
+                id="unit-status"
+                value={unitForm.status}
+                onChange={e => setUnitField('status', e.target.value)}
+              >
+                <option value="vacant">Vacant</option>
+                <option value="occupied">Occupied</option>
+                <option value="notice">Notice</option>
+                <option value="unavailable">Unavailable</option>
+              </Select>
+            </Field>
+            {unitMutation.error && (
+              <p role="alert" className="mb-3 rounded-md border border-status-danger/30 bg-status-danger/5 p-2 text-sm text-status-danger">
+                {unitMutation.error.message}
+              </p>
+            )}
+            <div className="mt-1 flex items-center gap-3">
+              <Button type="submit" disabled={unitMutation.isPending}>
+                {unitMutation.isPending ? 'Saving…' : 'Add Unit'}
+              </Button>
+              <Button type="button" variant="ghost" onClick={closeUnitForm}>Cancel</Button>
+            </div>
+          </form>
+        </SheetContent>
+      </Sheet>
+    </QueryState>
   )
 }
