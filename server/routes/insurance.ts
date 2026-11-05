@@ -11,8 +11,10 @@ export const insuranceRouter = new Hono<{ Bindings: Env }>()
 insuranceRouter.get('/', async (c) => {
   const db = getDb(c.env)
   // Historically unpaged: paging only applies when the caller passes limit/offset.
+  // Not 'status': the stored column can disagree with the status recomputed below from
+  // expiration_date, so sorting by it would order rows by a value the client never sees.
   const lq = parseListQuery(c, {
-    sortable: ['expiration_date', 'status'],
+    sortable: ['expiration_date'],
     defaultSort: 'expiration_date',
     unpagedByDefault: true,
   })

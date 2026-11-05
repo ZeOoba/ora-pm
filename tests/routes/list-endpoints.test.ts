@@ -69,7 +69,7 @@ const CASES: Case[] = [
   { route: '/api/payments', table: 'payments', defaultOrder: ['payment_date', false], sortField: 'amount' },
   { route: '/api/expenses', table: 'expenses', defaultOrder: ['expense_date', false], sortField: 'category' },
   { route: '/api/units', table: 'units', defaultOrder: ['suite', true], sortField: 'sf' },
-  { route: '/api/insurance', table: 'insurance_certificates', defaultOrder: ['expiration_date', true], sortField: 'status' },
+  { route: '/api/insurance', table: 'insurance_certificates', defaultOrder: ['expiration_date', true], sortField: 'expiration_date' },
   { route: '/api/renewals', table: 'renewals', defaultOrder: ['expiration_date', true], sortField: 'target_decision_date' },
 ]
 
@@ -241,6 +241,16 @@ describe('existing filters preserved', () => {
     const body = (await (await get('/api/insurance')).json()) as ListBody
     expect(body.total).toBe(1)
     expect(body.data[0].status).toBe('expired')
+  })
+})
+
+describe('insurance sort allow-list', () => {
+  // status is recomputed from expiration_date on read, so the stored column is not a valid sort key.
+  it('rejects sort=status with 422 and never queries', async () => {
+    const res = await get('/api/insurance?sort=status')
+    expect(res.status).toBe(422)
+    expect(await res.json()).toEqual({ error: 'Invalid sort field' })
+    expect(mockFrom).not.toHaveBeenCalled()
   })
 })
 

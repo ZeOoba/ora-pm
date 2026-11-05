@@ -36,9 +36,10 @@ const columns = [
     enableSorting: true,
     cell: ({ row }) => formatDate(row.original.expiration_date),
   }),
+  // Not sortable: the server recomputes status from expiration_date, so the stored column it
+  // would sort by can disagree with the badge shown. Sort by Expiration instead.
   h.accessor('status', {
     header: 'Status',
-    enableSorting: true,
     cell: ({ row }) => <StatusBadge status={row.original.status} />,
   }),
 ]
