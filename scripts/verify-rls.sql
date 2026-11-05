@@ -145,3 +145,18 @@ JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE n.nspname = 'public'
   AND c.relname IN ('ar_ledger', 'rent_roll', 'critical_dates')
 ORDER BY c.relname;
+
+-- ── Part 6 (P1 T12, 0018_admin_roles.sql): admin_users must have
+-- rowsecurity = true and ZERO policies — default-deny, service role only, the
+-- same deliberate posture as Part 4. Expect exactly one row, `true`, with
+-- policy_count = 0. A policy here (it would also surface in Part 3) means the
+-- admin role roster is reachable with the public anon key: report it. ─────────
+SELECT
+  t.schemaname,
+  t.tablename,
+  t.rowsecurity,
+  (SELECT count(*) FROM pg_policies p
+    WHERE p.schemaname = t.schemaname AND p.tablename = t.tablename) AS policy_count
+FROM pg_tables t
+WHERE t.schemaname = 'public'
+  AND t.tablename = 'admin_users';
