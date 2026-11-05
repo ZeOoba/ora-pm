@@ -12,17 +12,22 @@
 --     tenant-exclusion checks pass, so a row for a non-allowlisted email is
 --     never even read.
 --   * Nothing enforces a role in P1. The middleware only records it on the
---     request context (adminRole / adminEntityScope); no route reads it yet.
+--     request context (adminRole / adminEntityScope / adminRoleSource); no
+--     route reads it yet.
 --   * No seed rows. An allowlisted admin with NO row here is recorded as
---     'owner' — the legacy single-admin behaviour, unchanged. A FAILED lookup
---     (including this table not existing yet) is recorded as adminRole = null
---     (UNKNOWN) and the request continues; any future enforcement must treat
---     null as deny.
+--     adminRole = null (adminRoleSource = 'none'): no role at all. A FAILED
+--     lookup (an error, including this table not existing yet; no answer
+--     within the middleware's timeout; or a stored row that does not
+--     validate) is recorded as adminRole = null (adminRoleSource = 'error').
+--     Either way the request continues and access is unchanged in P1.
+--     Before any role is enforced (P3), seed one row per ADMIN_EMAILS entry;
+--     enforcement must treat a null or unset adminRole as deny.
 --
 -- Columns:
---   email         Stored lower-cased (CHECK). The middleware looks rows up by
---                 the lower-cased auth email, so a mixed-case row could never
---                 match. One row per email (UNIQUE).
+--   email         Stored lower-cased, trimmed and non-empty (CHECKs). The
+--                 middleware looks rows up by the exact lower-cased auth
+--                 email, so a mixed-case, padded or blank row could never
+--                 match anyone. One row per email (UNIQUE).
 --   role          owner | manager | bookkeeper | viewer (CHECK). Mirrored by
 --                 ADMIN_ROLES in server/lib/admin-roles.ts — change both in
 --                 the same PR (tests/lib/admin-roles.test.ts fails on drift).
@@ -53,7 +58,8 @@
 CREATE TABLE IF NOT EXISTS admin_users (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   email TEXT NOT NULL UNIQUE
-    CONSTRAINT admin_users_email_lowercase CHECK (email = lower(email)),
+    CONSTRAINT admin_users_email_lowercase CHECK (email = lower(email))
+    CONSTRAINT admin_users_email_trimmed_nonempty CHECK (email = btrim(email) AND email <> ''),
   role TEXT NOT NULL
     CONSTRAINT admin_users_role_check CHECK (role IN ('owner', 'manager', 'bookkeeper', 'viewer')),
   entity_scope UUID[],
@@ -63,13 +69,16 @@ CREATE TABLE IF NOT EXISTS admin_users (
 ALTER TABLE admin_users ENABLE ROW LEVEL SECURITY;
 
 COMMENT ON TABLE admin_users IS 'Admin role data model (P1 T12). Recorded on the request context by server/middleware/admin-auth.ts, NOT enforced. ADMIN_EMAILS remains the sole authority for admin access; a row here grants nothing.';
-COMMENT ON COLUMN admin_users.email IS 'Lower-cased auth email (CHECK); one row per admin.';
+COMMENT ON COLUMN admin_users.email IS 'Lower-cased, trimmed, non-empty auth email (CHECKs); one row per admin.';
 COMMENT ON COLUMN admin_users.role IS 'owner | manager | bookkeeper | viewer. Mirrors ADMIN_ROLES in server/lib/admin-roles.ts.';
 COMMENT ON COLUMN admin_users.entity_scope IS 'Entity (LLC) ids the admin is scoped to; NULL = no scope recorded. Semantics defined when roles are enforced (P3).';
 
 -- POST-APPLY CHECK (run against the live database; scripts/verify-rls.sql Part 6):
 --   SELECT rowsecurity FROM pg_tables WHERE schemaname = 'public' AND tablename = 'admin_users';  -- expect true
 --   SELECT count(*) FROM pg_policies WHERE schemaname = 'public' AND tablename = 'admin_users';   -- expect 0
+--   Part 6b: all three CHECKs above present in pg_constraint with the expected
+--   definitions. CREATE TABLE IF NOT EXISTS skips silently over a table that
+--   already existed, so this is the only proof the constraints are there.
 
 -- ---------------------------------------------------------------------------
 -- Rollback (reference). Safe while no code enforces a role: the middleware

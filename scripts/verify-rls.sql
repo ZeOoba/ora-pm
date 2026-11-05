@@ -160,3 +160,39 @@ SELECT
 FROM pg_tables t
 WHERE t.schemaname = 'public'
   AND t.tablename = 'admin_users';
+
+-- ── Part 6b (P1 T12): the three CHECK constraints 0018 declares must exist on
+-- public.admin_users. 0018 uses CREATE TABLE IF NOT EXISTS, which silently
+-- skips over a table that already existed (made by hand, or by an earlier
+-- draft), so Part 6 passing proves nothing about the constraints. Expect
+-- exactly three rows, each with present = true AND definition_matches = true.
+-- The name alone is not enough: Postgres auto-names an unnamed CHECK on the
+-- role column "admin_users_role_check" as well, so a hand-made table with a
+-- different role list would still match by name. definition_matches compares
+-- pg_get_constraintdef against the expected text with whitespace and
+-- parentheses removed; when it is false, compare actual_definition with
+-- expected_definition. Any false or NULL is a finding: report it, do not
+-- patch the table by hand. ─────────────────────────────────────────────────
+SELECT
+  expected.conname,
+  con.oid IS NOT NULL AS present,
+  COALESCE(
+    regexp_replace(pg_get_constraintdef(con.oid), '[[:space:]()]', '', 'g')
+      = regexp_replace(expected.definition, '[[:space:]()]', '', 'g'),
+    false
+  ) AS definition_matches,
+  pg_get_constraintdef(con.oid) AS actual_definition,
+  expected.definition AS expected_definition
+FROM (VALUES
+  ('admin_users_email_lowercase',
+   $$CHECK ((email = lower(email)))$$),
+  ('admin_users_email_trimmed_nonempty',
+   $$CHECK (((email = btrim(email)) AND (email <> ''::text)))$$),
+  ('admin_users_role_check',
+   $$CHECK ((role = ANY (ARRAY['owner'::text, 'manager'::text, 'bookkeeper'::text, 'viewer'::text])))$$)
+) AS expected(conname, definition)
+LEFT JOIN pg_constraint con
+  ON con.conrelid = to_regclass('public.admin_users')
+ AND con.conname = expected.conname
+ AND con.contype = 'c'
+ORDER BY expected.conname;

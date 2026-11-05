@@ -10,6 +10,8 @@
 // they can never drift from the SQL that ships. pg-mem cannot execute ENABLE ROW LEVEL SECURITY
 // (it is on PG_MEM_SKIP), so the default-deny posture is pinned textually instead — the same
 // manifest-style check tests/db/rls-inventory-remaining-tables.test.ts applies to 0013.
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest'
 import {
   PG_MEM_SKIP,
@@ -22,6 +24,8 @@ import {
 } from '../fixtures/pg-migrations'
 
 const FILE = '0018_admin_roles.sql'
+const VERIFY_RLS = join(__dirname, '../../scripts/verify-rls.sql')
+const CHECK_NAMES = ['admin_users_email_lowercase', 'admin_users_email_trimmed_nonempty', 'admin_users_role_check']
 const ROLES = ['owner', 'manager', 'bookkeeper', 'viewer']
 const SCOPE_A = '00000000-0000-0000-0000-00000000000a'
 const SCOPE_B = '00000000-0000-0000-0000-00000000000b'
@@ -78,6 +82,25 @@ describe('migration 0018 — admin_users (runtime, real migration SQL on pg-mem)
     expect(() => db.none(`UPDATE admin_users SET email = 'Gabriel@x.com'`)).toThrow(/check constraint "admin_users_email_lowercase"/)
   })
 
+  // The middleware looks rows up by the exact lower-cased auth email, so a padded or empty email
+  // could never match anyone: it would only be a silently dead row.
+  it.each([
+    ['a leading space', ' a@x.com'],
+    ['a trailing space', 'a@x.com '],
+    ['an empty string', ''],
+    ['only spaces', '   '],
+  ])('rejects an email with %s (admin_users_email_trimmed_nonempty)', (_label, email) => {
+    expect(() => insertAdmin(db, email, 'viewer')).toThrow(/check constraint "admin_users_email_trimmed_nonempty"/)
+    expect(db.many(`SELECT email FROM admin_users`)).toEqual([])
+  })
+
+  it('rejects an UPDATE that would pad or blank a stored email', () => {
+    insertAdmin(db, 'a@x.com', 'viewer')
+    expect(() => db.none(`UPDATE admin_users SET email = ' a@x.com'`)).toThrow(/check constraint "admin_users_email_trimmed_nonempty"/)
+    expect(() => db.none(`UPDATE admin_users SET email = ''`)).toThrow(/check constraint "admin_users_email_trimmed_nonempty"/)
+    expect(db.many(`SELECT email FROM admin_users`).map((r) => r.email)).toEqual(['a@x.com'])
+  })
+
   it('rejects a second row for the same email (one role per admin)', () => {
     insertAdmin(db, 'dup@example.test', 'viewer')
     expect(() => insertAdmin(db, 'dup@example.test', 'owner')).toThrow(/duplicate key value violates unique constraint/)
@@ -131,6 +154,14 @@ describe('migration 0018 — text pins (what pg-mem cannot execute)', () => {
     expect(code).toMatch(/CHECK \(role IN \('owner', 'manager', 'bookkeeper', 'viewer'\)\)/)
   })
 
+  it('declares exactly the three named CHECK constraints', () => {
+    expect([...code.matchAll(/CONSTRAINT\s+(\w+)\s+CHECK\b/gi)].map((m) => m[1]).sort()).toEqual(CHECK_NAMES)
+  })
+
+  it('pins the trimmed, non-empty email CHECK', () => {
+    expect(code).toMatch(/CONSTRAINT admin_users_email_trimmed_nonempty CHECK \(email = btrim\(email\) AND email <> ''\)/)
+  })
+
   it('pins the lower-case email CHECK, UNIQUE email, and the NOT NULL columns', () => {
     expect(code).toMatch(/CHECK \(email = lower\(email\)\)/)
     expect(code).toMatch(/\bemail TEXT NOT NULL UNIQUE\b/)
@@ -158,10 +189,44 @@ describe('migration 0018 — text pins (what pg-mem cannot execute)', () => {
     expect(db.many(`SELECT email FROM admin_users`).map((r) => r.email)).toEqual(['kept@example.test'])
     expect(() => insertAdmin(db, 'x@example.test', 'admin')).toThrow(/check constraint "admin_users_role_check"/)
     expect(() => insertAdmin(db, 'X@example.test', 'viewer')).toThrow(/check constraint "admin_users_email_lowercase"/)
+    expect(() => insertAdmin(db, ' x@example.test', 'viewer')).toThrow(/check constraint "admin_users_email_trimmed_nonempty"/)
   })
 
   it('carries a commented rollback block that drops the table', () => {
     expect(sql).toMatch(/--\s*Rollback/i)
     expect(sql).toMatch(/--\s*DROP TABLE IF EXISTS admin_users;/)
+  })
+})
+
+// CREATE TABLE IF NOT EXISTS silently skips over an admin_users table that already exists (made by
+// hand, or by an older draft), so after the apply nothing proves the CHECKs are there. Part 6 of the
+// manual live-database script must look them up in pg_constraint, by name AND by definition: Postgres
+// auto-names an unnamed column CHECK on admin_users.role "admin_users_role_check" too, so a name
+// match alone would accept a hand-made table with a different role list.
+describe('scripts/verify-rls.sql Part 6 — live check of the 0018 CHECK constraints', () => {
+  let part6 = ''
+  beforeAll(() => {
+    const verify = readFileSync(VERIFY_RLS, 'utf8')
+    const start = verify.indexOf('Part 6')
+    expect(start, 'verify-rls.sql has no Part 6').toBeGreaterThan(-1)
+    part6 = verify.slice(start)
+  })
+
+  it('queries pg_constraint for CHECK constraints on public.admin_users', () => {
+    expect(part6).toMatch(/\bFROM\s+pg_constraint\b|\bJOIN\s+pg_constraint\b/i)
+    expect(part6).toMatch(/contype\s*=\s*'c'/)
+    expect(part6).toMatch(/to_regclass\('public\.admin_users'\)/)
+  })
+
+  it('expects every CHECK constraint 0018 declares, by name and by definition', () => {
+    const declared = [...readMigration(FILE).replace(/--[^\n]*/g, '').matchAll(/CONSTRAINT\s+(\w+)\s+CHECK\b/gi)].map((m) => m[1])
+    expect(declared.sort()).toEqual(CHECK_NAMES)
+    for (const name of declared) expect(part6, `Part 6 does not check ${name}`).toContain(`'${name}'`)
+    expect(part6).toMatch(/pg_get_constraintdef\(/)
+    // The expected definitions, in pg_get_constraintdef's form, so a weaker or different CHECK
+    // carrying the right name is reported.
+    expect(part6).toContain(`CHECK ((email = lower(email)))`)
+    expect(part6).toContain(`CHECK (((email = btrim(email)) AND (email <> ''::text)))`)
+    expect(part6).toContain(`CHECK ((role = ANY (ARRAY['owner'::text, 'manager'::text, 'bookkeeper'::text, 'viewer'::text])))`)
   })
 })
