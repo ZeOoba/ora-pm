@@ -54,15 +54,15 @@ export function TenantPortalAdmin({ tenant }: { tenant: Tenant }) {
   const hasAccess = !!tenant.auth_user_id
 
   return (
-    <div className="bg-white rounded-lg border border-gray-200 p-5 space-y-3">
-      <h3 className="font-medium text-gray-900 text-sm uppercase tracking-wide text-gray-400">Tenant Portal</h3>
+    <div className="bg-white rounded-lg border border-border p-5 space-y-3">
+      <h3 className="font-medium text-sm uppercase tracking-wide text-muted-foreground">Tenant Portal</h3>
       {hasAccess ? (
         <div className="flex items-center justify-between">
           <div>
             <span className="inline-block bg-green-100 text-green-700 text-xs px-2 py-0.5 rounded-full">
               Access granted
             </span>
-            <p className="text-xs text-gray-400 mt-1 font-mono">{tenant.auth_user_id}</p>
+            <p className="text-xs text-muted-foreground mt-1 font-mono">{tenant.auth_user_id}</p>
           </div>
           <button onClick={() => setConfirmRevoke(true)} className="text-xs text-red-600 hover:underline">
             Revoke access

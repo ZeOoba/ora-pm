@@ -145,7 +145,7 @@ export function LeaseForm({
 
   const isLoading = tenantsQ.isLoading || unitsQ.isLoading || propsQ.isLoading
 
-  if (isLoading) return <p className="text-gray-500 p-4">Loading…</p>
+  if (isLoading) return <p className="text-muted-foreground p-4">Loading…</p>
 
   const tenants = tenantsQ.data ?? []
   const units = unitsQ.data ?? []

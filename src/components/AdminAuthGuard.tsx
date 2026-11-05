@@ -22,7 +22,7 @@ export function AdminAuthGuard({ children }: { children: React.ReactNode }) {
 
   if (session === 'loading') {
     return (
-      <div className="flex items-center justify-center h-screen text-gray-400 text-sm">
+      <div className="flex items-center justify-center h-screen text-muted-foreground text-sm">
         Loading…
       </div>
     )

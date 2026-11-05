@@ -92,7 +92,7 @@ export function InsuranceForm() {
     })
   }
 
-  if (tenantsLoading) return <p className="text-gray-500 p-4">Loading…</p>
+  if (tenantsLoading) return <p className="text-muted-foreground p-4">Loading…</p>
 
   return (
     <div>

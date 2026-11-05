@@ -20,7 +20,7 @@ export function Field({
         {required && <span className="text-gold ml-0.5">*</span>}
       </label>
       {children}
-      {hint && !error && <p className="text-xs text-gray-400 mt-1">{hint}</p>}
+      {hint && !error && <p className="text-xs text-muted-foreground mt-1">{hint}</p>}
       {error && <p className="text-xs text-red-600 mt-1">{error}</p>}
     </div>
   )

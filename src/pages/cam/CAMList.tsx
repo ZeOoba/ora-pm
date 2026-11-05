@@ -145,8 +145,8 @@ export function CAMList() {
       <PageHeader title="CAM Reconciliation" />
 
       {/* ── Part 1: Run Reconciliation ── */}
-      <div className="bg-white rounded-lg border border-gray-200 p-6 mb-6">
-        <h2 className="text-base font-semibold text-gray-800 mb-4">Run Reconciliation</h2>
+      <div className="bg-white rounded-lg border border-border p-6 mb-6">
+        <h2 className="text-base font-semibold text-foreground mb-4">Run Reconciliation</h2>
 
         <div className="grid grid-cols-2 gap-4 mb-4">
           <Field label="Property" htmlFor="cam-property" required>
@@ -176,7 +176,7 @@ export function CAMList() {
         {/* Summary line */}
         {propertyId && (
           <div className="mb-4">
-            <p className="text-sm text-gray-700">
+            <p className="text-sm text-foreground">
               <span className="font-medium">Total recoverable expenses ({year}):</span>{' '}
               <span className="font-mono">{recoverableReady ? formatCurrency(recoverableTotal) : '…'}</span>
               {' · '}
@@ -206,7 +206,7 @@ export function CAMList() {
             )}
 
             {activeLeases.length === 0 && (
-              <p className="text-xs text-gray-500 mt-1">
+              <p className="text-xs text-muted-foreground mt-1">
                 No active leases on this property — cannot calculate.
               </p>
             )}
@@ -222,8 +222,8 @@ export function CAMList() {
           disabled={!canCalculate}
           className={`inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors
             ${canCalculate
-              ? 'bg-blue-600 text-white hover:bg-blue-700'
-              : 'bg-gray-100 text-gray-400 cursor-not-allowed'
+              ? 'bg-primary text-white hover:bg-primary/90'
+              : 'bg-muted text-muted-foreground cursor-not-allowed'
             }`}
         >
           {calculating && (
@@ -237,32 +237,32 @@ export function CAMList() {
       </div>
 
       {/* ── Part 2: Reconciliations table ── */}
-      <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
-        <div className="px-6 py-4 border-b border-gray-200">
-          <h2 className="text-base font-semibold text-gray-800">
+      <div className="bg-white rounded-lg border border-border overflow-hidden">
+        <div className="px-6 py-4 border-b border-border">
+          <h2 className="text-base font-semibold text-foreground">
             Reconciliations
             {propertyId && (
-              <span className="ml-2 text-sm font-normal text-gray-500">
+              <span className="ml-2 text-sm font-normal text-muted-foreground">
                 — {properties?.find(p => p.id === propertyId)?.name ?? ''} · {year}
               </span>
             )}
           </h2>
         </div>
 
-        <table className="min-w-full divide-y divide-gray-200 text-sm">
-          <thead className="bg-gray-50">
+        <table className="min-w-full divide-y divide-border text-sm">
+          <thead className="bg-muted">
             <tr>
               {['Property', 'Suite', 'Tenant', 'Year', 'Pro-rata %', 'Est. Paid', 'Actual Owed', 'True-Up', 'Status', 'Action'].map(h => (
-                <th key={h} className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide">
+                <th key={h} className="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wide">
                   {h}
                 </th>
               ))}
             </tr>
           </thead>
-          <tbody className="divide-y divide-gray-200">
+          <tbody className="divide-y divide-border">
             {filteredRows.length === 0 && (
               <tr>
-                <td colSpan={10} className="px-4 py-8 text-center text-gray-400">
+                <td colSpan={10} className="px-4 py-8 text-center text-muted-foreground">
                   No reconciliations yet. Run one above.
                 </td>
               </tr>
@@ -273,29 +273,29 @@ export function CAMList() {
               const isApproving = approvingId === row.id
 
               return (
-                <tr key={row.id} className="hover:bg-gray-50">
-                  <td className="px-4 py-3 font-medium text-gray-900">
+                <tr key={row.id} className="hover:bg-muted">
+                  <td className="px-4 py-3 font-medium text-foreground">
                     {row.leases?.units?.properties?.name ?? '—'}
                   </td>
-                  <td className="px-4 py-3 text-gray-500">
+                  <td className="px-4 py-3 text-muted-foreground">
                     {row.leases?.units?.suite ?? '—'}
                   </td>
-                  <td className="px-4 py-3 text-gray-700">
+                  <td className="px-4 py-3 text-foreground">
                     {row.leases?.tenants?.name ?? '—'}
                   </td>
-                  <td className="px-4 py-3 text-gray-700">
+                  <td className="px-4 py-3 text-foreground">
                     {row.reconciliation_year}
                   </td>
-                  <td className="px-4 py-3 font-mono text-gray-700">
+                  <td className="px-4 py-3 font-mono text-foreground">
                     {(row.tenant_pro_rata_share_pct * 100).toFixed(2)}%
                   </td>
-                  <td className="px-4 py-3 font-mono text-gray-700">
+                  <td className="px-4 py-3 font-mono text-foreground">
                     {formatCurrency(row.estimated_cam_paid)}
                   </td>
-                  <td className="px-4 py-3 font-mono text-gray-700">
+                  <td className="px-4 py-3 font-mono text-foreground">
                     {formatCurrency(row.actual_cam_owed)}
                   </td>
-                  <td className={`px-4 py-3 font-mono font-semibold ${isCredit ? 'text-green-700' : trueUp > 0 ? 'text-red-700' : 'text-gray-700'}`}>
+                  <td className={`px-4 py-3 font-mono font-semibold ${isCredit ? 'text-green-700' : trueUp > 0 ? 'text-red-700' : 'text-foreground'}`}>
                     {formatCurrency(Math.abs(trueUp))}
                     {isCredit && <span className="ml-1 text-xs font-normal">(credit)</span>}
                   </td>
@@ -309,7 +309,7 @@ export function CAMList() {
                         disabled={isApproving}
                         className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium transition-colors
                           ${isApproving
-                            ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                            ? 'bg-muted text-muted-foreground cursor-not-allowed'
                             : 'bg-green-600 text-white hover:bg-green-700'
                           }`}
                       >
@@ -322,7 +322,7 @@ export function CAMList() {
                         {isApproving ? 'Billing…' : 'Approve & Bill'}
                       </button>
                     ) : (
-                      <span className="text-xs text-gray-400">
+                      <span className="text-xs text-muted-foreground">
                         {row.billed_date ? new Date(row.billed_date).toLocaleDateString() : '—'}
                       </span>
                     )}

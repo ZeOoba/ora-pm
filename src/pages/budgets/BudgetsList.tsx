@@ -39,7 +39,7 @@ function isIncomeCategory(cat: BudgetCategory): boolean {
  *  - variance of exactly 0 → gray
  */
 function varianceClass(category: BudgetCategory, variance: number): string {
-  if (variance === 0) return 'text-gray-400'
+  if (variance === 0) return 'text-muted-foreground'
   if (isIncomeCategory(category)) {
     return variance > 0 ? 'text-green-600 font-semibold' : 'text-red-600 font-semibold'
   } else {
@@ -211,34 +211,34 @@ export function BudgetsList() {
 
       {/* Prompt */}
       {!propertyId && (
-        <div className="bg-white rounded-lg border border-gray-200 p-10 text-center text-gray-400 text-sm">
+        <div className="bg-white rounded-lg border border-border p-10 text-center text-muted-foreground text-sm">
           Select a property to view its budget.
         </div>
       )}
 
       {/* Loading */}
       {propertyId && isLoading && (
-        <p className="text-gray-500 text-sm p-4">Loading…</p>
+        <p className="text-muted-foreground text-sm p-4">Loading…</p>
       )}
 
       {/* Budget table */}
       {propertyId && !isLoading && (
         <>
-          <div className="bg-white rounded-lg border border-gray-200 overflow-hidden mb-4">
-            <table className="min-w-full divide-y divide-gray-200 text-sm">
-              <thead className="bg-gray-50">
+          <div className="bg-white rounded-lg border border-border overflow-hidden mb-4">
+            <table className="min-w-full divide-y divide-border text-sm">
+              <thead className="bg-muted">
                 <tr>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase w-48">Category</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase w-44">Budgeted</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase w-40">Actual</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase w-40">Variance</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase w-48">Category</th>
+                  <th className="px-4 py-3 text-right text-xs font-medium text-muted-foreground uppercase w-44">Budgeted</th>
+                  <th className="px-4 py-3 text-right text-xs font-medium text-muted-foreground uppercase w-40">Actual</th>
+                  <th className="px-4 py-3 text-right text-xs font-medium text-muted-foreground uppercase w-40">Variance</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-gray-200">
+              <tbody className="divide-y divide-border">
 
                 {/* Income section */}
-                <tr className="bg-gray-50">
-                  <td colSpan={4} className="px-4 py-2 text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                <tr className="bg-muted">
+                  <td colSpan={4} className="px-4 py-2 text-xs font-semibold text-muted-foreground uppercase tracking-wider">
                     Income
                   </td>
                 </tr>
@@ -247,8 +247,8 @@ export function BudgetsList() {
                   const actual = actuals[cat]
                   const variance = actual - budgeted
                   return (
-                    <tr key={cat} className="hover:bg-gray-50">
-                      <td className="px-4 py-2.5 text-gray-700">{CATEGORY_LABELS[cat]}</td>
+                    <tr key={cat} className="hover:bg-muted">
+                      <td className="px-4 py-2.5 text-foreground">{CATEGORY_LABELS[cat]}</td>
                       <td className="px-4 py-2.5 text-right">
                         <NumberInput
                           value={getDraftValue(cat)}
@@ -259,7 +259,7 @@ export function BudgetsList() {
                           className="text-right w-36 ml-auto"
                         />
                       </td>
-                      <td className="px-4 py-2.5 text-right text-gray-700">{formatCurrency(actual)}</td>
+                      <td className="px-4 py-2.5 text-right text-foreground">{formatCurrency(actual)}</td>
                       <td className={`px-4 py-2.5 text-right ${varianceClass(cat, variance)}`}>
                         {variance === 0 ? '—' : formatCurrency(variance)}
                       </td>
@@ -267,18 +267,18 @@ export function BudgetsList() {
                   )
                 })}
                 {/* Income subtotal */}
-                <tr className="bg-blue-50 border-t border-blue-100">
-                  <td className="px-4 py-2.5 text-xs font-semibold text-blue-700 uppercase">Total Income</td>
-                  <td className="px-4 py-2.5 text-right font-semibold text-blue-700">{formatCurrency(budgetedIncome)}</td>
-                  <td className="px-4 py-2.5 text-right font-semibold text-blue-700">{formatCurrency(actualIncome)}</td>
+                <tr className="bg-primary/5 border-t border-border">
+                  <td className="px-4 py-2.5 text-xs font-semibold text-primary uppercase">Total Income</td>
+                  <td className="px-4 py-2.5 text-right font-semibold text-primary">{formatCurrency(budgetedIncome)}</td>
+                  <td className="px-4 py-2.5 text-right font-semibold text-primary">{formatCurrency(actualIncome)}</td>
                   <td className={`px-4 py-2.5 text-right font-semibold ${(actualIncome - budgetedIncome) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
                     {actualIncome === budgetedIncome ? '—' : formatCurrency(actualIncome - budgetedIncome)}
                   </td>
                 </tr>
 
                 {/* Expense section */}
-                <tr className="bg-gray-50">
-                  <td colSpan={4} className="px-4 py-2 text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                <tr className="bg-muted">
+                  <td colSpan={4} className="px-4 py-2 text-xs font-semibold text-muted-foreground uppercase tracking-wider">
                     Expenses
                   </td>
                 </tr>
@@ -287,8 +287,8 @@ export function BudgetsList() {
                   const actual = actuals[cat]
                   const variance = actual - budgeted
                   return (
-                    <tr key={cat} className="hover:bg-gray-50">
-                      <td className="px-4 py-2.5 text-gray-700">{CATEGORY_LABELS[cat]}</td>
+                    <tr key={cat} className="hover:bg-muted">
+                      <td className="px-4 py-2.5 text-foreground">{CATEGORY_LABELS[cat]}</td>
                       <td className="px-4 py-2.5 text-right">
                         <NumberInput
                           value={getDraftValue(cat)}
@@ -299,7 +299,7 @@ export function BudgetsList() {
                           className="text-right w-36 ml-auto"
                         />
                       </td>
-                      <td className="px-4 py-2.5 text-right text-gray-700">{formatCurrency(actual)}</td>
+                      <td className="px-4 py-2.5 text-right text-foreground">{formatCurrency(actual)}</td>
                       <td className={`px-4 py-2.5 text-right ${varianceClass(cat, variance)}`}>
                         {variance === 0 ? '—' : formatCurrency(variance)}
                       </td>
@@ -317,10 +317,10 @@ export function BudgetsList() {
                 </tr>
 
                 {/* Net line */}
-                <tr className="bg-gray-100 border-t-2 border-gray-300">
-                  <td className="px-4 py-3 text-xs font-bold text-gray-800 uppercase">Net Operating</td>
-                  <td className="px-4 py-3 text-right font-bold text-gray-800">{formatCurrency(budgetedNet)}</td>
-                  <td className="px-4 py-3 text-right font-bold text-gray-800">{formatCurrency(actualNet)}</td>
+                <tr className="bg-muted border-t-2 border-border">
+                  <td className="px-4 py-3 text-xs font-bold text-foreground uppercase">Net Operating</td>
+                  <td className="px-4 py-3 text-right font-bold text-foreground">{formatCurrency(budgetedNet)}</td>
+                  <td className="px-4 py-3 text-right font-bold text-foreground">{formatCurrency(actualNet)}</td>
                   <td className={`px-4 py-3 text-right font-bold ${actualNet >= budgetedNet ? 'text-green-600' : 'text-red-600'}`}>
                     {actualNet === budgetedNet ? '—' : formatCurrency(actualNet - budgetedNet)}
                   </td>
@@ -341,11 +341,11 @@ export function BudgetsList() {
               type="button"
               onClick={handleSave}
               disabled={saving}
-              className="bg-blue-600 hover:bg-blue-700 text-white rounded-md px-4 py-2 text-sm font-medium disabled:opacity-50 transition-colors"
+              className="bg-primary hover:bg-primary/90 text-white rounded-md px-4 py-2 text-sm font-medium disabled:opacity-50 transition-colors"
             >
               {saving ? 'Saving…' : 'Save Budgets'}
             </button>
-            <span className="text-xs text-gray-400">Saves all non-empty rows for {propertyId ? (properties?.find(p => p.id === propertyId)?.name ?? '') : ''} — {yearNum}</span>
+            <span className="text-xs text-muted-foreground">Saves all non-empty rows for {propertyId ? (properties?.find(p => p.id === propertyId)?.name ?? '') : ''} — {yearNum}</span>
           </div>
         </>
       )}

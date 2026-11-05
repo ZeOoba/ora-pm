@@ -72,10 +72,10 @@ export function Dashboard() {
       {urgentDates.length > 0 && (
         <div className="mb-6">
           <div className="flex items-center justify-between mb-3">
-            <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wider">
+            <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">
               Action Required
             </h2>
-            <Link to="/critical-dates" className="text-sm text-blue-600 hover:underline">
+            <Link to="/critical-dates" className="text-sm text-primary hover:underline">
               View all →
             </Link>
           </div>
@@ -90,21 +90,21 @@ export function Dashboard() {
                 }`}
               >
                 <div>
-                  <p className="font-medium text-gray-900 text-sm">{d.tenant_name}</p>
-                  <p className="text-xs text-gray-500">
+                  <p className="font-medium text-foreground text-sm">{d.tenant_name}</p>
+                  <p className="text-xs text-muted-foreground">
                     {d.date_type.replace(/_/g, ' ')}
                     {d.property_name ? ` · ${d.property_name}` : ''}
                     {d.suite ? ` · ${d.suite}` : ''}
                   </p>
                 </div>
                 <div className="text-right">
-                  <p className="text-sm font-medium text-gray-900">{formatDate(d.critical_date)}</p>
+                  <p className="text-sm font-medium text-foreground">{formatDate(d.critical_date)}</p>
                   <div className="mt-1"><StatusBadge status={d.urgency} /></div>
                 </div>
               </div>
             ))}
             {urgentDates.length > 5 && (
-              <Link to="/critical-dates" className="text-sm text-blue-600 hover:underline block text-center py-1">
+              <Link to="/critical-dates" className="text-sm text-primary hover:underline block text-center py-1">
                 +{urgentDates.length - 5} more critical dates
               </Link>
             )}
