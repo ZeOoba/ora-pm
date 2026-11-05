@@ -40,6 +40,44 @@ describe('Dashboard error state', () => {
     expect(html).toContain(`boom ${key}`)
   })
 
+  it('error with data (failed refetch) keeps the KPIs and shows a non-blocking warning', () => {
+    const stale = { isPending: false, isLoading: false, isError: true, error: new Error('refetch boom'), data: [], refetch: vi.fn() }
+    results.current = { 'rent-roll': stale, 'critical-dates': ok([]), 'ar-aging': arOk() }
+    const html = render()
+    expect(html).not.toContain('role="alert"')
+    expect(html).toContain('showing last loaded data')
+    expect(html).toContain('Outstanding AR')
+  })
+
+  it('mixed: one first-load failure blocks even when another query has stale data', () => {
+    const stale = { isPending: false, isLoading: false, isError: true, error: new Error('stale'), data: [], refetch: vi.fn() }
+    results.current = { 'rent-roll': stale, 'critical-dates': failed('first load boom'), 'ar-aging': arOk() }
+    const html = render()
+    expect(html).toContain('role="alert"')
+    expect(html).toContain('first load boom')
+    expect(html).not.toContain('Outstanding AR')
+  })
+
+  it('labels unit occupancy (KPI) and SF occupancy (donut) as distinct metrics', () => {
+    results.current = { 'rent-roll': ok([]), 'critical-dates': ok([]), 'ar-aging': arOk() }
+    const html = render()
+    expect(html).toContain('Unit occupancy')
+    expect(html).toContain('SF occupancy')
+    expect(html).toContain('aria-label="SF occupancy donut chart.')
+  })
+
+  it('feeds excluded-lease counts into the ladder caption (visible and sr-only)', () => {
+    const year = new Date().getFullYear()
+    const rr = [
+      { unit_id: 'u1', sf: 1000, unit_status: 'occupied', lease_id: 'l1', end_date: null, total_monthly: 10 },
+      { unit_id: 'u2', sf: 500, unit_status: 'occupied', lease_id: 'l2', end_date: `${year - 1}-01-31`, total_monthly: 10 },
+    ]
+    results.current = { 'rent-roll': ok(rr), 'critical-dates': ok([]), 'ar-aging': arOk() }
+    const html = render()
+    const note = 'Excludes 1 lease with no end date and 1 active lease past its end date (holdover).'
+    expect(html.split(note).length - 1).toBeGreaterThanOrEqual(2)
+  })
+
   it('renders KPIs when every query succeeds', () => {
     results.current = { 'rent-roll': ok([]), 'critical-dates': ok([]), 'ar-aging': arOk() }
     const html = render()
@@ -55,7 +93,7 @@ describe('Dashboard error state', () => {
     ]
     results.current = { 'rent-roll': ok(rr), 'critical-dates': ok([]), 'ar-aging': arOk() }
     const html = render()
-    expect(html).toContain('aria-label="Occupancy donut chart.')
+    expect(html).toContain('aria-label="SF occupancy donut chart.')
     expect(html).toContain('aria-label="Lease expiry ladder')
     expect(html).toContain('aria-label="Portfolio AR aging')
     expect(html.match(/<table class="sr-only">/g)?.length).toBe(3)
