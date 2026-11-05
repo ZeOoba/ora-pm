@@ -2,6 +2,8 @@ import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { portalSupabase } from '../lib/supabase-portal'
 import { portalApi } from '../lib/portal-api'
+import { Button } from '../../components/ui/Button'
+import { Card } from '../../components/ui/Card'
 
 export function PortalInsurance() {
   const [form, setForm] = useState({
@@ -75,12 +77,12 @@ export function PortalInsurance() {
 
   if (status === 'done') return (
     <div className="p-6 max-w-lg">
-      <div className="bg-green-50 border border-green-200 rounded-lg p-6">
-        <h2 className="text-lg font-semibold text-green-800">Certificate Submitted</h2>
-        <p className="text-green-700 mt-2 text-sm">
+      <div className="bg-status-active/5 border border-status-active/30 rounded-lg p-6">
+        <h2 className="font-display text-lg font-semibold text-status-active">Certificate Submitted</h2>
+        <p className="text-status-active mt-2 text-sm">
           Your insurance certificate has been received. Your property manager will review it shortly.
         </p>
-        <button onClick={() => setStatus('idle')} className="mt-4 text-blue-600 text-sm hover:underline">
+        <button onClick={() => setStatus('idle')} className="mt-4 text-navy text-sm underline-offset-2 hover:underline">
           Upload another
         </button>
       </div>
@@ -89,25 +91,26 @@ export function PortalInsurance() {
 
   return (
     <div className="p-6 max-w-lg space-y-4">
-      <h1 className="text-2xl font-serif" style={{ color: '#1B2A4A' }}>Insurance</h1>
-      <p className="text-sm text-gray-500">Upload your current Certificate of Insurance (COI). Required per your lease.</p>
+      <h1 className="font-display text-2xl text-navy">Insurance</h1>
+      <p className="text-sm text-status-neutral">Upload your current Certificate of Insurance (COI). Required per your lease.</p>
 
       {status === 'error' && (
-        <div className="bg-red-50 border border-red-200 rounded p-4 text-red-700 text-sm">{errorMsg}</div>
+        <div role="alert" className="bg-status-danger/5 border border-status-danger/30 rounded p-4 text-status-danger text-sm">{errorMsg}</div>
       )}
       {meError && (
-        <div className="bg-red-50 border border-red-200 rounded p-4 text-red-700 text-sm">
+        <div role="alert" className="bg-status-danger/5 border border-status-danger/30 rounded p-4 text-status-danger text-sm">
           Could not load your account: {meError.message}
         </div>
       )}
 
-      <form onSubmit={handleSubmit} className="bg-white rounded-lg border border-gray-200 p-6 space-y-4">
+      <Card className="p-6">
+      <form onSubmit={handleSubmit} className="space-y-4">
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Policy type</label>
+          <label className="block text-sm font-medium text-navy mb-1">Policy type</label>
           <select
             value={form.policy_type}
             onChange={e => setForm(f => ({ ...f, policy_type: e.target.value }))}
-            className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
+            className="w-full border border-navy/15 rounded px-3 py-2 text-sm"
           >
             <option value="general_liability">General Liability</option>
             <option value="property">Property</option>
@@ -119,69 +122,70 @@ export function PortalInsurance() {
 
         {(['carrier', 'policy_number'] as const).map(field => (
           <div key={field}>
-            <label className="block text-sm font-medium text-gray-700 mb-1 capitalize">
+            <label className="block text-sm font-medium text-navy mb-1 capitalize">
               {field.replace('_', ' ')}
             </label>
             <input
               type="text"
               value={form[field]}
               onChange={e => setForm(f => ({ ...f, [field]: e.target.value }))}
-              className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
+              className="w-full border border-navy/15 rounded px-3 py-2 text-sm"
             />
           </div>
         ))}
 
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Coverage amount ($)</label>
+          <label className="block text-sm font-medium text-navy mb-1">Coverage amount ($)</label>
           <input
             type="number"
             value={form.coverage_amount}
             onChange={e => setForm(f => ({ ...f, coverage_amount: e.target.value }))}
-            className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
+            className="w-full border border-navy/15 rounded px-3 py-2 text-sm"
           />
         </div>
 
         <div className="grid grid-cols-2 gap-4">
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Effective date</label>
+            <label className="block text-sm font-medium text-navy mb-1">Effective date</label>
             <input
               type="date"
               required
               value={form.effective_date}
               onChange={e => setForm(f => ({ ...f, effective_date: e.target.value }))}
-              className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
+              className="w-full border border-navy/15 rounded px-3 py-2 text-sm"
             />
           </div>
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Expiration date</label>
+            <label className="block text-sm font-medium text-navy mb-1">Expiration date</label>
             <input
               type="date"
               required
               value={form.expiration_date}
               onChange={e => setForm(f => ({ ...f, expiration_date: e.target.value }))}
-              className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
+              className="w-full border border-navy/15 rounded px-3 py-2 text-sm"
             />
           </div>
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Upload COI (PDF)</label>
+          <label className="block text-sm font-medium text-navy mb-1">Upload COI (PDF)</label>
           <input
             type="file"
             accept=".pdf,.jpg,.png"
             onChange={e => setFile(e.target.files?.[0] ?? null)}
-            className="w-full text-sm text-gray-600"
+            className="w-full text-sm text-status-neutral"
           />
         </div>
 
-        <button
+        <Button
           type="submit"
           disabled={status === 'uploading' || !meData?.tenant}
-          className="w-full bg-[#1B2A4A] text-white rounded px-4 py-2.5 text-sm font-medium hover:bg-[#243660] disabled:opacity-50"
+          className="w-full py-2.5"
         >
           {status === 'uploading' ? 'Uploading…' : meData?.tenant ? 'Submit Certificate' : 'Loading account…'}
-        </button>
+        </Button>
       </form>
+      </Card>
     </div>
   )
 }

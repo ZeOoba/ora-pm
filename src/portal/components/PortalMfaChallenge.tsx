@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { portalSupabase } from '../lib/supabase-portal'
+import { Button } from '../../components/ui/Button'
 
 interface Props {
   onVerified: () => void
@@ -50,10 +51,10 @@ export function PortalMfaChallenge({ onVerified }: Props) {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50">
+    <div className="min-h-screen flex items-center justify-center bg-ivory">
       <div className="bg-white shadow rounded-lg p-8 w-full max-w-sm">
-        <h1 className="text-2xl font-semibold text-[#1B2A4A] mb-1">Verify it's you</h1>
-        <p className="text-gray-500 text-sm mb-6">Enter the 6-digit code from your authenticator app.</p>
+        <h1 className="font-display text-2xl text-navy mb-1">Verify it's you</h1>
+        <p className="text-status-neutral text-sm mb-6">Enter the 6-digit code from your authenticator app.</p>
         <form onSubmit={handleSubmit} className="space-y-4">
           <input
             type="text"
@@ -61,17 +62,13 @@ export function PortalMfaChallenge({ onVerified }: Props) {
             required
             value={code}
             onChange={e => setCode(e.target.value)}
-            className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            className="w-full border border-navy/15 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-gold"
             placeholder="123456"
           />
-          {error && <p className="text-red-600 text-sm">{error}</p>}
-          <button
-            type="submit"
-            disabled={busy}
-            className="w-full bg-[#1B2A4A] text-white rounded px-4 py-2 text-sm font-medium hover:bg-[#243660] disabled:opacity-50"
-          >
+          {error && <p role="alert" className="text-status-danger text-sm">{error}</p>}
+          <Button type="submit" disabled={busy} className="w-full">
             Verify
-          </button>
+          </Button>
         </form>
       </div>
     </div>
