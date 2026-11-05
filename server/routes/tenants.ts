@@ -1,7 +1,8 @@
 import { Hono } from 'hono'
 import { getDb } from '../db/client'
-import { TenantInsertSchema, TenantUpdateSchema, PaginationSchema, TenantCorrespondenceInsertSchema } from '../lib/schemas'
+import { TenantInsertSchema, TenantUpdateSchema, TenantCorrespondenceInsertSchema } from '../lib/schemas'
 import { dbError } from '../lib/api-error'
+import { parseListQuery } from '../lib/list-query'
 
 type Env = { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string }
 
@@ -9,17 +10,19 @@ export const tenantsRouter = new Hono<{ Bindings: Env }>()
 
 tenantsRouter.get('/', async (c) => {
   const db = getDb(c.env)
-  const { limit, offset } = PaginationSchema.parse({
-    limit: c.req.query('limit'),
-    offset: c.req.query('offset'),
+  const lq = parseListQuery(c, {
+    sortable: ['name', 'created_at'],
+    defaultSort: 'name',
+    searchColumns: ['name', 'contact_name', 'contact_email'],
   })
-  const { data, error } = await db
-    .from('tenants')
-    .select('*')
-    .order('name')
-    .range(offset, offset + limit - 1)
+  let q = db.from('tenants').select('*', { count: 'exact' })
+  if (lq.searchFilter) q = q.or(lq.searchFilter)
+  const { data, error, count } = await q
+    .order(lq.sort, { ascending: lq.ascending })
+    .order('id')
+    .range(...lq.range!)
   if (error) return dbError(c, error, 'Failed to load tenants')
-  return c.json({ data })
+  return c.json({ data, total: count ?? 0 })
 })
 
 tenantsRouter.get('/:id', async (c) => {

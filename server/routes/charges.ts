@@ -1,7 +1,8 @@
 import { Hono } from 'hono'
 import { getDb } from '../db/client'
-import { ChargeInsertSchema, PaginationSchema } from '../lib/schemas'
+import { ChargeInsertSchema } from '../lib/schemas'
 import { dbError } from '../lib/api-error'
+import { parseListQuery } from '../lib/list-query'
 
 type Env = { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string }
 
@@ -13,15 +14,19 @@ export const chargesRouter = new Hono<{ Bindings: Env }>()
 chargesRouter.get('/', async (c) => {
   const db = getDb(c.env)
   const leaseId = c.req.query('lease_id')
-  const { limit, offset } = PaginationSchema.parse({
-    limit: c.req.query('limit'),
-    offset: c.req.query('offset'),
+  const lq = parseListQuery(c, {
+    sortable: ['charge_date', 'amount', 'type'],
+    defaultSort: 'charge_date',
+    defaultDir: 'desc',
   })
-  let q = db.from('charges').select('*, leases(tenant_id, tenants(name))').order('charge_date', { ascending: false })
+  let q = db.from('charges').select('*, leases(tenant_id, tenants(name))', { count: 'exact' })
   if (leaseId) q = q.eq('lease_id', leaseId)
-  const { data, error } = await q.range(offset, offset + limit - 1)
+  const { data, error, count } = await q
+    .order(lq.sort, { ascending: lq.ascending })
+    .order('id')
+    .range(...lq.range!)
   if (error) return dbError(c, error, 'Failed to load charges')
-  return c.json({ data })
+  return c.json({ data, total: count ?? 0 })
 })
 
 // OI-046 gap closure: migration 0011 made charges.idempotency_key NOT NULL

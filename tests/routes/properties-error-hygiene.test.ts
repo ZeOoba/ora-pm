@@ -30,8 +30,11 @@ describe('GET /api/properties error hygiene', () => {
   it('returns a generic 500 message, never the raw Postgres error, on list failure', async () => {
     mockFrom.mockReturnValue({
       select: vi.fn().mockReturnValue({
+        // list queries now order by the requested column then by id (stable paging)
         order: vi.fn().mockReturnValue({
-          range: vi.fn().mockResolvedValue({ data: null, error: { message: RAW_MESSAGE, code: '42P01' } }),
+          order: vi.fn().mockReturnValue({
+            range: vi.fn().mockResolvedValue({ data: null, error: { message: RAW_MESSAGE, code: '42P01' } }),
+          }),
         }),
       }),
     })

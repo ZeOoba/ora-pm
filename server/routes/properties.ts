@@ -1,7 +1,8 @@
 import { Hono } from 'hono'
 import { getDb } from '../db/client'
-import { PropertyInsertSchema, PropertyUpdateSchema, PaginationSchema } from '../lib/schemas'
+import { PropertyInsertSchema, PropertyUpdateSchema } from '../lib/schemas'
 import { dbError } from '../lib/api-error'
+import { parseListQuery } from '../lib/list-query'
 
 type Env = { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string }
 
@@ -9,17 +10,19 @@ export const propertiesRouter = new Hono<{ Bindings: Env }>()
 
 propertiesRouter.get('/', async (c) => {
   const db = getDb(c.env)
-  const { limit, offset } = PaginationSchema.parse({
-    limit: c.req.query('limit'),
-    offset: c.req.query('offset'),
+  const lq = parseListQuery(c, {
+    sortable: ['name', 'city', 'state', 'created_at'],
+    defaultSort: 'name',
+    searchColumns: ['name', 'city', 'entity_llc'],
   })
-  const { data, error } = await db
-    .from('properties')
-    .select('*')
-    .order('name')
-    .range(offset, offset + limit - 1)
+  let q = db.from('properties').select('*', { count: 'exact' })
+  if (lq.searchFilter) q = q.or(lq.searchFilter)
+  const { data, error, count } = await q
+    .order(lq.sort, { ascending: lq.ascending })
+    .order('id')
+    .range(...lq.range!)
   if (error) return dbError(c, error, 'Failed to load properties')
-  return c.json({ data })
+  return c.json({ data, total: count ?? 0 })
 })
 
 propertiesRouter.get('/:id', async (c) => {

@@ -1,7 +1,8 @@
 import { Hono } from 'hono'
 import { getDb } from '../db/client'
-import { PaymentInsertSchema, PaginationSchema } from '../lib/schemas'
+import { PaymentInsertSchema } from '../lib/schemas'
 import { dbError } from '../lib/api-error'
+import { parseListQuery } from '../lib/list-query'
 
 type Env = { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string }
 
@@ -10,18 +11,19 @@ export const paymentsRouter = new Hono<{ Bindings: Env }>()
 paymentsRouter.get('/', async (c) => {
   const db = getDb(c.env)
   const leaseId = c.req.query('lease_id')
-  const { limit, offset } = PaginationSchema.parse({
-    limit: c.req.query('limit'),
-    offset: c.req.query('offset'),
+  const lq = parseListQuery(c, {
+    sortable: ['payment_date', 'amount'],
+    defaultSort: 'payment_date',
+    defaultDir: 'desc',
   })
-  let q = db
-    .from('payments')
-    .select('*, leases(tenant_id, tenants(name))')
-    .order('payment_date', { ascending: false })
+  let q = db.from('payments').select('*, leases(tenant_id, tenants(name))', { count: 'exact' })
   if (leaseId) q = q.eq('lease_id', leaseId)
-  const { data, error } = await q.range(offset, offset + limit - 1)
+  const { data, error, count } = await q
+    .order(lq.sort, { ascending: lq.ascending })
+    .order('id')
+    .range(...lq.range!)
   if (error) return dbError(c, error, 'Failed to load payments')
-  return c.json({ data })
+  return c.json({ data, total: count ?? 0 })
 })
 
 // Record manual payment (check/wire/other only — ACH handled via Stripe in Phase 2)

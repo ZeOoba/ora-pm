@@ -241,3 +241,11 @@ export const PaginationSchema = z.object({
   limit:  z.coerce.number().int().min(1).max(200).default(50),
   offset: z.coerce.number().int().min(0).default(0),
 })
+
+// List query (paged list endpoints): pagination + sort/dir/search. `sort` is
+// validated against a per-route allow-list in server/lib/list-query.ts.
+export const ListQuerySchema = PaginationSchema.extend({
+  sort: z.string().optional(),
+  dir: z.enum(['asc', 'desc']).default('asc'),
+  q: z.string().trim().max(100).optional(),
+})
