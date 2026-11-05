@@ -1,6 +1,7 @@
 import type { Context } from 'hono'
 import { HTTPException } from 'hono/http-exception'
 import { ListQuerySchema } from './schemas'
+import { dbError } from './api-error'
 
 export type ListQueryOptions = {
   /** Columns the client may sort by (allow-list; anything else is a 422). */
@@ -66,7 +67,7 @@ export function parseListQuery(c: Context, opts: ListQueryOptions): ListQuery {
     limit: c.req.query('limit'),
     offset: c.req.query('offset'),
     sort: c.req.query('sort') || undefined,
-    dir: c.req.query('dir'),
+    dir: c.req.query('dir') || undefined,
     q: c.req.query('q'),
   })
   if (!parsed.success) return reject(c, 422, { error: parsed.error.flatten().fieldErrors })
@@ -75,7 +76,7 @@ export function parseListQuery(c: Context, opts: ListQueryOptions): ListQuery {
   const sort = parsed.data.sort ?? opts.defaultSort
   if (!opts.sortable.includes(sort)) return reject(c, 422, { error: 'Invalid sort field' })
 
-  const dirGiven = c.req.query('dir') !== undefined
+  const dirGiven = Boolean(c.req.query('dir'))
   const dir = dirGiven ? parsed.data.dir : (opts.defaultDir ?? 'asc')
   const q = parsed.data.q || undefined
 
@@ -90,4 +91,29 @@ export function parseListQuery(c: Context, opts: ListQueryOptions): ListQuery {
     q,
     searchFilter: buildSearchFilter(q, opts.searchColumns),
   }
+}
+
+type HeadCountResult = { count: number | null; error: { message: string; code?: string } | null }
+
+/**
+ * Error path shared by every paged list route. With `count: 'exact'`, PostgREST
+ * answers 416 / PGRST103 ("Requested range not satisfiable") when `offset` is
+ * past the filtered total; that is an empty page, not a failure. Re-run the
+ * same filtered query as a head-only count (no range) for the real total and
+ * return `{ data: [], total }`. Every other error (and a failed head count)
+ * goes to dbError unchanged.
+ *
+ * `headCount` must build the query with the route's own filters (via its
+ * `applyFilters`) on `.select('id', { count: 'exact', head: true })`.
+ */
+export async function listErrorResponse(
+  c: Context,
+  error: { message: string; code?: string },
+  publicMsg: string,
+  headCount: () => PromiseLike<HeadCountResult>,
+) {
+  if (error.code !== 'PGRST103') return dbError(c, error, publicMsg)
+  const head = await headCount()
+  if (head.error) return dbError(c, head.error, publicMsg)
+  return c.json({ data: [], total: head.count ?? 0 })
 }

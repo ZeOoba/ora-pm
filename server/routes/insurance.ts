@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import { getDb } from '../db/client'
 import { InsuranceInsertSchema, InsuranceUpdateSchema } from '../lib/schemas'
 import { dbError } from '../lib/api-error'
-import { parseListQuery } from '../lib/list-query'
+import { parseListQuery, listErrorResponse } from '../lib/list-query'
 
 type Env = { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string }
 
@@ -23,7 +23,10 @@ insuranceRouter.get('/', async (c) => {
     .order('id')
   if (lq.range) q = q.range(...lq.range)
   const { data, error, count } = await q
-  if (error) return dbError(c, error, 'Failed to load insurance certificates')
+  if (error) {
+    return listErrorResponse(c, error, 'Failed to load insurance certificates', () =>
+      db.from('insurance_certificates').select('id', { count: 'exact', head: true }))
+  }
 
   // Enrich status based on actual expiration date
   const today = Date.now()

@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import { getDb } from '../db/client'
 import { PropertyInsertSchema, PropertyUpdateSchema } from '../lib/schemas'
 import { dbError } from '../lib/api-error'
-import { parseListQuery } from '../lib/list-query'
+import { parseListQuery, listErrorResponse } from '../lib/list-query'
 
 type Env = { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string }
 
@@ -15,13 +15,15 @@ propertiesRouter.get('/', async (c) => {
     defaultSort: 'name',
     searchColumns: ['name', 'city', 'entity_llc'],
   })
-  let q = db.from('properties').select('*', { count: 'exact' })
-  if (lq.searchFilter) q = q.or(lq.searchFilter)
-  const { data, error, count } = await q
+  const applyFilters = <Q extends { or(f: string): Q }>(q: Q): Q => (lq.searchFilter ? q.or(lq.searchFilter) : q)
+  const { data, error, count } = await applyFilters(db.from('properties').select('*', { count: 'exact' }))
     .order(lq.sort, { ascending: lq.ascending })
     .order('id')
     .range(...lq.range!)
-  if (error) return dbError(c, error, 'Failed to load properties')
+  if (error) {
+    return listErrorResponse(c, error, 'Failed to load properties', () =>
+      applyFilters(db.from('properties').select('id', { count: 'exact', head: true })))
+  }
   return c.json({ data, total: count ?? 0 })
 })
 

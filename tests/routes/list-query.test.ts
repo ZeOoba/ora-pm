@@ -147,3 +147,15 @@ describe('buildSearchFilter escaping', () => {
     expect(buildSearchFilter('x', [])).toBeNull()
   })
 })
+
+describe('parseListQuery: control characters and empty dir', () => {
+  it('rejects control characters (incl. NUL) in q with 422', async () => {
+    for (const q of ['%00', 'a%00b', 'a%1Fb', 'a%0Ab', 'a%7Fb']) {
+      expect((await run(`?q=${q}`)).status).toBe(422)
+    }
+  })
+  it('empty dir= behaves like absent dir', async () => {
+    expect((await run('?dir=', { defaultDir: 'desc' })).body.ascending).toBe(false)
+    expect((await run('?dir=')).body.ascending).toBe(true)
+  })
+})

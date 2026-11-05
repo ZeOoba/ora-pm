@@ -247,5 +247,12 @@ export const PaginationSchema = z.object({
 export const ListQuerySchema = PaginationSchema.extend({
   sort: z.string().optional(),
   dir: z.enum(['asc', 'desc']).default('asc'),
-  q: z.string().trim().max(100).optional(),
+  q: z
+    .string()
+    .trim()
+    .max(100)
+    .refine((v) => ![...v].some((ch) => { const n = ch.charCodeAt(0); return n < 0x20 || n === 0x7f }), {
+      message: 'q must not contain control characters',
+    })
+    .optional(),
 })

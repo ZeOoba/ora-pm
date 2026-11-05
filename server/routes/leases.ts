@@ -4,7 +4,7 @@ import {
   LeaseInsertSchema, LeaseUpdateSchema, LeaseAmendmentInsertSchema, LeaseNoticeInsertSchema,
 } from '../lib/schemas'
 import { dbError } from '../lib/api-error'
-import { parseListQuery } from '../lib/list-query'
+import { parseListQuery, listErrorResponse } from '../lib/list-query'
 
 type Env = { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string }
 
@@ -19,15 +19,19 @@ leasesRouter.get('/', async (c) => {
     sortable: ['start_date', 'end_date', 'base_rent_monthly', 'status'],
     defaultSort: 'end_date',
   })
-  let q = db
+  const base = db
     .from('leases')
     .select('*, tenants(name), units(suite, sf, properties(name))', { count: 'exact' })
-  if (status) q = q.eq('status', status)
-  const { data, error, count } = await q
+  const { data, error, count } = await (status ? base.eq('status', status) : base)
     .order(lq.sort, { ascending: lq.ascending })
     .order('id')
     .range(...lq.range!)
-  if (error) return dbError(c, error, 'Failed to load leases')
+  if (error) {
+    return listErrorResponse(c, error, 'Failed to load leases', () => {
+      const head = db.from('leases').select('id', { count: 'exact', head: true })
+      return status ? head.eq('status', status) : head
+    })
+  }
   return c.json({ data, total: count ?? 0 })
 })
 

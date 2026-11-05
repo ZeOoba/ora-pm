@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import { getDb } from '../db/client'
 import { PaymentInsertSchema } from '../lib/schemas'
 import { dbError } from '../lib/api-error'
-import { parseListQuery } from '../lib/list-query'
+import { parseListQuery, listErrorResponse } from '../lib/list-query'
 
 type Env = { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string }
 
@@ -16,13 +16,17 @@ paymentsRouter.get('/', async (c) => {
     defaultSort: 'payment_date',
     defaultDir: 'desc',
   })
-  let q = db.from('payments').select('*, leases(tenant_id, tenants(name))', { count: 'exact' })
-  if (leaseId) q = q.eq('lease_id', leaseId)
-  const { data, error, count } = await q
+  const base = db.from('payments').select('*, leases(tenant_id, tenants(name))', { count: 'exact' })
+  const { data, error, count } = await (leaseId ? base.eq('lease_id', leaseId) : base)
     .order(lq.sort, { ascending: lq.ascending })
     .order('id')
     .range(...lq.range!)
-  if (error) return dbError(c, error, 'Failed to load payments')
+  if (error) {
+    return listErrorResponse(c, error, 'Failed to load payments', () => {
+      const head = db.from('payments').select('id', { count: 'exact', head: true })
+      return leaseId ? head.eq('lease_id', leaseId) : head
+    })
+  }
   return c.json({ data, total: count ?? 0 })
 })
 

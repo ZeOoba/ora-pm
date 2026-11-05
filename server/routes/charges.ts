@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import { getDb } from '../db/client'
 import { ChargeInsertSchema } from '../lib/schemas'
 import { dbError } from '../lib/api-error'
-import { parseListQuery } from '../lib/list-query'
+import { parseListQuery, listErrorResponse } from '../lib/list-query'
 
 type Env = { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string }
 
@@ -19,13 +19,17 @@ chargesRouter.get('/', async (c) => {
     defaultSort: 'charge_date',
     defaultDir: 'desc',
   })
-  let q = db.from('charges').select('*, leases(tenant_id, tenants(name))', { count: 'exact' })
-  if (leaseId) q = q.eq('lease_id', leaseId)
-  const { data, error, count } = await q
+  const base = db.from('charges').select('*, leases(tenant_id, tenants(name))', { count: 'exact' })
+  const { data, error, count } = await (leaseId ? base.eq('lease_id', leaseId) : base)
     .order(lq.sort, { ascending: lq.ascending })
     .order('id')
     .range(...lq.range!)
-  if (error) return dbError(c, error, 'Failed to load charges')
+  if (error) {
+    return listErrorResponse(c, error, 'Failed to load charges', () => {
+      const head = db.from('charges').select('id', { count: 'exact', head: true })
+      return leaseId ? head.eq('lease_id', leaseId) : head
+    })
+  }
   return c.json({ data, total: count ?? 0 })
 })
 

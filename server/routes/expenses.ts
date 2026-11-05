@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import { getDb } from '../db/client'
 import { ExpenseInsertSchema, ExpenseUpdateSchema } from '../lib/schemas'
 import { dbError } from '../lib/api-error'
-import { parseListQuery } from '../lib/list-query'
+import { parseListQuery, listErrorResponse } from '../lib/list-query'
 
 type Env = { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string }
 
@@ -16,13 +16,17 @@ expensesRouter.get('/', async (c) => {
     defaultSort: 'expense_date',
     defaultDir: 'desc',
   })
-  let q = db.from('expenses').select('*, properties(name)', { count: 'exact' })
-  if (propertyId) q = q.eq('property_id', propertyId)
-  const { data, error, count } = await q
+  const base = db.from('expenses').select('*, properties(name)', { count: 'exact' })
+  const { data, error, count } = await (propertyId ? base.eq('property_id', propertyId) : base)
     .order(lq.sort, { ascending: lq.ascending })
     .order('id')
     .range(...lq.range!)
-  if (error) return dbError(c, error, 'Failed to load expenses')
+  if (error) {
+    return listErrorResponse(c, error, 'Failed to load expenses', () => {
+      const head = db.from('expenses').select('id', { count: 'exact', head: true })
+      return propertyId ? head.eq('property_id', propertyId) : head
+    })
+  }
   return c.json({ data, total: count ?? 0 })
 })
 

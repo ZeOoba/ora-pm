@@ -243,3 +243,89 @@ describe('legacy unpaged routes (units, insurance, renewals)', () => {
     expect(body.total).toBe(2)
   })
 })
+
+// PostgREST answers 416 / PGRST103 when `offset` is past the filtered total
+// (count: 'exact' on the same request). That must surface as an empty page with
+// the real total, not a 500.
+describe('out-of-range page (PGRST103)', () => {
+  const OOR = { code: 'PGRST103', message: 'Requested range not satisfiable' }
+
+  const PAGED: Array<{ route: string; table: string; qs: string }> = [
+    { route: '/api/properties', table: 'properties', qs: '?limit=20&offset=500&q=abc' },
+    { route: '/api/tenants', table: 'tenants', qs: '?limit=20&offset=500' },
+    { route: '/api/leases', table: 'leases', qs: '?limit=20&offset=500&status=active' },
+    { route: '/api/charges', table: 'charges', qs: '?limit=20&offset=500&lease_id=L1' },
+    { route: '/api/payments', table: 'payments', qs: '?limit=20&offset=500&lease_id=L1' },
+    { route: '/api/expenses', table: 'expenses', qs: '?limit=20&offset=500&property_id=P1' },
+    { route: '/api/units', table: 'units', qs: '?limit=20&offset=500&property_id=P1' },
+    { route: '/api/insurance', table: 'insurance_certificates', qs: '?limit=20&offset=500' },
+    { route: '/api/renewals', table: 'renewals', qs: '?limit=20&offset=500' },
+  ]
+
+  it.each(PAGED)('$route: returns 200 { data: [], total } using a head count with the same filters', async ({ route, table, qs }) => {
+    const main = builder({ data: null, error: OOR })
+    const head = builder({ data: null, count: 42 })
+    mockFrom.mockReturnValueOnce(main).mockReturnValueOnce(head)
+    const res = await get(`${route}${qs}`)
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ data: [], total: 42 })
+    expect(mockFrom).toHaveBeenCalledTimes(2)
+    expect(mockFrom).toHaveBeenLastCalledWith(table)
+    expect(head.select.mock.calls[0][1]).toEqual({ count: 'exact', head: true })
+    expect(head.range).not.toHaveBeenCalled()
+  })
+
+  it('applies the same filters and q to the head count', async () => {
+    const head = builder({ data: null, count: 7 })
+    mockFrom.mockReturnValueOnce(builder({ data: null, error: OOR })).mockReturnValueOnce(head)
+    await get('/api/properties?offset=500&q=abc')
+    expect(head.or).toHaveBeenCalledTimes(1)
+    expect(head.or.mock.calls[0][0]).toContain('name.ilike.')
+
+    const head2 = builder({ data: null, count: 3 })
+    mockFrom.mockReturnValueOnce(builder({ data: null, error: OOR })).mockReturnValueOnce(head2)
+    await get('/api/charges?offset=500&lease_id=L1')
+    expect(head2.eq).toHaveBeenCalledWith('lease_id', 'L1')
+  })
+
+  it('insurance paged: out-of-range returns empty data without enrichment crash', async () => {
+    mockFrom.mockReturnValueOnce(builder({ data: null, error: OOR })).mockReturnValueOnce(builder({ data: null, count: 9 }))
+    const res = await get('/api/insurance?limit=10&offset=100')
+    expect(await res.json()).toEqual({ data: [], total: 9 })
+  })
+
+  it.each(['/api/properties', '/api/charges', '/api/units'])('%s: another error code still returns the generic 500 with no head query', async (route) => {
+    mockFrom.mockReturnValue(builder({ data: null, error: { code: '42P01', message: 'secret relation detail' } }))
+    const res = await get(`${route}?limit=10&offset=100`)
+    expect(res.status).toBe(500)
+    expect(JSON.stringify(await res.json())).not.toContain('secret')
+    expect(mockFrom).toHaveBeenCalledTimes(1)
+  })
+
+  it('a failing head count falls back to the generic 500', async () => {
+    mockFrom
+      .mockReturnValueOnce(builder({ data: null, error: OOR }))
+      .mockReturnValueOnce(builder({ data: null, count: null, error: { code: 'XX000', message: 'boom internal' } }))
+    const res = await get('/api/properties?offset=500')
+    expect(res.status).toBe(500)
+    expect(JSON.stringify(await res.json())).not.toContain('boom')
+  })
+})
+
+describe('q and dir edge cases', () => {
+  it.each(['/api/properties', '/api/tenants'])('%s: q containing a NUL / control character is a 422 and never queries', async (route) => {
+    for (const q of ['%00', 'a%00b', 'a%01b', 'a%0Ab', 'a%7Fb']) {
+      const res = await get(`${route}?q=${q}`)
+      expect(res.status).toBe(422)
+    }
+    expect(mockFrom).not.toHaveBeenCalled()
+  })
+
+  it('empty dir= falls back to the route default direction (not 422)', async () => {
+    const b = builder({ data: ROWS, count: 2 })
+    mockFrom.mockReturnValue(b)
+    const res = await get('/api/charges?dir=')
+    expect(res.status).toBe(200)
+    expect(b.order).toHaveBeenCalledWith('charge_date', { ascending: false })
+  })
+})

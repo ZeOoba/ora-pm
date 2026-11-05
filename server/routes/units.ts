@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import { getDb } from '../db/client'
 import { UnitInsertSchema, UnitUpdateSchema } from '../lib/schemas'
 import { dbError } from '../lib/api-error'
-import { parseListQuery } from '../lib/list-query'
+import { parseListQuery, listErrorResponse } from '../lib/list-query'
 
 type Env = { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string }
 
@@ -18,12 +18,17 @@ unitsRouter.get('/', async (c) => {
     defaultSort: 'suite',
     unpagedByDefault: true,
   })
-  let q = db.from('units').select('*', { count: 'exact' })
-  if (propertyId) q = q.eq('property_id', propertyId)
-  q = q.order(lq.sort, { ascending: lq.ascending }).order('id')
-  if (lq.range) q = q.range(...lq.range)
-  const { data, error, count } = await q
-  if (error) return dbError(c, error, 'Failed to load units')
+  const base = db.from('units').select('*', { count: 'exact' })
+  const ordered = (propertyId ? base.eq('property_id', propertyId) : base)
+    .order(lq.sort, { ascending: lq.ascending })
+    .order('id')
+  const { data, error, count } = await (lq.range ? ordered.range(...lq.range) : ordered)
+  if (error) {
+    return listErrorResponse(c, error, 'Failed to load units', () => {
+      const head = db.from('units').select('id', { count: 'exact', head: true })
+      return propertyId ? head.eq('property_id', propertyId) : head
+    })
+  }
   return c.json({ data, total: count ?? 0 })
 })
 
