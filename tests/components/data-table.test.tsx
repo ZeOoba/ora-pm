@@ -107,3 +107,32 @@ describe('buildCsvColumns', () => {
     expect(cols[0].header).toBe('X!')
   })
 })
+
+describe('DataTable client mode', () => {
+  const data: Row[] = [
+    { id: '1', name: 'Zed Test LLC', rent: 100 },
+    { id: '2', name: 'Acme Test LLC', rent: 200 },
+    { id: '3', name: 'Mid Test LLC', rent: 300 },
+  ]
+  it('renders in-memory rows with no fetchPage and honors initialSort + page size', () => {
+    const html = render({ mode: 'client', rows: data, fetchPage: undefined, initialSort: { id: 'name', desc: false }, initialPageSize: 2 })
+    expect(html).toContain('Acme Test LLC')
+    expect(html).toContain('Mid Test LLC')
+    expect(html).not.toContain('Zed Test LLC') // sorted to page 2
+    expect(html).toContain('Showing 1–2 of 3')
+  })
+  it('shows skeletons while rows are undefined and hides search without clientSearchFn', () => {
+    const html = render({ mode: 'client', rows: undefined, fetchPage: undefined })
+    expect((html.match(/data-slot="skeleton"/g) ?? []).length).toBeGreaterThanOrEqual(5)
+    expect(html).not.toContain('type="search"')
+  })
+  it('shows search when clientSearchFn is given', () => {
+    const html = render({ mode: 'client', rows: data, fetchPage: undefined, clientSearchFn: () => true })
+    expect(html).toContain('type="search"')
+  })
+  it('renders the error banner from the error prop', () => {
+    const html = render({ mode: 'client', rows: undefined, fetchPage: undefined, error: new Error('boom'), onRetry: () => {} })
+    expect(html).toContain('boom')
+    expect(html).toContain('Retry')
+  })
+})

@@ -4,6 +4,8 @@ import {
   pageCount,
   rangeLabel,
   collectPages,
+  clientPage,
+  clientFilterSort,
   type TableState,
 } from '../../src/components/data-table/table-state'
 
@@ -111,5 +113,55 @@ describe('toListParams reserved keys', () => {
     })
     expect(p).toMatchObject({ limit: 50, offset: 50, sort: 'name', dir: 'asc', q: 'x', status: 'open' })
     warn.mockRestore()
+  })
+})
+
+describe('client mode helpers', () => {
+  type R = { id: number; name: string; sf: number | null; status: string }
+  const rows: R[] = [
+    { id: 1, name: 'Bravo Test LLC', sf: 200, status: 'active' },
+    { id: 2, name: 'alpha Test LLC', sf: null, status: 'expired' },
+    { id: 3, name: 'Charlie Test LLC', sf: 50, status: 'active' },
+    { id: 4, name: 'Delta Test LLC', sf: 100, status: 'active' },
+  ]
+  const base: TableState = { pageIndex: 0, pageSize: 2, filters: {} }
+  const getSortValue = (r: R, id: string) => (r as unknown as Record<string, unknown>)[id]
+  const searchFn = (r: R, q: string) => r.name.toLowerCase().includes(q.toLowerCase())
+
+  it('paginates and reports the full filtered total', () => {
+    const p = clientPage(rows, base, {})
+    expect(p.data.map((r) => r.id)).toEqual([1, 2])
+    expect(p.total).toBe(4)
+    expect(clientPage(rows, { ...base, pageIndex: 1 }, {}).data.map((r) => r.id)).toEqual([3, 4])
+  })
+
+  it('searches with searchFn on the trimmed query and ignores blank q', () => {
+    expect(clientPage(rows, { ...base, q: '  charlie ' }, { searchFn }).data.map((r) => r.id)).toEqual([3])
+    expect(clientPage(rows, { ...base, q: '   ' }, { searchFn }).total).toBe(4)
+  })
+
+  it('sorts case-insensitively for strings and numerically, nulls last in both directions', () => {
+    const byName = clientFilterSort(rows, { ...base, sort: { id: 'name', desc: false } }, { getSortValue })
+    expect(byName.map((r) => r.id)).toEqual([2, 1, 3, 4])
+    const asc = clientFilterSort(rows, { ...base, sort: { id: 'sf', desc: false } }, { getSortValue })
+    expect(asc.map((r) => r.id)).toEqual([3, 4, 1, 2])
+    const desc = clientFilterSort(rows, { ...base, sort: { id: 'sf', desc: true } }, { getSortValue })
+    expect(desc.map((r) => r.id)).toEqual([1, 4, 3, 2])
+  })
+
+  it('applies filterFn with non-empty filter values only, before paging', () => {
+    const filterFn = (r: R, f: Record<string, string>) => !f.status || r.status === f.status
+    const p = clientPage(rows, { ...base, filters: { status: 'active' } }, { filterFn })
+    expect(p.total).toBe(3)
+    expect(clientPage(rows, { ...base, filters: { status: '' } }, { filterFn }).total).toBe(4)
+  })
+
+  it('does not mutate the input and clamps out-of-range pages to empty data with real total', () => {
+    const copy = [...rows]
+    clientFilterSort(rows, { ...base, sort: { id: 'name', desc: true } }, { getSortValue })
+    expect(rows).toEqual(copy)
+    const p = clientPage(rows, { ...base, pageIndex: 9 }, {})
+    expect(p.data).toEqual([])
+    expect(p.total).toBe(4)
   })
 })

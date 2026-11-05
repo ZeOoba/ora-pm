@@ -16,6 +16,8 @@ import { DataTableToolbar, type FilterDef } from './DataTableToolbar'
 import {
   DEFAULT_PAGE_SIZE,
   EXPORT_MAX_ROWS,
+  clientFilterSort,
+  clientPage,
   collectPages,
   toListParams,
   type FetchPage,
@@ -28,8 +30,21 @@ export type DataTableProps<T extends RowData> = {
   columns: DataTableColumnDef<T>[]
   /** Base TanStack Query key; the list params are appended automatically. */
   queryKey: readonly unknown[]
-  /** Calls the list endpoint, e.g. (p) => api.list<Tenant>('/admin/tenants', p). */
-  fetchPage: FetchPage<T>
+  /** Server mode (default). Calls the list endpoint, e.g. (p) => api.list<Tenant>('/tenants', p). */
+  fetchPage?: FetchPage<T>
+  /**
+   * 'client' = the caller already holds the whole (unpaged) dataset in `rows`;
+   * sort / search / filter / paging all happen in memory. `rows` undefined = loading.
+   */
+  mode?: 'server' | 'client'
+  rows?: T[]
+  /** Client mode: does the row match the (trimmed) search text? Search box is hidden without it. */
+  clientSearchFn?: (row: T, q: string) => boolean
+  /** Client mode: does the row pass the non-empty filter values (keyed by filter id)? */
+  clientFilterFn?: (row: T, filters: Record<string, string>) => boolean
+  /** Client mode: error to show in the banner (with `onRetry`). */
+  error?: Error | null
+  onRetry?: () => void
   searchable?: boolean
   searchPlaceholder?: string
   filters?: FilterDef[]
@@ -112,7 +127,14 @@ export function DataTable<T extends RowData>({
   columns,
   queryKey,
   fetchPage,
-  searchable = true,
+  mode = 'server',
+  rows: clientRows,
+  clientSearchFn,
+  clientFilterFn,
+  error: clientError,
+  onRetry,
+  searchable: searchableProp,
+
   searchPlaceholder = 'Search…',
   filters = [],
   rowHref,
@@ -125,6 +147,8 @@ export function DataTable<T extends RowData>({
   emptyMessage,
   emptyAction,
 }: DataTableProps<T>) {
+  const isClient = mode === 'client'
+  const searchable = searchableProp ?? (isClient ? !!clientSearchFn : true)
   const [state, setState] = useState<TableState>({
     pageIndex: 0,
     pageSize: initialPageSize,
@@ -156,20 +180,55 @@ export function DataTable<T extends RowData>({
   }, [searchText])
 
   const params = useMemo(() => toListParams(state), [state])
-  const query = useQuery({
+  const serverQuery = useQuery({
     queryKey: [...queryKey, params],
-    queryFn: () => fetchPage(params),
+    queryFn: () => {
+      if (!fetchPage) throw new Error('DataTable: fetchPage is required in server mode')
+      return fetchPage(params)
+    },
     placeholderData: keepPreviousData,
+    enabled: !isClient,
   })
-  const rows = query.data?.data ?? (EMPTY as T[])
-  const total = query.data?.total ?? 0
+
+  // Client mode: sort values come straight from the column accessors.
+  const clientOpts = useMemo(() => {
+    const byId = new Map<string, (row: T) => unknown>()
+    for (const c of columns) {
+      const def = c as { id?: string; accessorKey?: string; accessorFn?: (row: T, i: number) => unknown }
+      const id = def.id ?? def.accessorKey
+      if (!id) continue
+      if (def.accessorFn) byId.set(id, (r) => def.accessorFn!(r, 0))
+      else if (def.accessorKey) {
+        const path = def.accessorKey.split('.')
+        byId.set(id, (r) => path.reduce<unknown>((v, k) => (v as Record<string, unknown> | null | undefined)?.[k], r))
+      }
+    }
+    return {
+      searchFn: clientSearchFn,
+      filterFn: clientFilterFn,
+      getSortValue: (row: T, id: string) => byId.get(id)?.(row),
+    }
+  }, [columns, clientSearchFn, clientFilterFn])
+  const clientData = useMemo(
+    () => (isClient && clientRows ? clientPage(clientRows, state, clientOpts) : undefined),
+    [isClient, clientRows, state, clientOpts],
+  )
+
+  const data = isClient ? clientData : serverQuery.data
+  const isPending = isClient ? clientRows === undefined && !clientError : serverQuery.isPending
+  const isError = isClient ? !!clientError : serverQuery.isError
+  const errorValue = isClient ? clientError : serverQuery.error
+  const isPlaceholderData = !isClient && serverQuery.isPlaceholderData
+  const refetch = () => (isClient ? onRetry?.() : void serverQuery.refetch())
+  const rows = data?.data ?? (EMPTY as T[])
+  const total = data?.total ?? 0
 
   // Deleted rows can leave us past the last page; fall back to the first.
   useEffect(() => {
-    if (query.data && query.data.data.length === 0 && query.data.total > 0 && state.pageIndex > 0) {
+    if (data && data.data.length === 0 && data.total > 0 && state.pageIndex > 0) {
       update((s) => ({ ...s, pageIndex: 0 }))
     }
-  }, [query.data, state.pageIndex, update])
+  }, [data, state.pageIndex, update])
 
   // Sorting is opt-in. A table-level `enableSorting: false` would override
   // column-level `true` in v9, so normalise per column instead.
@@ -212,6 +271,12 @@ export function DataTable<T extends RowData>({
   const exportCsv = async () => {
     setExporting(true)
     try {
+      if (isClient) {
+        const all = clientFilterSort(clientRows ?? [], state, clientOpts)
+        downloadCsv(csvFilename ?? 'export', toCsv(all, buildCsvColumns<T>(visibleColumns)))
+        return
+      }
+      if (!fetchPage) throw new Error('DataTable: fetchPage is required in server mode')
       const { rows: all, total: grand, truncated } = await collectPages(fetchPage, state)
       const cols = buildCsvColumns<T>(visibleColumns)
       downloadCsv(csvFilename ?? 'export', toCsv(all, cols))
@@ -253,13 +318,13 @@ export function DataTable<T extends RowData>({
         onExport={() => void exportCsv()}
       />
 
-      {query.isError && (
+      {isError && (
         <div
           role="alert"
           className="mb-3 flex items-center justify-between gap-3 rounded-md border border-status-danger/30 bg-status-danger/5 px-4 py-3 text-sm text-status-danger"
         >
-          <span>{query.error instanceof Error ? query.error.message : 'Failed to load data.'}</span>
-          <Button variant="ghost" className="border border-status-danger/40 px-3 py-1" onClick={() => void query.refetch()}>
+          <span>{errorValue instanceof Error ? errorValue.message : 'Failed to load data.'}</span>
+          <Button variant="ghost" className="border border-status-danger/40 px-3 py-1" onClick={() => void refetch()}>
             Retry
           </Button>
         </div>
@@ -324,8 +389,8 @@ export function DataTable<T extends RowData>({
               </TableRow>
             ))}
           </TableHeader>
-          <TableBody className={cn(query.isPlaceholderData && 'opacity-60 transition-opacity')}>
-            {query.isPending
+          <TableBody className={cn(isPlaceholderData && 'opacity-60 transition-opacity')}>
+            {isPending
               ? Array.from({ length: SKELETON_ROWS }, (_, i) => (
                   <TableRow key={`sk-${i}`} className="hover:bg-transparent">
                     {Array.from({ length: colSpan }, (_, j) => (
@@ -336,7 +401,7 @@ export function DataTable<T extends RowData>({
                   </TableRow>
                 ))
               : rows.length === 0
-                ? !query.isError && (
+                ? !isError && (
                     <TableRow className="hover:bg-transparent">
                       <TableCell colSpan={colSpan}>
                         <EmptyState
@@ -388,7 +453,7 @@ export function DataTable<T extends RowData>({
         pageIndex={state.pageIndex}
         pageSize={state.pageSize}
         total={total}
-        hideRange={query.isError && !query.data}
+        hideRange={isError && !data}
         onPageChange={(pageIndex) => update((s) => ({ ...s, pageIndex }))}
         onPageSizeChange={(pageSize) => update((s) => ({ ...s, pageSize, pageIndex: 0 }))}
       />

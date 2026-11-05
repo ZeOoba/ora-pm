@@ -88,3 +88,57 @@ export async function collectPages<T>(
   const capped = rows.slice(0, maxRows)
   return { rows: capped, total, truncated: total > capped.length }
 }
+
+// ── Client mode ────────────────────────────────────────────────────────────
+// For endpoints that return the whole (unpaged) dataset: sort / search /
+// filter / paginate in memory with the same TableState the server mode uses.
+
+export type ClientOptions<T> = {
+  /** Row matches the (trimmed, non-empty) search text. */
+  searchFn?: (row: T, q: string) => boolean
+  /** Value to sort by for a column id. */
+  getSortValue?: (row: T, columnId: string) => unknown
+  /** Row passes the non-empty filter values. */
+  filterFn?: (row: T, filters: Record<string, string>) => boolean
+}
+
+function compareValues(a: unknown, b: unknown): number {
+  if (typeof a === 'number' && typeof b === 'number') return a - b
+  return String(a).localeCompare(String(b), undefined, { sensitivity: 'base', numeric: true })
+}
+
+const isNil = (v: unknown) => v === null || v === undefined || v === ''
+
+/** Filter + search + sort (no paging). Pure; never mutates `rows`. */
+export function clientFilterSort<T>(rows: readonly T[], state: TableState, opts: ClientOptions<T>): T[] {
+  let out = [...rows]
+  const activeFilters = Object.fromEntries(
+    Object.entries(state.filters).filter(([, v]) => v !== '' && v !== undefined),
+  )
+  if (opts.filterFn && Object.keys(activeFilters).length > 0) {
+    out = out.filter((r) => opts.filterFn!(r, activeFilters))
+  }
+  const q = state.q?.trim()
+  if (q && opts.searchFn) out = out.filter((r) => opts.searchFn!(r, q))
+  const sort = state.sort
+  if (sort && opts.getSortValue) {
+    const dir = sort.desc ? -1 : 1
+    const get = opts.getSortValue
+    out.sort((ra, rb) => {
+      const a = get(ra, sort.id)
+      const b = get(rb, sort.id)
+      if (isNil(a) && isNil(b)) return 0
+      if (isNil(a)) return 1 // nulls last regardless of direction
+      if (isNil(b)) return -1
+      return dir * compareValues(a, b)
+    })
+  }
+  return out
+}
+
+/** One page of the filtered/sorted rows plus the full filtered total. */
+export function clientPage<T>(rows: readonly T[], state: TableState, opts: ClientOptions<T>): PageResult<T> {
+  const all = clientFilterSort(rows, state, opts)
+  const start = state.pageIndex * state.pageSize
+  return { data: all.slice(start, start + state.pageSize), total: all.length }
+}
