@@ -100,6 +100,15 @@ describe('GET /api/search', () => {
     expect(leases.in).toHaveBeenCalledWith('tenant_id', ['t1', 't2'])
   })
 
+  it('orders the capped lease query deterministically (order by id before limit)', async () => {
+    const leases = builder([])
+    wire({ tenants: builder([{ id: 't1', name: 'Acme Test LLC' }]), leases })
+    await get('?q=acme')
+    expect(leases.order).toHaveBeenCalledWith('id')
+    expect(leases.limit).toHaveBeenCalledWith(8)
+    expect(leases.order.mock.invocationCallOrder[0]).toBeLessThan(leases.limit.mock.invocationCallOrder[0])
+  })
+
   it('skips the lease query when no tenant matches', async () => {
     wire({ tenants: builder([]) })
     await get('?q=zzz')

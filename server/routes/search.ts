@@ -66,6 +66,8 @@ searchRouter.get('/', async (c) => {
       .from('leases')
       .select('id, tenants(name), units(suite, properties(name))')
       .in('tenant_id', tenantRows.map((t) => t.id as string))
+      // Deterministic order before the cap, so the same query always returns the same 8 leases.
+      .order('id')
       .limit(PER_GROUP)
     if (leases.error) return dbError(c, leases.error, 'Search failed')
     leaseRows = (leases.data ?? []) as Row[]
