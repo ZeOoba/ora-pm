@@ -17,14 +17,14 @@ export type AgingTotals = AgingBuckets & { balance: number }
 
 // Brand palette, light → dark by age (chart tokens from src/index.css + status danger for 90+).
 export const AGING_COLUMNS: { key: AgingBucketKey; label: string; color: string }[] = [
-  { key: 'current', label: 'Current', color: '#8FA3C2' },
-  { key: 'd1_30', label: '1–30', color: '#4F6A93' },
-  { key: 'd31_60', label: '31–60', color: '#C9A96E' },
-  { key: 'd61_90', label: '61–90', color: '#B45309' },
-  { key: 'd90_plus', label: '90+', color: '#B91C1C' },
+  { key: 'current', label: 'Current', color: 'var(--color-chart-4)' },
+  { key: 'd1_30', label: '1–30', color: 'var(--color-chart-3)' },
+  { key: 'd31_60', label: '31–60', color: 'var(--color-chart-2)' },
+  { key: 'd61_90', label: '61–90', color: 'var(--color-status-warning)' },
+  { key: 'd90_plus', label: '90+', color: 'var(--color-status-danger)' },
 ]
 
-export const UNALLOCATED_COLUMN = { key: 'unallocated' as const, label: 'Unallocated', color: '#475569' }
+export const UNALLOCATED_COLUMN = { key: 'unallocated' as const, label: 'Unallocated', color: 'var(--color-status-neutral)' }
 
 export function hasUnallocated(t: Pick<AgingBuckets, 'unallocated'> | undefined): boolean {
   return !!t && t.unallocated !== 0

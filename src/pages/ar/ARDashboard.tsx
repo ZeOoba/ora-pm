@@ -30,7 +30,7 @@ function AgingChart({ totals }: { totals: AgingTotals }) {
             <ChartTooltip cursor={false} content={<ChartTooltipContent hideLabel formatter={(v, name) => `${config[String(name)]?.label ?? name}: ${formatCurrency(Number(v))}`} />} />
             <ChartLegend content={<ChartLegendContent />} />
             {series.map((s) => (
-              <Bar key={s.key} dataKey={s.key} stackId="aging" fill={s.color} isAnimationActive={false} />
+              <Bar key={s.key} dataKey={s.key} stackId="aging" fill={`var(--color-${s.key})`} isAnimationActive={false} />
             ))}
           </BarChart>
         </ChartContainer>

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { api } from '../../lib/api'
@@ -28,6 +28,12 @@ export function CAMList() {
   const [calcError, setCalcError] = useState<string | null>(null)
   const [approvingId, setApprovingId] = useState<string | null>(null)
   const [confirmRow, setConfirmRow] = useState<CAMRow | null>(null)
+  // Last confirmed row, kept after close so the dialog text doesn't blank during the exit animation.
+  const lastConfirmRow = useRef<CAMRow | null>(null)
+  if (confirmRow) lastConfirmRow.current = confirmRow
+  const dialogRow = confirmRow ?? lastConfirmRow.current
+  // Synchronous in-flight guard (state updates are async, so a fast double click could slip past `approvingId`).
+  const approveInFlight = useRef(false)
 
   // ── Properties list ────────────────────────────────────────────────────────
   const { data: properties } = useQuery({
@@ -111,6 +117,8 @@ export function CAMList() {
   // Endpoint and payload unchanged (POST /cam/:id/approve, {}) — only the confirmation UI moved
   // from the browser confirm prompt to ConfirmDialog, and the error from a browser alert to a toast.
   async function handleApprove(row: CAMRow) {
+    if (approveInFlight.current) return
+    approveInFlight.current = true
     setApprovingId(row.id)
     try {
       await api.post<{ success: boolean; true_up_amount: number }>(`/cam/${row.id}/approve`, {})
@@ -124,6 +132,7 @@ export function CAMList() {
       toast.error(err instanceof Error ? err.message : 'Approve failed.')
     } finally {
       // Closed on failure too: re-posting a ledger charge must be a fresh, deliberate click.
+      approveInFlight.current = false
       setApprovingId(null)
       setConfirmRow(null)
     }
@@ -330,17 +339,17 @@ export function CAMList() {
         open={confirmRow !== null}
         onOpenChange={(open) => { if (!open) setConfirmRow(null) }}
         title="Approve & bill this true-up?"
-        description={confirmRow && (
-          confirmRow.true_up_amount < 0 ? (
+        description={dialogRow && (
+          dialogRow.true_up_amount < 0 ? (
             <>
-              {confirmRow.leases?.tenants?.name ?? 'This tenant'} ({confirmRow.reconciliation_year}) is owed a credit of{' '}
-              <span className="font-mono">{formatCurrency(Math.abs(confirmRow.true_up_amount))}</span>. Approving marks it billed
+              {dialogRow.leases?.tenants?.name ?? 'This tenant'} ({dialogRow.reconciliation_year}) is owed a credit of{' '}
+              <span className="font-mono">{formatCurrency(Math.abs(dialogRow.true_up_amount))}</span>. Approving marks it billed
               and flags the credit for manual handling — nothing is posted to the ledger.
             </>
           ) : (
             <>
-              Posts a <span className="font-mono">{formatCurrency(confirmRow.true_up_amount)}</span> true-up charge for{' '}
-              {confirmRow.leases?.tenants?.name ?? 'this tenant'} ({confirmRow.reconciliation_year}) to the tenant ledger.
+              Posts a <span className="font-mono">{formatCurrency(dialogRow.true_up_amount)}</span> true-up charge for{' '}
+              {dialogRow.leases?.tenants?.name ?? 'this tenant'} ({dialogRow.reconciliation_year}) to the tenant ledger.
             </>
           )
         )}

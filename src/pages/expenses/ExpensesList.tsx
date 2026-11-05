@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { api } from '../../lib/api'
@@ -142,6 +142,8 @@ export function ExpensesList() {
   const [errors, setErrors] = useState<ExpenseErrors>({})
   const [deleteId, setDeleteId] = useState<string | null>(null)
   const [deleting, setDeleting] = useState(false)
+  // Synchronous in-flight guard: `deleting` state is async, so a fast double click could issue two DELETEs.
+  const deleteInFlight = useRef(false)
   // Whole-filter total from the list response (all pages, current property filter).
   const [totalAmount, setTotalAmount] = useState<string | null>(null)
   const handlePageData = useCallback((page: Record<string, unknown>) => {
@@ -205,7 +207,8 @@ export function ExpensesList() {
   const columns = useMemo(() => buildColumns((id) => setDeleteId(id)), [])
 
   async function confirmDelete() {
-    if (!deleteId) return
+    if (!deleteId || deleteInFlight.current) return
+    deleteInFlight.current = true
     setDeleting(true)
     try {
       await api.del(`/expenses/${deleteId}`)
@@ -214,6 +217,7 @@ export function ExpensesList() {
     } catch (e) {
       toast.error(`Failed to delete expense: ${(e as Error).message}`)
     } finally {
+      deleteInFlight.current = false
       setDeleting(false)
       setDeleteId(null)
     }
