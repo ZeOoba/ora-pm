@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import { getDb } from '../db/client'
 import { UnitInsertSchema, UnitUpdateSchema } from '../lib/schemas'
 import { dbError } from '../lib/api-error'
+import { parseListQuery, listErrorResponse } from '../lib/list-query'
 
 type Env = { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string }
 
@@ -10,11 +11,25 @@ export const unitsRouter = new Hono<{ Bindings: Env }>()
 unitsRouter.get('/', async (c) => {
   const db = getDb(c.env)
   const propertyId = c.req.query('property_id')
-  let q = db.from('units').select('*').order('suite')
-  if (propertyId) q = q.eq('property_id', propertyId)
-  const { data, error } = await q
-  if (error) return dbError(c, error, 'Failed to load units')
-  return c.json({ data })
+  // Historically unpaged (unit pickers need every row): paging only applies
+  // when the caller passes limit/offset.
+  const lq = parseListQuery(c, {
+    sortable: ['suite', 'sf', 'status'],
+    defaultSort: 'suite',
+    unpagedByDefault: true,
+  })
+  const base = db.from('units').select('*', { count: 'exact' })
+  const ordered = (propertyId ? base.eq('property_id', propertyId) : base)
+    .order(lq.sort, { ascending: lq.ascending })
+    .order('id')
+  const { data, error, count } = await (lq.range ? ordered.range(...lq.range) : ordered)
+  if (error) {
+    return listErrorResponse(c, error, 'Failed to load units', () => {
+      const head = db.from('units').select('id', { count: 'exact', head: true })
+      return propertyId ? head.eq('property_id', propertyId) : head
+    })
+  }
+  return c.json({ data, total: count ?? 0 })
 })
 
 unitsRouter.post('/', async (c) => {

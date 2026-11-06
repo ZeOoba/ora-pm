@@ -1,8 +1,11 @@
-import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router'
 import { api } from '../../lib/api'
 import { PageHeader } from '../../components/PageHeader'
 import { StatusBadge } from '../../components/StatusBadge'
+import { Button } from '../../components/ui/Button'
+import { DataTable, type FilterDef } from '../../components/data-table/DataTable'
+import { dataTableColumnHelper } from '../../components/data-table/columns'
+import { csvFilename } from '../../components/data-table/csv'
 import { formatCurrency, formatDate } from '../../lib/format'
 import type { Lease, Tenant, Unit, Property } from '../../types'
 
@@ -11,59 +14,91 @@ type LeaseRow = Lease & {
   units: Pick<Unit, 'suite' | 'sf'> & { properties: Pick<Property, 'name'> }
 }
 
+const h = dataTableColumnHelper<LeaseRow>()
+const muted = (v: string | null | undefined) => <span className="text-muted-foreground">{v ?? '—'}</span>
+
+// Sortable ids match the server allowlist: start_date, end_date, base_rent_monthly, status.
+// Tenant / Property / Suite are joined columns the server cannot sort by.
+const columns = [
+  h.accessor((l) => l.tenants?.name, {
+    id: 'tenant',
+    header: 'Tenant',
+    cell: ({ row }) => (
+      <Link to={`/leases/${row.original.id}`} className="font-medium text-foreground hover:underline">
+        {row.original.tenants?.name ?? '—'}
+      </Link>
+    ),
+  }),
+  h.accessor((l) => l.units?.properties?.name, {
+    id: 'property',
+    header: 'Property',
+    cell: ({ row }) => muted(row.original.units?.properties?.name),
+  }),
+  h.accessor((l) => l.units?.suite, {
+    id: 'suite',
+    header: 'Suite',
+    cell: ({ row }) => muted(row.original.units?.suite),
+  }),
+  h.accessor('end_date', {
+    header: 'End Date',
+    enableSorting: true,
+    cell: ({ row }) => muted(formatDate(row.original.end_date)),
+  }),
+  h.accessor('base_rent_monthly', {
+    header: 'Rent/mo',
+    enableSorting: true,
+    meta: { numeric: true },
+    cell: ({ row }) => formatCurrency(row.original.base_rent_monthly),
+  }),
+  h.accessor('status', {
+    header: 'Status',
+    enableSorting: true,
+    cell: ({ row }) => <StatusBadge status={row.original.status} />,
+  }),
+]
+
+// leases.status CHECK (migration 0001): active | expired | terminated | pending.
+// "All" sends no status param (the endpoint then returns every status).
+const FILTERS: FilterDef[] = [
+  {
+    id: 'status',
+    label: 'Status',
+    options: [
+      { value: 'active', label: 'Active' },
+      { value: 'pending', label: 'Pending' },
+      { value: 'expired', label: 'Expired' },
+      { value: 'terminated', label: 'Terminated' },
+    ],
+  },
+]
+
 export function LeasesList() {
-  const { data, isLoading } = useQuery({
-    queryKey: ['leases', 'active'],
-    queryFn: () => api.get<{ data: LeaseRow[] }>('/leases?status=active').then(r => r.data),
-  })
-
-  if (isLoading) return <p className="text-gray-500 p-4">Loading…</p>
-
   return (
     <div>
       <PageHeader
         title="Leases"
         action={
           <div className="flex items-center gap-2">
-            <Link to="/leases/intake" className="border border-navy/30 hover:border-gold text-navy text-sm px-3 py-1.5 rounded">
-              Upload lease
-            </Link>
-            <Link to="/leases/new" className="bg-blue-600 hover:bg-blue-700 text-white text-sm px-3 py-1.5 rounded">
-              + Add Lease
-            </Link>
+            <Button asChild variant="ghost" className="border border-border">
+              <Link to="/leases/intake">Upload lease</Link>
+            </Button>
+            <Button asChild>
+              <Link to="/leases/new">+ Add Lease</Link>
+            </Button>
           </div>
         }
       />
-      <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
-        <table className="min-w-full divide-y divide-gray-200">
-          <thead className="bg-gray-50">
-            <tr>
-              {['Tenant', 'Property', 'Suite', 'End Date', 'Rent/mo', 'Status'].map(h => (
-                <th key={h} className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                  {h}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-gray-200">
-            {data?.length === 0 && (
-              <tr><td colSpan={6} className="px-4 py-8 text-center text-gray-400">No active leases.</td></tr>
-            )}
-            {data?.map(l => (
-              <tr key={l.id} className="hover:bg-gray-50">
-                <td className="px-4 py-3 font-medium text-blue-600">
-                  <Link to={`/leases/${l.id}`}>{l.tenants.name}</Link>
-                </td>
-                <td className="px-4 py-3 text-sm text-gray-600">{l.units.properties.name}</td>
-                <td className="px-4 py-3 text-sm text-gray-600">{l.units.suite}</td>
-                <td className="px-4 py-3 text-sm text-gray-600">{formatDate(l.end_date)}</td>
-                <td className="px-4 py-3 text-sm font-medium">{formatCurrency(l.base_rent_monthly)}</td>
-                <td className="px-4 py-3"><StatusBadge status={l.status} /></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      <DataTable<LeaseRow>
+        columns={columns}
+        queryKey={['leases', 'list']}
+        fetchPage={(p) => api.list<LeaseRow>('/leases', p)}
+        searchable={false}
+        filters={FILTERS}
+        rowHref={(l) => `/leases/${l.id}`}
+        csvFilename={csvFilename('leases')}
+        initialSort={{ id: 'end_date', desc: false }}
+        emptyTitle="No leases"
+      />
     </div>
   )
 }

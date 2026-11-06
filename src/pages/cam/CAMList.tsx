@@ -1,6 +1,10 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { toast } from 'sonner'
 import { api } from '../../lib/api'
+import { runExclusive } from '../../lib/run-exclusive'
+import { ConfirmDialog } from '../../components/ConfirmDialog'
+import { TrueUpConfirmDescription } from './TrueUpConfirmDescription'
 import { PageHeader } from '../../components/PageHeader'
 import { StatusBadge } from '../../components/StatusBadge'
 import { Field } from '../../components/form/Field'
@@ -25,11 +29,17 @@ export function CAMList() {
   const [calculating, setCalculating] = useState(false)
   const [calcError, setCalcError] = useState<string | null>(null)
   const [approvingId, setApprovingId] = useState<string | null>(null)
+  const [confirmRow, setConfirmRow] = useState<CAMRow | null>(null)
+  // Row shown in the dialog text. Set alongside confirmRow but NOT cleared on close, so the text
+  // doesn't blank during the exit animation.
+  const [dialogRow, setDialogRow] = useState<CAMRow | null>(null)
+  // Synchronous in-flight guard (state updates are async, so a fast double click could slip past `approvingId`).
+  const approveInFlight = useRef(false)
 
   // ── Properties list ────────────────────────────────────────────────────────
   const { data: properties } = useQuery({
     queryKey: ['properties'],
-    queryFn: () => api.get<{ data: Property[] }>('/properties').then(r => r.data),
+    queryFn: () => api.listAll<Property>('/properties'),
   })
 
   // ── Rent roll for selected property (active leases) ────────────────────────
@@ -105,21 +115,27 @@ export function CAMList() {
   }
 
   // ── Approve & bill ─────────────────────────────────────────────────────────
+  // Endpoint and payload unchanged (POST /cam/:id/approve, {}) — only the confirmation UI moved
+  // from the browser confirm prompt to ConfirmDialog, and the error from a browser alert to a toast.
   async function handleApprove(row: CAMRow) {
-    if (!confirm('Approve and post this true-up charge to the tenant ledger?')) return
-    setApprovingId(row.id)
-    try {
-      await api.post<{ success: boolean; true_up_amount: number }>(`/cam/${row.id}/approve`, {})
-      await Promise.all([
-        qc.invalidateQueries({ queryKey: ['cam'] }),
-        qc.invalidateQueries({ queryKey: ['ar-aging'] }),
-        qc.invalidateQueries({ queryKey: ['charges'] }),
-      ])
-    } catch (err) {
-      alert(err instanceof Error ? err.message : 'Approve failed.')
-    } finally {
-      setApprovingId(null)
-    }
+    await runExclusive(approveInFlight, async () => {
+      setApprovingId(row.id)
+      try {
+        await api.post<{ success: boolean; true_up_amount: number }>(`/cam/${row.id}/approve`, {})
+        await Promise.all([
+          qc.invalidateQueries({ queryKey: ['cam'] }),
+          qc.invalidateQueries({ queryKey: ['ar-aging'] }),
+          qc.invalidateQueries({ queryKey: ['charges'] }),
+        ])
+        toast.success('True-up approved and posted to the tenant ledger')
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : 'Approve failed.')
+      } finally {
+        // Closed on failure too: re-posting a ledger charge must be a fresh, deliberate click.
+        setApprovingId(null)
+        setConfirmRow(null)
+      }
+    })
   }
 
   // ── Render ─────────────────────────────────────────────────────────────────
@@ -130,8 +146,8 @@ export function CAMList() {
       <PageHeader title="CAM Reconciliation" />
 
       {/* ── Part 1: Run Reconciliation ── */}
-      <div className="bg-white rounded-lg border border-gray-200 p-6 mb-6">
-        <h2 className="text-base font-semibold text-gray-800 mb-4">Run Reconciliation</h2>
+      <div className="bg-white rounded-lg border border-border p-6 mb-6">
+        <h2 className="text-base font-semibold text-foreground mb-4">Run Reconciliation</h2>
 
         <div className="grid grid-cols-2 gap-4 mb-4">
           <Field label="Property" htmlFor="cam-property" required>
@@ -161,7 +177,7 @@ export function CAMList() {
         {/* Summary line */}
         {propertyId && (
           <div className="mb-4">
-            <p className="text-sm text-gray-700">
+            <p className="text-sm text-foreground">
               <span className="font-medium">Total recoverable expenses ({year}):</span>{' '}
               <span className="font-mono">{recoverableReady ? formatCurrency(recoverableTotal) : '…'}</span>
               {' · '}
@@ -173,7 +189,7 @@ export function CAMList() {
             </p>
 
             {recoverable.isError && (
-              <p className="text-xs text-red-600 mt-1">
+              <p className="text-xs text-status-danger mt-1">
                 Could not load recoverable expenses — calculation is disabled until they load.
               </p>
             )}
@@ -185,13 +201,13 @@ export function CAMList() {
             )}
 
             {totalLeasedSF === 0 && activeLeases.length > 0 && (
-              <p className="text-xs text-red-600 mt-1">
+              <p className="text-xs text-status-danger mt-1">
                 Active leases found but total leased SF is 0 — check unit SF values.
               </p>
             )}
 
             {activeLeases.length === 0 && (
-              <p className="text-xs text-gray-500 mt-1">
+              <p className="text-xs text-muted-foreground mt-1">
                 No active leases on this property — cannot calculate.
               </p>
             )}
@@ -199,7 +215,7 @@ export function CAMList() {
         )}
 
         {calcError && (
-          <p className="text-sm text-red-600 mb-3">{calcError}</p>
+          <p className="text-sm text-status-danger mb-3">{calcError}</p>
         )}
 
         <button
@@ -207,8 +223,8 @@ export function CAMList() {
           disabled={!canCalculate}
           className={`inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors
             ${canCalculate
-              ? 'bg-blue-600 text-white hover:bg-blue-700'
-              : 'bg-gray-100 text-gray-400 cursor-not-allowed'
+              ? 'bg-primary text-white hover:bg-primary/90'
+              : 'bg-muted text-muted-foreground cursor-not-allowed'
             }`}
         >
           {calculating && (
@@ -222,32 +238,32 @@ export function CAMList() {
       </div>
 
       {/* ── Part 2: Reconciliations table ── */}
-      <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
-        <div className="px-6 py-4 border-b border-gray-200">
-          <h2 className="text-base font-semibold text-gray-800">
+      <div className="bg-white rounded-lg border border-border overflow-hidden">
+        <div className="px-6 py-4 border-b border-border">
+          <h2 className="text-base font-semibold text-foreground">
             Reconciliations
             {propertyId && (
-              <span className="ml-2 text-sm font-normal text-gray-500">
+              <span className="ml-2 text-sm font-normal text-muted-foreground">
                 — {properties?.find(p => p.id === propertyId)?.name ?? ''} · {year}
               </span>
             )}
           </h2>
         </div>
 
-        <table className="min-w-full divide-y divide-gray-200 text-sm">
-          <thead className="bg-gray-50">
+        <table className="min-w-full divide-y divide-border text-sm">
+          <thead className="bg-muted">
             <tr>
               {['Property', 'Suite', 'Tenant', 'Year', 'Pro-rata %', 'Est. Paid', 'Actual Owed', 'True-Up', 'Status', 'Action'].map(h => (
-                <th key={h} className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide">
+                <th key={h} className="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wide">
                   {h}
                 </th>
               ))}
             </tr>
           </thead>
-          <tbody className="divide-y divide-gray-200">
+          <tbody className="divide-y divide-border">
             {filteredRows.length === 0 && (
               <tr>
-                <td colSpan={10} className="px-4 py-8 text-center text-gray-400">
+                <td colSpan={10} className="px-4 py-8 text-center text-muted-foreground">
                   No reconciliations yet. Run one above.
                 </td>
               </tr>
@@ -258,29 +274,29 @@ export function CAMList() {
               const isApproving = approvingId === row.id
 
               return (
-                <tr key={row.id} className="hover:bg-gray-50">
-                  <td className="px-4 py-3 font-medium text-gray-900">
+                <tr key={row.id} className="hover:bg-muted">
+                  <td className="px-4 py-3 font-medium text-foreground">
                     {row.leases?.units?.properties?.name ?? '—'}
                   </td>
-                  <td className="px-4 py-3 text-gray-500">
+                  <td className="px-4 py-3 text-muted-foreground">
                     {row.leases?.units?.suite ?? '—'}
                   </td>
-                  <td className="px-4 py-3 text-gray-700">
+                  <td className="px-4 py-3 text-foreground">
                     {row.leases?.tenants?.name ?? '—'}
                   </td>
-                  <td className="px-4 py-3 text-gray-700">
+                  <td className="px-4 py-3 text-foreground">
                     {row.reconciliation_year}
                   </td>
-                  <td className="px-4 py-3 font-mono text-gray-700">
+                  <td className="px-4 py-3 font-mono text-foreground">
                     {(row.tenant_pro_rata_share_pct * 100).toFixed(2)}%
                   </td>
-                  <td className="px-4 py-3 font-mono text-gray-700">
+                  <td className="px-4 py-3 font-mono text-foreground">
                     {formatCurrency(row.estimated_cam_paid)}
                   </td>
-                  <td className="px-4 py-3 font-mono text-gray-700">
+                  <td className="px-4 py-3 font-mono text-foreground">
                     {formatCurrency(row.actual_cam_owed)}
                   </td>
-                  <td className={`px-4 py-3 font-mono font-semibold ${isCredit ? 'text-green-700' : trueUp > 0 ? 'text-red-700' : 'text-gray-700'}`}>
+                  <td className={`px-4 py-3 font-mono font-semibold ${isCredit ? 'text-status-active' : trueUp > 0 ? 'text-status-danger' : 'text-foreground'}`}>
                     {formatCurrency(Math.abs(trueUp))}
                     {isCredit && <span className="ml-1 text-xs font-normal">(credit)</span>}
                   </td>
@@ -290,12 +306,12 @@ export function CAMList() {
                   <td className="px-4 py-3">
                     {row.status === 'draft' ? (
                       <button
-                        onClick={() => handleApprove(row)}
+                        onClick={() => { setDialogRow(row); setConfirmRow(row) }}
                         disabled={isApproving}
                         className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium transition-colors
                           ${isApproving
-                            ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
-                            : 'bg-green-600 text-white hover:bg-green-700'
+                            ? 'bg-muted text-muted-foreground cursor-not-allowed'
+                            : 'bg-status-active text-white hover:bg-status-active/90'
                           }`}
                       >
                         {isApproving && (
@@ -307,7 +323,7 @@ export function CAMList() {
                         {isApproving ? 'Billing…' : 'Approve & Bill'}
                       </button>
                     ) : (
-                      <span className="text-xs text-gray-400">
+                      <span className="text-xs text-muted-foreground">
                         {row.billed_date ? new Date(row.billed_date).toLocaleDateString() : '—'}
                       </span>
                     )}
@@ -318,6 +334,17 @@ export function CAMList() {
           </tbody>
         </table>
       </div>
+
+      <ConfirmDialog
+        open={confirmRow !== null}
+        onOpenChange={(open) => { if (!open) setConfirmRow(null) }}
+        title="Approve & bill this true-up?"
+        description={dialogRow && <TrueUpConfirmDescription row={dialogRow} />}
+        confirmLabel="Approve & Bill"
+        pendingLabel="Billing…"
+        pending={confirmRow !== null && approvingId === confirmRow.id}
+        onConfirm={() => { if (confirmRow) void handleApprove(confirmRow) }}
+      />
     </div>
   )
 }

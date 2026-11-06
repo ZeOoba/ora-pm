@@ -91,17 +91,17 @@ export function LeaseForm({
 
   const tenantsQ = useQuery({
     queryKey: ['tenants'],
-    queryFn: () => api.get<{ data: Tenant[] }>('/tenants').then(r => r.data),
+    queryFn: () => api.listAll<Tenant>('/tenants'),
   })
 
   const unitsQ = useQuery({
     queryKey: ['units', 'all'],
-    queryFn: () => api.get<{ data: Unit[] }>('/units').then(r => r.data),
+    queryFn: () => api.listAll<Unit>('/units'),
   })
 
   const propsQ = useQuery({
     queryKey: ['properties'],
-    queryFn: () => api.get<{ data: Property[] }>('/properties').then(r => r.data),
+    queryFn: () => api.listAll<Property>('/properties'),
   })
 
   const mutation = useSaveMutation<Lease>({
@@ -145,7 +145,7 @@ export function LeaseForm({
 
   const isLoading = tenantsQ.isLoading || unitsQ.isLoading || propsQ.isLoading
 
-  if (isLoading) return <p className="text-gray-500 p-4">Loading…</p>
+  if (isLoading) return <p className="text-muted-foreground p-4">Loading…</p>
 
   const tenants = tenantsQ.data ?? []
   const units = unitsQ.data ?? []

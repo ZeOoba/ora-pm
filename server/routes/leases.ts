@@ -1,10 +1,10 @@
 import { Hono } from 'hono'
 import { getDb } from '../db/client'
 import {
-  LeaseInsertSchema, LeaseUpdateSchema, PaginationSchema,
-  LeaseAmendmentInsertSchema, LeaseNoticeInsertSchema,
+  LeaseInsertSchema, LeaseUpdateSchema, LeaseAmendmentInsertSchema, LeaseNoticeInsertSchema,
 } from '../lib/schemas'
 import { dbError } from '../lib/api-error'
+import { parseListQuery, listErrorResponse } from '../lib/list-query'
 
 type Env = { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string }
 
@@ -12,19 +12,27 @@ export const leasesRouter = new Hono<{ Bindings: Env }>()
 
 leasesRouter.get('/', async (c) => {
   const db = getDb(c.env)
-  const status = c.req.query('status') ?? 'active'
-  const { limit, offset } = PaginationSchema.parse({
-    limit: c.req.query('limit'),
-    offset: c.req.query('offset'),
+  // Absent/empty `status` = all statuses; callers wanting only active leases
+  // pass ?status=active (every current frontend caller already does).
+  const status = c.req.query('status')
+  const lq = parseListQuery(c, {
+    sortable: ['start_date', 'end_date', 'base_rent_monthly', 'status'],
+    defaultSort: 'end_date',
   })
-  const { data, error } = await db
+  const base = db
     .from('leases')
-    .select('*, tenants(name), units(suite, sf, properties(name))')
-    .eq('status', status)
-    .order('end_date')
-    .range(offset, offset + limit - 1)
-  if (error) return dbError(c, error, 'Failed to load leases')
-  return c.json({ data })
+    .select('*, tenants(name), units(suite, sf, properties(name))', { count: 'exact' })
+  const { data, error, count } = await (status ? base.eq('status', status) : base)
+    .order(lq.sort, { ascending: lq.ascending })
+    .order('id')
+    .range(...lq.range!)
+  if (error) {
+    return listErrorResponse(c, error, 'Failed to load leases', () => {
+      const head = db.from('leases').select('id', { count: 'exact', head: true })
+      return status ? head.eq('status', status) : head
+    })
+  }
+  return c.json({ data, total: count ?? 0 })
 })
 
 leasesRouter.get('/:id', async (c) => {

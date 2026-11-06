@@ -14,7 +14,7 @@ export function FormActions({
   return (
     <div className="mt-6">
       {error && (
-        <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded p-2 mb-3">{error}</p>
+        <p className="text-sm text-status-danger bg-status-danger/10 border border-status-danger/30 rounded p-2 mb-3">{error}</p>
       )}
       <div className="flex items-center gap-3">
         <button

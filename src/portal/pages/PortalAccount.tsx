@@ -4,6 +4,9 @@ import { portalApi } from '../lib/portal-api'
 import { portalSupabase } from '../lib/supabase-portal'
 import type { Lease } from '../lib/portal-api'
 import type { Factor } from '@supabase/supabase-js'
+import { Button } from '../../components/ui/Button'
+import { Card } from '../../components/ui/Card'
+import { QueryState } from '../../components/QueryState'
 
 interface LeaseWithAutopay extends Lease {
   units: NonNullable<Lease['units']>
@@ -17,8 +20,10 @@ interface TotpEnrollment {
 
 export function PortalAccount() {
   const qc = useQueryClient()
-  const { data: meData } = useQuery({ queryKey: ['portal-me'], queryFn: portalApi.getMe })
-  const { data: leaseData } = useQuery({ queryKey: ['portal-lease'], queryFn: portalApi.getLease })
+  const meQuery = useQuery({ queryKey: ['portal-me'], queryFn: portalApi.getMe })
+  const leaseQuery = useQuery({ queryKey: ['portal-lease'], queryFn: portalApi.getLease })
+  const { data: meData } = meQuery
+  const { data: leaseData } = leaseQuery
 
   const tenant = meData?.tenant
   const leases = (leaseData?.data ?? []) as LeaseWithAutopay[]
@@ -152,33 +157,36 @@ export function PortalAccount() {
 
   return (
     <div className="p-6 max-w-lg space-y-6">
-      <h1 className="text-2xl font-serif" style={{ color: '#1B2A4A' }}>Account</h1>
+      <h1 className="font-display text-2xl text-navy">Account</h1>
 
-      <div className="bg-white rounded-lg border border-gray-200 p-5 space-y-3">
-        <h2 className="font-medium text-gray-900">Profile</h2>
-        <div className="text-sm text-gray-600 space-y-1">
-          <p><span className="text-gray-500">Company:</span> {tenant?.name ?? '—'}</p>
-          <p><span className="text-gray-500">Email:</span> {tenant?.contact_email ?? '—'}</p>
+      <QueryState query={meQuery}>
+      <Card className="p-5 space-y-3">
+        <h2 className="font-medium text-navy">Profile</h2>
+        <div className="text-sm text-status-neutral space-y-1">
+          <p><span className="text-status-neutral">Company:</span> {tenant?.name ?? '—'}</p>
+          <p><span className="text-status-neutral">Email:</span> {tenant?.contact_email ?? '—'}</p>
         </div>
-      </div>
+      </Card>
+      </QueryState>
 
-      <div className="bg-white rounded-lg border border-gray-200 p-5 space-y-3">
-        <h2 className="font-medium text-gray-900">Autopay</h2>
-        <p className="text-sm text-gray-500">
+      <QueryState query={leaseQuery}>
+      <Card className="p-5 space-y-3">
+        <h2 className="font-medium text-navy">Autopay</h2>
+        <p className="text-sm text-status-neutral">
           When enabled, rent and CAM charges are automatically paid via ACH on the 1st of each month using your verified bank account.
         </p>
         {leases.length === 0 && (
-          <p className="text-sm text-gray-400">No active leases found.</p>
+          <p className="text-sm text-status-neutral">No active leases found.</p>
         )}
         {leases.map(lease => {
           const enabled = autopayStatus[lease.id] ?? lease.autopay_enabled
           return (
-            <div key={lease.id} className="flex items-center justify-between py-2 border-t border-gray-50">
+            <div key={lease.id} className="flex items-center justify-between py-2 border-t border-border">
               <div>
-                <p className="text-sm font-medium text-gray-900">
+                <p className="text-sm font-medium text-navy">
                   {lease.units?.properties?.name ?? 'Property'} — Suite {lease.units?.suite}
                 </p>
-                <p className="text-xs text-gray-500">
+                <p className="text-xs text-status-neutral">
                   {lease.autopay_payment_method_id
                     ? 'Bank account on file'
                     : 'No bank account linked — pay once to save'}
@@ -190,53 +198,54 @@ export function PortalAccount() {
                   disabled={saving === lease.id || !lease.autopay_payment_method_id}
                   className={`text-xs font-medium px-3 py-1.5 rounded-full transition-colors ${
                     enabled
-                      ? 'bg-green-100 text-green-700 hover:bg-green-200'
-                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                      ? 'bg-status-active/10 text-status-active hover:bg-status-active/20'
+                      : 'bg-muted text-status-neutral hover:bg-border'
                   } disabled:opacity-50`}
                 >
                   {saving === lease.id ? '…' : enabled ? 'Autopay ON' : 'Autopay OFF'}
                 </button>
                 {autopayError[lease.id] && (
-                  <p className="text-xs text-red-600 max-w-[220px] text-right">{autopayError[lease.id]}</p>
+                  <p role="alert" className="text-xs text-status-danger max-w-[220px] text-right">{autopayError[lease.id]}</p>
                 )}
               </div>
             </div>
           )
         })}
-      </div>
+      </Card>
+      </QueryState>
 
-      <div className="bg-white rounded-lg border border-gray-200 p-5 space-y-3">
-        <h2 className="font-medium text-gray-900">Security</h2>
-        <p className="text-sm text-gray-500">Enable two-factor authentication (TOTP) for additional account security.</p>
-        <button onClick={openMfaModal} className="text-sm text-blue-600 hover:underline">
+      <Card className="p-5 space-y-3">
+        <h2 className="font-medium text-navy">Security</h2>
+        <p className="text-sm text-status-neutral">Enable two-factor authentication (TOTP) for additional account security.</p>
+        <button onClick={openMfaModal} className="text-sm text-navy underline-offset-2 hover:underline">
           Manage two-factor authentication →
         </button>
-      </div>
+      </Card>
 
       {mfaModalOpen && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50">
+        <div className="fixed inset-0 bg-navy/50 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-lg max-w-sm w-full p-6 space-y-4">
             <div className="flex items-center justify-between">
-              <h3 className="font-medium text-gray-900">Two-factor authentication</h3>
-              <button onClick={closeMfaModal} aria-label="Close" className="text-gray-400 hover:text-gray-600">
+              <h3 className="font-medium text-navy">Two-factor authentication</h3>
+              <button onClick={closeMfaModal} aria-label="Close" className="text-status-neutral hover:text-navy">
                 ×
               </button>
             </div>
 
-            {mfaError && <p className="text-sm text-red-600">{mfaError}</p>}
+            {mfaError && <p role="alert" className="text-sm text-status-danger">{mfaError}</p>}
 
-            {factorsLoading && <p className="text-sm text-gray-500">Loading…</p>}
+            {factorsLoading && <p className="text-sm text-status-neutral">Loading…</p>}
 
             {!factorsLoading && factors.length > 0 && (
               <div className="space-y-2">
-                <p className="text-xs text-gray-500 uppercase tracking-wide">Active factors</p>
+                <p className="text-xs text-status-neutral uppercase tracking-wide">Active factors</p>
                 {factors.map(f => (
                   <div key={f.id} className="flex items-center justify-between text-sm">
-                    <span className="text-gray-700">{f.friendly_name ?? 'Authenticator app'}</span>
+                    <span className="text-navy">{f.friendly_name ?? 'Authenticator app'}</span>
                     <button
                       onClick={() => removeFactor(f.id)}
                       disabled={mfaBusy}
-                      className="text-xs text-red-600 hover:underline disabled:opacity-50"
+                      className="text-xs text-status-danger hover:underline disabled:opacity-50"
                     >
                       Remove
                     </button>
@@ -246,7 +255,7 @@ export function PortalAccount() {
             )}
 
             {!factorsLoading && factors.length === 0 && !enrollment && !mfaSuccess && (
-              <button onClick={startEnrollment} disabled={mfaBusy} className="text-sm text-blue-600 hover:underline">
+              <button onClick={startEnrollment} disabled={mfaBusy} className="text-sm text-navy underline-offset-2 hover:underline">
                 Set up →
               </button>
             )}
@@ -260,7 +269,7 @@ export function PortalAccount() {
                   height={180}
                   className="mx-auto"
                 />
-                <p className="text-xs text-gray-500 break-all">
+                <p className="text-xs text-status-neutral break-all">
                   Can't scan? Enter this code manually: <span className="font-mono">{enrollment.secret}</span>
                 </p>
                 <input
@@ -270,19 +279,15 @@ export function PortalAccount() {
                   value={code}
                   onChange={e => setCode(e.target.value)}
                   placeholder="6-digit code"
-                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  className="w-full border border-navy/15 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-gold"
                 />
-                <button
-                  type="submit"
-                  disabled={mfaBusy}
-                  className="w-full bg-[#1B2A4A] text-white rounded px-4 py-2 text-sm font-medium hover:bg-[#243660] disabled:opacity-50"
-                >
+                <Button type="submit" disabled={mfaBusy} className="w-full">
                   Verify
-                </button>
+                </Button>
               </form>
             )}
 
-            {mfaSuccess && <p className="text-sm text-green-700">Two-factor authentication enabled.</p>}
+            {mfaSuccess && <p className="text-sm text-status-active">Two-factor authentication enabled.</p>}
           </div>
         </div>
       )}

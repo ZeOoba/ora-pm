@@ -57,7 +57,7 @@ export function InsuranceForm() {
 
   const { data: tenants, isLoading: tenantsLoading } = useQuery({
     queryKey: ['tenants'],
-    queryFn: () => api.get<{ data: Tenant[] }>('/tenants').then(r => r.data),
+    queryFn: () => api.listAll<Tenant>('/tenants'),
   })
 
   const mutation = useSaveMutation<InsuranceCertificate>({
@@ -92,7 +92,7 @@ export function InsuranceForm() {
     })
   }
 
-  if (tenantsLoading) return <p className="text-gray-500 p-4">Loading…</p>
+  if (tenantsLoading) return <p className="text-muted-foreground p-4">Loading…</p>
 
   return (
     <div>

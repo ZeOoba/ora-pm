@@ -46,15 +46,19 @@ const AUTH = { Authorization: 'Bearer admin-token' }
 // mockFrom this file's own handler-level tenant lookups use. Both call `.from('tenants')`,
 // so this helper differentiates by the `.eq()` column: the middleware always queries
 // `auth_user_id` (and expects nobody to match — these tests' admin is never a tenant),
-// while portal-auth.ts's own handlers query by `id`.
+// while portal-auth.ts's own handlers query by `id`. P1 T12: the middleware then reads
+// `admin_users` by `email` (role data model, recorded not enforced) through the same
+// mockFrom, chaining .abortSignal() before .maybeSingle() — answered with "no row"
+// (adminRole null, adminRoleSource 'none'; access unchanged).
 function mockTenantsTable(byIdResult: { data: unknown; error: unknown }, opts?: {
   update?: ReturnType<typeof vi.fn>
 }) {
   return {
     select: vi.fn().mockReturnValue({
       eq: vi.fn((column: string) => {
-        if (column === 'auth_user_id') {
-          return { maybeSingle: vi.fn().mockResolvedValue({ data: null, error: null }) }
+        if (column === 'auth_user_id' || column === 'email') {
+          const maybeSingle = vi.fn().mockResolvedValue({ data: null, error: null })
+          return { maybeSingle, abortSignal: vi.fn().mockReturnValue({ maybeSingle }) }
         }
         return { single: vi.fn().mockResolvedValue(byIdResult) }
       }),

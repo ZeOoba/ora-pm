@@ -169,8 +169,8 @@ describe('PortalApp — AAL2 guard call site (OI-045)', () => {
     expect(errorBlockReturn).not.toMatch(/<PortalRouter/)
 
     // actionable: a visible message and a retry affordance, styled consistent with
-    // this diff's existing error UI (text-red-600, per PortalAccount/PortalMfaChallenge)
-    expect(errorBlock).toMatch(/text-red-600/)
+    // the portal's error UI (text-status-danger token, per PortalAccount/PortalMfaChallenge)
+    expect(errorBlock).toMatch(/text-status-danger/)
     expect(errorBlock).toMatch(/onClick/)
   })
 })

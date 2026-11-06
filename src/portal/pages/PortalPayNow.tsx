@@ -4,8 +4,12 @@ import { loadStripe } from '@stripe/stripe-js'
 import { portalApi } from '../lib/portal-api'
 import { formatCurrency } from '../../lib/format'
 import type { Charge } from '../lib/portal-api'
-import { singleLeaseId } from '../lib/charges'
+import { chargesGate, singleLeaseId } from '../lib/charges'
 import { runPayAttempt } from '../lib/pay-attempt'
+import { Button } from '../../components/ui/Button'
+import { Card } from '../../components/ui/Card'
+import { Skeleton } from '../../components/ui/skeleton'
+import { QueryState, StaleDataWarning } from '../../components/QueryState'
 
 const stripePromise = loadStripe(import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY as string)
 
@@ -36,8 +40,10 @@ export function PortalPayNow() {
     clientRequestIdRef.current = null
   }, [selected])
 
-  const { data: meData } = useQuery({ queryKey: ['portal-me'], queryFn: portalApi.getMe })
-  const { data: chargesData, isLoading } = useQuery({ queryKey: ['portal-charges'], queryFn: portalApi.getCharges })
+  const meQuery = useQuery({ queryKey: ['portal-me'], queryFn: portalApi.getMe })
+  const { data: meData } = meQuery
+  const chargesQuery = useQuery({ queryKey: ['portal-charges'], queryFn: portalApi.getCharges })
+  const { data: chargesData } = chargesQuery
 
   const charges = (chargesData?.data ?? []) as Charge[]
   // `charges` has no per-row paid/open column and `payments` isn't linked to a specific charge
@@ -108,43 +114,69 @@ export function PortalPayNow() {
     }
   }
 
-  if (isLoading) return <div className="p-6 text-gray-500">Loading charges…</div>
+  // A failed first load must not fall through to "no open charges - you are all caught up". Only the
+  // select step is ever replaced (see chargesGate): the processing/done/error screens are never hidden
+  // by the charges query state, and a failed background refetch with data kept does not block.
+  if (chargesGate(step, { isError: chargesQuery.isError, data: chargesData }) === 'blocking') {
+    return (
+      <div className="p-6 max-w-2xl space-y-6">
+        <h1 className="font-display text-2xl text-navy">Pay Now</h1>
+        <QueryState
+          query={chargesQuery}
+          skeleton={(
+            <div className="space-y-3" aria-busy="true" aria-label="Loading charges">
+              <Skeleton className="h-10 w-full" />
+              <Skeleton className="h-10 w-full" />
+              <Skeleton className="h-10 w-2/3" />
+            </div>
+          )}
+        >
+          {null}
+        </QueryState>
+      </div>
+    )
+  }
 
   if (step === 'done') return (
     <div className="p-6 max-w-lg">
-      <div className="bg-green-50 border border-green-200 rounded-lg p-6">
-        <h2 className="text-lg font-semibold text-green-800">Payment Initiated</h2>
-        <p className="text-green-700 mt-2 text-sm">
+      <div className="bg-status-active/5 border border-status-active/30 rounded-lg p-6">
+        <h2 className="font-display text-lg font-semibold text-status-active">Payment Initiated</h2>
+        <p className="text-status-active mt-2 text-sm">
           Your ACH payment of {formatCurrency(totalCents / 100)} has been submitted.
           ACH payments typically settle in 3–5 business days.
           You will see the payment as "processing" in your payment history.
         </p>
-        <a href="/portal" className="mt-4 inline-block text-blue-600 text-sm hover:underline">← Back to dashboard</a>
+        <a href="/portal" className="mt-4 inline-block text-navy text-sm underline-offset-2 hover:underline">← Back to dashboard</a>
       </div>
     </div>
   )
 
   return (
     <div className="p-6 max-w-2xl space-y-6">
-      <h1 className="text-2xl font-serif" style={{ color: '#1B2A4A' }}>Pay Now</h1>
+      <h1 className="font-display text-2xl text-navy">Pay Now</h1>
+
+      <StaleDataWarning query={chargesQuery} />
+
+      {/* portal-me status only: makes a pending/failed profile read visible. Pay button logic is untouched. */}
+      <QueryState query={meQuery} skeleton={<p className="text-xs text-status-neutral" aria-busy="true">Loading your account…</p>}>{null}</QueryState>
 
       {step === 'error' && (
-        <div className="bg-red-50 border border-red-200 rounded p-4 text-red-700 text-sm">{errorMsg}</div>
+        <div role="alert" className="bg-status-danger/5 border border-status-danger/30 rounded p-4 text-status-danger text-sm">{errorMsg}</div>
       )}
 
       {openCharges.length === 0 ? (
-        <div className="text-gray-500 text-sm">No open charges — you're all caught up!</div>
+        <div className="text-status-neutral text-sm">No open charges — you're all caught up!</div>
       ) : (
         <>
-          <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
-            <div className="px-4 py-3 border-b border-gray-100 flex justify-between items-center">
-              <span className="text-sm font-medium text-gray-700">Open Charges</span>
-              <button onClick={toggleAll} className="text-xs text-blue-600 hover:underline">
+          <Card className="overflow-hidden">
+            <div className="px-4 py-3 border-b border-border flex justify-between items-center">
+              <span className="text-sm font-medium text-navy">Open Charges</span>
+              <button onClick={toggleAll} className="text-xs text-navy underline-offset-2 hover:underline">
                 {selected.size === openCharges.length ? 'Deselect all' : 'Select all'}
               </button>
             </div>
             {openCharges.map(ch => (
-              <label key={ch.id} className="flex items-center gap-3 px-4 py-3 border-b border-gray-50 hover:bg-gray-50 cursor-pointer last:border-0">
+              <label key={ch.id} className="flex items-center gap-3 px-4 py-3 border-b border-border/50 hover:bg-parchment/50 cursor-pointer last:border-0">
                 <input
                   type="checkbox"
                   checked={selected.has(ch.id)}
@@ -160,41 +192,41 @@ export function PortalPayNow() {
                   className="rounded"
                 />
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-gray-900">
+                  <p className="text-sm font-medium text-navy">
                     {ch.description ?? ch.type.replace(/_/g, ' ')}
                   </p>
-                  <p className="text-xs text-gray-500">Due {ch.due_date}</p>
+                  <p className="text-xs text-status-neutral">Due {ch.due_date}</p>
                 </div>
-                <span className="text-sm font-semibold text-gray-900">{formatCurrency(ch.amount)}</span>
+                <span className="text-sm font-semibold text-navy">{formatCurrency(ch.amount)}</span>
               </label>
             ))}
-          </div>
+          </Card>
 
           {selected.size > 0 && (
             <div className="pt-2 space-y-2">
               {spansMultipleLeases && (
-                <p className="text-sm text-red-600">
+                <p role="alert" className="text-sm text-status-danger">
                   Selected charges span more than one lease — pay each lease separately.
                 </p>
               )}
               <div className="flex items-center justify-between">
-                <span className="text-sm font-medium text-gray-700">
+                <span className="text-sm font-medium text-navy">
                   Total: {formatCurrency(totalCents / 100)}
                 </span>
-                <button
+                <Button
                   onClick={handlePay}
                   disabled={step === 'processing' || spansMultipleLeases}
-                  className="bg-[#1B2A4A] text-white rounded px-6 py-2.5 text-sm font-medium hover:bg-[#243660] disabled:opacity-50"
+                  className="px-6 py-2.5"
                 >
                   {step === 'processing' ? 'Processing…' : `Pay ${formatCurrency(totalCents / 100)} via ACH`}
-                </button>
+                </Button>
               </div>
             </div>
           )}
         </>
       )}
 
-      <p className="text-xs text-gray-400">
+      <p className="text-xs text-status-neutral">
         ACH payments are processed via Stripe. Funds are debited from your bank account within 3–5 business days.
       </p>
     </div>

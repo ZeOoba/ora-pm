@@ -1,5 +1,10 @@
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { Button } from '../../components/ui/Button'
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '../../components/ui/sheet'
+import { DataTable } from '../../components/data-table/DataTable'
+import { dataTableColumnHelper } from '../../components/data-table/columns'
+import { csvFilename } from '../../components/data-table/csv'
 import { api } from '../../lib/api'
 import { isDedupedConflict } from '../../lib/api-error'
 import { useSaveMutation } from '../../lib/mutations'
@@ -23,6 +28,42 @@ type LeaseWithJoins = Lease & {
     properties: { name: string } | null
   } | null
 }
+
+// ── Table columns ─────────────────────────────────────────────────────────────
+
+const h = dataTableColumnHelper<PaymentRow>()
+
+// Sortable ids match the server allowlist: payment_date, amount.
+const columns = [
+  h.accessor('payment_date', {
+    header: 'Payment Date',
+    enableSorting: true,
+    cell: ({ row }) => formatDate(row.original.payment_date),
+  }),
+  h.accessor((p) => p.leases?.tenants?.name, {
+    id: 'tenant',
+    header: 'Tenant',
+    cell: ({ row }) => row.original.leases?.tenants?.name ?? '—',
+  }),
+  h.accessor('amount', {
+    header: 'Amount',
+    enableSorting: true,
+    meta: { numeric: true },
+    cell: ({ row }) => <span className="font-medium">{formatCurrency(row.original.amount)}</span>,
+  }),
+  h.accessor('method', {
+    header: 'Method',
+    cell: ({ row }) => <span className="capitalize text-muted-foreground">{row.original.method}</span>,
+  }),
+  h.accessor('check_number', {
+    header: 'Check #',
+    cell: ({ row }) => <span className="text-muted-foreground">{row.original.check_number ?? '—'}</span>,
+  }),
+  h.accessor('notes', {
+    header: 'Notes',
+    cell: ({ row }) => <span className="text-muted-foreground">{row.original.notes ?? '—'}</span>,
+  }),
+]
 
 // ── Form state ────────────────────────────────────────────────────────────────
 
@@ -91,17 +132,13 @@ export function PaymentsList() {
   // as settled (reset form, fresh key, refetch the lists) closes that gap.
   const [infoMessage, setInfoMessage] = useState<string | null>(null)
 
-  // Payment history
-  const paymentsQ = useQuery({
-    queryKey: ['payments'],
-    queryFn: () => api.get<{ data: PaymentRow[] }>('/payments').then(r => r.data),
-  })
-
   // Active leases for dropdown
+  // /leases is paged (default 50): ask for the endpoint maximum so the picker
+  // lists every active lease.
   const leasesQ = useQuery({
-    queryKey: ['leases', 'active'],
+    queryKey: ['leases', 'active', 'picker'],
     queryFn: () =>
-      api.get<{ data: LeaseWithJoins[] }>('/leases?status=active').then(r => r.data),
+      api.listAll<LeaseWithJoins>('/leases', { status: 'active' }),
   })
 
   const mutation = useSaveMutation<Payment>({
@@ -177,36 +214,30 @@ export function PaymentsList() {
     })
     .sort((a, b) => a.label.localeCompare(b.label))
 
-  const payments = paymentsQ.data ?? []
-
   return (
     <div>
       <PageHeader
         title="Payments"
         action={
-          !showForm ? (
-            <button
-              type="button"
-              onClick={() => { setInfoMessage(null); setShowForm(true) }}
-              className="bg-blue-600 hover:bg-blue-700 text-white text-sm px-3 py-1.5 rounded"
-            >
-              + Record Payment
-            </button>
-          ) : undefined
+          <Button type="button" onClick={() => { setInfoMessage(null); setShowForm(true) }}>
+            + Record Payment
+          </Button>
         }
       />
 
       {infoMessage && (
-        <p className="text-sm text-blue-700 bg-blue-50 border border-blue-200 rounded p-2 mb-4 max-w-2xl">
+        <p className="mb-4 max-w-2xl rounded border border-border bg-muted p-2 text-sm text-primary">
           {infoMessage}
         </p>
       )}
 
-      {/* Inline Record Payment Form */}
-      {showForm && (
-        <div className="bg-white rounded-lg border border-gray-200 p-4 mb-6 max-w-2xl">
-          <h3 className="text-sm font-medium text-gray-700 mb-3">Record Payment</h3>
-          <form onSubmit={handleSubmit} noValidate>
+      <Sheet open={showForm} onOpenChange={(open) => { if (!open) handleCancel() }}>
+        <SheetContent className="overflow-y-auto sm:max-w-md">
+          <SheetHeader>
+            <SheetTitle>Record Payment</SheetTitle>
+            <SheetDescription>Manual check, wire or other payment against an active lease.</SheetDescription>
+          </SheetHeader>
+          <form onSubmit={handleSubmit} noValidate className="px-4 pb-4">
             {/* Lease */}
             <Field label="Lease" htmlFor="lease_id" required error={errors.lease_id}>
               <Select
@@ -277,80 +308,32 @@ export function PaymentsList() {
             </Field>
 
             {mutation.error && (
-              <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded p-2 mb-3">
+              <p className="mb-3 rounded border border-status-danger/30 bg-status-danger/5 p-2 text-sm text-status-danger">
                 {mutation.error.message}
               </p>
             )}
 
-            <div className="flex items-center gap-3 mt-1">
-              <button
-                type="submit"
-                disabled={mutation.isPending}
-                className="bg-blue-600 hover:bg-blue-700 text-white rounded-md px-4 py-2 text-sm font-medium disabled:opacity-50 transition-colors"
-              >
+            <div className="mt-1 flex items-center gap-3">
+              <Button type="submit" disabled={mutation.isPending}>
                 {mutation.isPending ? 'Saving…' : 'Record Payment'}
-              </button>
-              <button
-                type="button"
-                onClick={handleCancel}
-                className="text-sm text-gray-600 hover:text-gray-900"
-              >
+              </Button>
+              <Button type="button" variant="ghost" onClick={handleCancel}>
                 Cancel
-              </button>
+              </Button>
             </div>
           </form>
-        </div>
-      )}
+        </SheetContent>
+      </Sheet>
 
-      {/* Payment History Table */}
-      {paymentsQ.isLoading ? (
-        <p className="text-gray-500 text-sm p-4">Loading…</p>
-      ) : payments.length === 0 ? (
-        <p className="text-gray-500 text-sm">No payments recorded.</p>
-      ) : (
-        <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-gray-200 bg-gray-50">
-                <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">
-                  Payment Date
-                </th>
-                <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">
-                  Tenant
-                </th>
-                <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">
-                  Amount
-                </th>
-                <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">
-                  Method
-                </th>
-                <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">
-                  Check #
-                </th>
-                <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">
-                  Notes
-                </th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {payments.map(p => (
-                <tr key={p.id} className="hover:bg-gray-50 transition-colors">
-                  <td className="px-4 py-3 text-gray-900">{formatDate(p.payment_date)}</td>
-                  <td className="px-4 py-3 text-gray-900">
-                    {p.leases?.tenants?.name ?? '—'}
-                  </td>
-                  <td className="px-4 py-3 text-gray-900 text-right font-medium">
-                    {formatCurrency(p.amount)}
-                  </td>
-                  <td className="px-4 py-3 text-gray-600 capitalize">{p.method}</td>
-                  <td className="px-4 py-3 text-gray-600">{p.check_number ?? '—'}</td>
-                  <td className="px-4 py-3 text-gray-500">{p.notes ?? '—'}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+      <DataTable<PaymentRow>
+        columns={columns}
+        queryKey={['payments', 'list']}
+        fetchPage={(p) => api.list<PaymentRow>('/payments', p)}
+        searchable={false}
+        csvFilename={csvFilename('payments')}
+        initialSort={{ id: 'payment_date', desc: true }}
+        emptyTitle="No payments recorded"
+      />
     </div>
   )
 }

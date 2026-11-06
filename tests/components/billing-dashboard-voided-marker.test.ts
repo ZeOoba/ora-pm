@@ -21,3 +21,11 @@ describe('BillingDashboard — voided charges are visibly marked', () => {
     expect(source).toMatch(/ch\.void_reason/)
   })
 })
+
+describe('BillingDashboard - CSV export distinguishes voided charges', () => {
+  const source = readFileSync(join(__dirname, '../../src/pages/billing/BillingDashboard.tsx'), 'utf-8')
+
+  it('type column meta.csv appends (VOIDED) when voided_at is set', () => {
+    expect(source).toMatch(/voided_at\s*\?[^\n]*\(VOIDED\)/)
+  })
+})
