@@ -35,6 +35,17 @@ describe('daysPastDue', () => {
     // across a US DST boundary (2026-11-01) — UTC arithmetic, no 23/25-hour day drift
     expect(daysPastDue('2026-10-31', AS_OF)).toBe(5)
   })
+  // F-006: the fall-back case above cannot fail (a 25-hour day floors to the right answer). The
+  // spring-forward boundary (2026-03-08) loses an hour, so local-midnight arithmetic floors one
+  // day short. These only bite when the process runs in a DST zone, so the suite pins
+  // TZ=America/New_York (vitest.config.ts) and this test proves the pin took effect.
+  it('is DST-proof across the spring-forward boundary (TZ pinned to America/New_York)', () => {
+    expect(Intl.DateTimeFormat().resolvedOptions().timeZone).toBe('America/New_York')
+    expect(new Date(2026, 2, 8).getTimezoneOffset()).toBe(300) // EST at local midnight Mar 8
+    expect(new Date(2026, 2, 9).getTimezoneOffset()).toBe(240) // EDT after the switch
+    expect(daysPastDue('2026-02-10', '2026-03-13')).toBe(31)
+    expect(daysPastDue('2026-03-07', '2026-03-09')).toBe(2)
+  })
   it('returns NaN for a malformed date', () => {
     expect(Number.isNaN(daysPastDue('not-a-date', AS_OF))).toBe(true)
     expect(Number.isNaN(daysPastDue('2026-13-45', AS_OF))).toBe(true)
