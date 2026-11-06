@@ -1,8 +1,9 @@
+import { cn } from '@/lib/utils'
 import { statusTone, TONE_CLASSES, type Tone } from './badge-tone'
 
 export function Badge({ tone, children }: { tone: Tone; children: React.ReactNode }) {
   return (
-    <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${TONE_CLASSES[tone]}`}>
+    <span className={cn('inline-flex items-center px-2 py-0.5 rounded text-xs font-medium', TONE_CLASSES[tone])}>
       {children}
     </span>
   )

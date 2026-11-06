@@ -4,6 +4,20 @@ import { portalSupabase } from './lib/supabase-portal'
 import { checkAal2Guard, type AalGuardResult } from './lib/mfa-guard'
 import { PortalMfaChallenge } from './components/PortalMfaChallenge'
 import type { Session } from '@supabase/supabase-js'
+import { Button } from '../components/ui/Button'
+import { Skeleton } from '../components/ui/skeleton'
+
+function PortalLoading() {
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-ivory p-6" aria-busy="true" aria-label="Loading">
+      <div className="w-full max-w-sm space-y-3">
+        <Skeleton className="h-8 w-full" />
+        <Skeleton className="h-8 w-full" />
+        <Skeleton className="h-8 w-2/3" />
+      </div>
+    </div>
+  )
+}
 
 export function PortalApp() {
   const [session, setSession] = useState<Session | null | undefined>(undefined)
@@ -63,17 +77,17 @@ export function PortalApp() {
     }
   }, [session, aalRetryKey])
 
-  if (session === undefined) return <div className="flex items-center justify-center min-h-screen text-gray-500">Loading…</div>
+  if (session === undefined) return <PortalLoading />
 
-  if (session && aalStatus === 'checking') return <div className="flex items-center justify-center min-h-screen text-gray-500">Loading…</div>
+  if (session && aalStatus === 'checking') return <PortalLoading />
 
   if (session && aalStatus === 'error') {
     return (
-      <div className="flex flex-col items-center justify-center min-h-screen text-gray-500 gap-3">
-        <p className="text-red-600 text-sm">Unable to verify your account's security status. Please try again.</p>
-        <button onClick={() => setAalRetryKey(k => k + 1)} className="text-sm text-blue-600 hover:underline">
+      <div className="flex flex-col items-center justify-center min-h-screen text-status-neutral gap-3">
+        <p role="alert" className="text-status-danger text-sm">Unable to verify your account's security status. Please try again.</p>
+        <Button variant="ghost" className="border border-border" onClick={() => setAalRetryKey(k => k + 1)}>
           Try again
-        </button>
+        </Button>
       </div>
     )
   }

@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { portalSupabase } from '../lib/supabase-portal'
+import { Button } from '../../components/ui/Button'
 
 export function PortalLogin() {
   const [email, setEmail] = useState('')
@@ -21,35 +22,32 @@ export function PortalLogin() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50">
+    <div className="min-h-screen flex items-center justify-center bg-ivory">
       <div className="bg-white shadow rounded-lg p-8 w-full max-w-sm">
-        <h1 className="text-2xl font-semibold text-[#1B2A4A] mb-1">Tenant Portal</h1>
-        <p className="text-gray-500 text-sm mb-6">Oxford Realty Advisors</p>
+        <h1 className="font-display text-2xl text-navy mb-1">Tenant Portal</h1>
+        <p className="text-status-neutral text-sm mb-6">Oxford Realty Advisors</p>
 
         {sent ? (
-          <div className="text-green-700 bg-green-50 rounded p-4 text-sm">
+          <div className="text-status-active bg-status-active/5 rounded p-4 text-sm">
             Check your email for a sign-in link. You can close this tab.
           </div>
         ) : (
           <form onSubmit={handleMagicLink} className="space-y-4">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Email address</label>
+              <label className="block text-sm font-medium text-navy mb-1">Email address</label>
               <input
                 type="email"
                 required
                 value={email}
                 onChange={e => setEmail(e.target.value)}
-                className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full border border-navy/15 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-gold"
                 placeholder="you@company.com"
               />
             </div>
-            {error && <p className="text-red-600 text-sm">{error}</p>}
-            <button
-              type="submit"
-              className="w-full bg-[#1B2A4A] text-white rounded px-4 py-2 text-sm font-medium hover:bg-[#243660]"
-            >
+            {error && <p role="alert" className="text-status-danger text-sm">{error}</p>}
+            <Button type="submit" className="w-full">
               Send sign-in link
-            </button>
+            </Button>
           </form>
         )}
       </div>

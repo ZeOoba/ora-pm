@@ -16,12 +16,17 @@
 # `Content-Security-Policy` (drop `-Report-Only`) to enforce.
 #
 # style-src: left under the default-src 'self' fallback (no 'unsafe-inline' added).
-# Checked for inline <style> tags/attributes that would need it — none found;
 # React's style={{...}} prop (used in PortalPayNow.tsx and others) sets style
 # properties via the CSSOM (node.style.prop = value), which CSP does not treat as
 # an inline-style violation, and Tailwind v4 (@tailwindcss/vite) + @fontsource
-# packages compile to a same-origin stylesheet, not inline. Report-Only mode will
-# surface it in the console if this turns out to be wrong.
+# packages compile to a same-origin stylesheet, not inline.
+# EXCEPTION (the earlier "no inline <style> tags" finding is stale): the shadcn
+# ChartStyle in src/components/ui/chart.tsx injects a <style> element at runtime
+# for chart color variables. Radix Dialog/Sheet scroll-lock and sonner may also
+# inject <style> elements (UNVERIFIED - check the Report-Only console during the
+# browser pass). Flipping to an enforcing CSP therefore needs a style-src decision
+# first (e.g. style-src 'self' 'unsafe-inline', or nonces). Chart bars carry a
+# token fallback (var(--color-KEY, token)) so they are not black if that is blocked.
 
 /*
   X-Frame-Options: DENY

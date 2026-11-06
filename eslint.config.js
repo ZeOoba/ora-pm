@@ -5,6 +5,7 @@ import globals from 'globals'
 import reactHooks from 'eslint-plugin-react-hooks'
 import reactRefresh from 'eslint-plugin-react-refresh'
 import tseslint from 'typescript-eslint'
+import { PALETTE_RESTRICTED_SYNTAX } from './eslint.palette.js'
 
 export default tseslint.config(
   // Build output, tooling caches, and Claude-system worktrees are not app source. Compiled *.js
@@ -27,5 +28,12 @@ export default tseslint.config(
       '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
       '@typescript-eslint/consistent-type-imports': 'error',
     },
+  },
+  // Design-system guard (src/ only; selectors in eslint.palette.js): bans raw gray/blue/green/red
+  // palette utilities and arbitrary-hex color utilities (bg-/text-/border-/ring-/fill-/stroke-[#...])
+  // in string and template literals. Use design tokens instead (docs/design-system.md).
+  {
+    files: ['src/**/*.{ts,tsx}'],
+    rules: { 'no-restricted-syntax': ['error', ...PALETTE_RESTRICTED_SYNTAX] },
   },
 )

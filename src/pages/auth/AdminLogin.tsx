@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { supabase } from '../../lib/supabase'
+import { Button } from '../../components/ui/Button'
 
 export function AdminLogin() {
   const [email, setEmail] = useState('')
@@ -27,36 +28,32 @@ export function AdminLogin() {
   }
 
   return (
-    <div className="flex items-center justify-center min-h-screen bg-gray-50">
-      <div className="w-full max-w-sm bg-white rounded-lg shadow-sm border border-gray-200 p-8">
-        <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Oxford Realty</p>
-        <h1 className="text-xl font-bold text-gray-900 mt-1 mb-6">Property Manager</h1>
+    <div className="flex items-center justify-center min-h-screen bg-muted">
+      <div className="w-full max-w-sm bg-white rounded-lg shadow-sm border border-border p-8">
+        <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Oxford Realty</p>
+        <h1 className="text-xl font-bold text-foreground mt-1 mb-6">Property Manager</h1>
 
         {sent ? (
-          <div className="text-sm text-green-700 bg-green-50 border border-green-200 rounded p-4">
+          <div className="text-sm text-status-active bg-status-active/10 border border-status-active/30 rounded p-4">
             Check your email — a magic link has been sent to <strong>{email}</strong>.
           </div>
         ) : (
           <form onSubmit={handleSubmit} className="space-y-4">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
+              <label className="block text-sm font-medium text-foreground mb-1">Email</label>
               <input
                 type="email"
                 value={email}
                 onChange={e => setEmail(e.target.value)}
                 placeholder="you@oxfordra.net"
                 required
-                className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full rounded border border-border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
               />
             </div>
-            {error && <p className="text-sm text-red-600">{error}</p>}
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full bg-[#1B2A4A] text-white rounded py-2 text-sm font-medium hover:bg-[#243660] disabled:opacity-50"
-            >
+            {error && <p className="text-sm text-status-danger">{error}</p>}
+            <Button type="submit" variant="navy" disabled={loading} className="w-full">
               {loading ? 'Sending…' : 'Send Magic Link'}
-            </button>
+            </Button>
           </form>
         )}
       </div>
