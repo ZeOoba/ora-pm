@@ -128,7 +128,8 @@ describe('mutations on the detail pages are unchanged', () => {
     expect(s).toMatch(/useSaveMutation<Unit>\(\{\s*method: 'post',\s*path: '\/units',\s*invalidate: \[\['units', id \?\? ''\], \['property', id \?\? ''\]\],/)
     expect(s).toMatch(/const EMPTY_UNIT: UnitForm = \{\s*suite: '',\s*floor: '',\s*sf: '',\s*status: 'vacant',\s*\}/)
     expect(s).toContain('useState<UnitForm>(EMPTY_UNIT)')
-    expect(s).toMatch(/property_id: id,\s*suite: unitForm\.suite\.trim\(\),\s*floor: unitForm\.floor\.trim\(\) \|\| null,\s*sf: Number\(unitForm\.sf\),\s*status: unitForm\.status,/)
+    // F-009: anchored on the mutate call (and closed), so a stray copy elsewhere cannot satisfy it.
+    expect(s).toMatch(/unitMutation\.mutate\(\{\s*property_id: id,\s*suite: unitForm\.suite\.trim\(\),\s*floor: unitForm\.floor\.trim\(\) \|\| null,\s*sf: Number\(unitForm\.sf\),\s*status: unitForm\.status,\s*\}\)/)
   })
 
   it('PropertyDetail reads the per-property rent roll', () => {
@@ -142,7 +143,8 @@ describe('mutations on the detail pages are unchanged', () => {
     expect(s).toMatch(/useSaveMutation<LeaseAmendment>\(\{\s*method: 'post',\s*path: `\/leases\/\$\{id\}\/amendments`,\s*invalidate: \[\['lease', id \?\? ''\]\],/)
     expect(s).toMatch(/const EMPTY_AMENDMENT: AmendmentForm = \{\s*effective_date: '',\s*description: '',\s*document_path: '',\s*\}/)
     expect(s).toContain('useState<AmendmentForm>(EMPTY_AMENDMENT)')
-    expect(s).toMatch(/effective_date: amendForm\.effective_date,\s*description: amendForm\.description\.trim\(\),\s*document_path: amendForm\.document_path\.trim\(\) \|\| null,\s*changes: \{\},/)
+    // F-009: anchored on the mutate call (and closed).
+    expect(s).toMatch(/amendMutation\.mutate\(\{\s*effective_date: amendForm\.effective_date,\s*description: amendForm\.description\.trim\(\),\s*document_path: amendForm\.document_path\.trim\(\) \|\| null,\s*changes: \{\},\s*\}\)/)
   })
 
   it('LeaseDetail notices', () => {
