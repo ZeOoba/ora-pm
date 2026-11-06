@@ -117,6 +117,19 @@ describe('GET /api/expenses total_amount (keyset paging)', () => {
     expect((await getBody()).total_amount).toBe('0.37')
   })
 
+  // F-007: amounts whose x100 lands just BELOW an integer in floating point (0.29*100 =
+  // 28.999999999999996, 1.13*100 = 112.99999999999999, 2.01*100 = 200.99999999999997), so a
+  // Math.floor / truncating cents conversion under-counts (3.40) where Math.round gives 3.43.
+  it('rounds (not floors) to cents: 0.29 + 1.13 + 2.01 = 3.43', async () => {
+    const data = [
+      { id: 'a', amount: '0.29' },
+      { id: 'b', amount: '1.13' },
+      { id: 'c', amount: 2.01 },
+    ]
+    wire(builder({ data: [], count: 3 }), [builder({ data }), builder({ data: [] })])
+    expect((await getBody()).total_amount).toBe('3.43')
+  })
+
   it('returns a generic 500 with no total_amount when chunk 2 fails', async () => {
     wire(builder({ data: [], count: 5 }), [
       builder({ data: rows(5, 1) }),
