@@ -31,3 +31,16 @@ describe('Toaster mount (review finding: duplicate toasts on portal routes)', ()
     expect(hits.map((h) => h.file)).toEqual([join(root, 'src/App.tsx')])
   })
 })
+
+// F-011: the scan above only covers App.tsx + src/portal/**, so a second <Toaster mounted in any
+// other src/ file (a page, a layout) would go unnoticed. Scan the whole tree: exactly one JSX
+// <Toaster element (the `import { Toaster }` line does not match /<Toaster\b/).
+describe('Toaster mount, tree-wide (F-011)', () => {
+  it('src/ contains exactly one <Toaster JSX element, in src/App.tsx', () => {
+    const hits = collectTsx(join(root, 'src')).flatMap((file) => {
+      const count = (readFileSync(file, 'utf-8').match(/<Toaster\b/g) ?? []).length
+      return count > 0 ? [{ file, count }] : []
+    })
+    expect(hits).toEqual([{ file: join(root, 'src/App.tsx'), count: 1 }])
+  })
+})
