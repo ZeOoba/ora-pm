@@ -51,18 +51,18 @@ flowchart TB
     DB[("Supabase Postgres\nmigrations 0001-0017: 23 tables,\nviews ar_ledger / rent_roll / critical_dates,\nfunction reserve_payment_intent()\nservice-role client; RLS = defense in depth")]
     Storage[("Supabase Storage\nbuckets lease-documents, insurance-certs\n(RLS from 0008)")]
 
-    Intake -- "PDF bytes, only after the scan clears" --> Anthropic["Anthropic API\nINTAKE_MODEL: claude-opus-5 (default) or claude-sonnet-5"]
+    Intake -- "PDF bytes, only after the scan clears" --> Anthropic["Anthropic API\nINTAKE_MODEL: default ANTHROPIC_MODEL (server/lib/models.ts = claude-opus-5) or claude-sonnet-5"]
     StripeR <-- "PaymentIntents, SetupIntents, signed webhooks" --> Stripe["Stripe (ACH / us_bank_account)"]
     Cron -- "autopay PaymentIntents" --> Stripe
     Cron -- "digest returned in the HTTP response (the Worker sends no email)" --> Scheduler
 
-    Scheduler["ORA CC/MCP fleet (create_scheduled_task registry)\nora-pm-monthly-billing -> scripts/trigger-billing.ps1\nora-pm-daily-crons -> ping-crons.ps1 (outside this repo),\nwhich also emails the digest via Outlook COM"] -- "POST + Bearer CRON_SECRET" --> Cron
+    Scheduler["ORA CC/MCP fleet (create_scheduled_task registry)\nora-pm-monthly-billing -> scripts/trigger-billing.ps1\nora-pm-daily-crons (WEEKLY, Mon 09:40 ET) -> ping-crons.ps1 (outside this repo),\nwhich also emails the digest via Outlook COM"] -- "POST + Bearer CRON_SECRET" --> Cron
 
     Backup["GitHub Actions off-host backups\nmonthly-billing-backup.yml: 17:40 UTC on the 1st\ndelinquency-backup.yml: daily 16:10 UTC\nmoney-moving endpoints only"] -- "POST + Bearer (repo secret ORA_PM_CRON_SECRET)\nidempotent: a double fire posts 0" --> Cron
 
     Pipeline["ORA Lease Intelligence Pipeline\nTENANTS.json export"] -- "scripts/import-from-pipeline.mjs\n(service role, bypasses RLS)" --> DB
 ```
-<!-- diagram-verified: 2026-10-03 -->
+<!-- diagram-verified: 2026-10-28 -->
 
 **Reading the diagram:** the admin app and tenant portal are two independent route trees and two independent Supabase sessions sharing one API. Every `/api/*` request is admin-gated except five exempted prefixes (`ADMIN_EXEMPT` in `server/index.ts`): webhooks need the raw body for Stripe signature verification, cron uses its own Bearer-secret check, and portal, health and stripe have their own gates (`/api/admin` is deliberately not exempt). The only outbound third-party calls are Anthropic (lease PDF extraction) and Stripe (ACH payments, autopay, webhooks), all made server-side. The one browser path that skips the API is the tenant portal's insurance-certificate upload straight to Supabase Storage. The Worker sends no email: `critical-dates-alerts` and `delinquency-check` return the digest in the response (`email` field) and the scheduler task sends it (OI-047).
 
@@ -113,12 +113,12 @@ flowchart LR
     subgraph CI["ci.yml - job ci (ubuntu, Node 22)"]
         direction TB
         A["npm ci, typecheck, lint (ESLint, 0 warnings), npm test"] --> B["check-deploy-env build (strict on push to main, warn-only otherwise)"]
-        B --> C["npm run build"]
+        B --> B2["PR only: check-deploy-env pages --warn-only"] --> C["npm run build"]
         C --> D["PR only: REFUTE gate (npm run check:refute -- --strict)"]
         D --> E["main push only: tip-of-main check"]
         E --> F["supabase link, then check-migrations-applied.mjs (fails closed if a migration is pending)"]
         F --> G["check-deploy-env pages (Cloudflare production env)"]
-        G --> H["wrangler pages deploy ./dist --project-name ora-pm"]
+        G --> H["wrangler pages deploy ./dist --project-name ora-pm --commit-dirty=true"]
     end
     Man["Manual: DB Migrate workflow (dry_run defaults to true, main only)"] -- "supabase db push" --> PG[("Supabase production")]
     H --> Pages["Cloudflare Pages: ora-pm"]
@@ -142,8 +142,9 @@ server/                      API layer (Hono), deployed inside the Functions run
                                 (Anthropic PDF extraction), pdf-extract.ts (unpdf text extraction for the intake
                                 content scan), confidentiality.ts (denylist guard), stripe.ts / stripe-events.ts
                                 (Stripe client + webhook event handling), schemas.ts (Zod validation),
-                                rate-limit.ts (KV-backed throttle), postgrest-paging.ts (keyset / chunked reads
-                                under PostgREST's row cap), api-error.ts (sanitized DB error responses)
+                                rate-limit.ts (throttle: per-isolate memory until RATE_LIMIT_KV is provisioned), postgrest-paging.ts (keyset / chunked reads
+                                under PostgREST's row cap), api-error.ts (sanitized DB error responses),
+                                models.ts (single ANTHROPIC_MODEL constant, OI-256)
   db/client.ts                  Supabase client factory (service role — used only server-side)
 src/                          Admin SPA
   router.tsx                    Route table for the staff console (wrapped in AdminAuthGuard + AppShell)
