@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { Linter } from 'eslint'
+import { ESLint, Linter } from 'eslint'
+import { resolve } from 'node:path'
 import tseslint from 'typescript-eslint'
 import { PALETTE_RESTRICTED_SYNTAX } from '../../eslint.palette.js'
 
@@ -76,4 +77,16 @@ describe('palette lint rule', () => {
   ])('allows %s', (_name, code) => {
     expect(lint(code)).toEqual([])
   })
+})
+
+// F-008: the cases above re-assemble the rule from the shared selector list, so they would stay
+// green if eslint.config.js stopped applying it to src/. Lint through the REAL flat config.
+describe('palette lint rule is wired into eslint.config.js for src/', () => {
+  it('flags className="bg-gray-100" in src/x.tsx via the repo config', async () => {
+    const eslint = new ESLint({ cwd: resolve(__dirname, '../..') })
+    const [result] = await eslint.lintText('export const A = () => <div className="bg-gray-100" />\n', {
+      filePath: resolve(__dirname, '../../src/x.tsx'),
+    })
+    expect(result.messages.some((m) => m.ruleId === 'no-restricted-syntax')).toBe(true)
+  }, 60_000)
 })
