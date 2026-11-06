@@ -67,5 +67,66 @@ stub '{"error":"TENANT_PII_MARKER"}' 500
 out=$(CURL_BIN="$tmp/curl" CRON_SECRET=secret BASE_URL="https://example.invalid" bash "$here/delinquency-backup.sh" 2>&1)
 if printf '%s' "$out" | grep -q TENANT_PII_MARKER; then echo "FAIL error body leaked to log"; fails=$((fails+1)); else echo "PASS error body not logged"; fi
 
+# A Cloudflare 1xxx code inside an error body is not tenant data, so the script
+# prints that 4-digit code and nothing else from the body. It names a cause only
+# when the evidence supports one. A 1016 INSIDE the app's own JSON error
+# ({"error":"..."}) means the Worker ran and a Supabase call came back with
+# Cloudflare's origin DNS error: the project host stopped resolving, which is
+# what a PAUSED free-plan project looks like (from 2026-10-12 both cron routes
+# returned HTTP 500 {"error":"error code: 1016\n"} for weeks). A raw code with
+# no JSON wrapper can come from the edge or from the ora-pm Worker itself (1101
+# = the Worker threw), so it is reported with no layer claimed.
+run() { CURL_BIN="$tmp/curl" CRON_SECRET=secret BASE_URL="https://example.invalid" bash "$here/delinquency-backup.sh" 2>&1; }
+verdict() { # $1 name, $2 "ok" or empty; reads $out
+  if [ "$2" = ok ]; then echo "PASS $1"; else echo "FAIL $1"; echo "$out" | sed 's/^/    /'; fails=$((fails+1)); fi
+}
+# A no-cause message names the code and blames neither a pause nor the database.
+generic_ok() { printf '%s' "$out" | grep -q "Cloudflare error $1" && ! printf '%s' "$out" | grep -qiE 'paused|database upstream'; }
+
+stub '{"error":"error code: 1016\n"}' 500
+out=$(run); rc=$?; ok=""
+[ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'Cloudflare error 1016' && printf '%s' "$out" | grep -qi 'paused' && ok=ok
+verdict "1016 in the app's JSON error fails and names the paused-Supabase cause" "$ok"
+
+stub '{"error":"recent-charges: error code: 1016 TENANT_PII_MARKER"}' 500
+out=$(run); ok=""
+printf '%s' "$out" | grep -q 'Cloudflare error 1016' && ! printf '%s' "$out" | grep -q TENANT_PII_MARKER && ok=ok
+verdict "1016 diagnosis prints the code, never the rest of the body" "$ok"
+
+stub '{"error":"error code: 1020; then error code: 1016\n"}' 500
+out=$(run); ok=""
+printf '%s' "$out" | grep -qi 'paused' && ok=ok
+verdict "a wrapped 1016 wins over an earlier code in the same body" "$ok"
+
+stub '{"error":"error code: 1020"}' 502
+out=$(run); rc=$?; ok=""
+[ "$rc" -ne 0 ] && generic_ok 1020 && ok=ok
+verdict "another wrapped 1xxx code is named with no cause claimed" "$ok"
+
+stub 'error code: 1101' 500
+out=$(run); rc=$?; ok=""
+[ "$rc" -ne 0 ] && generic_ok 1101 && ok=ok
+verdict "a raw 1101 (the Worker itself threw) is not blamed on the database" "$ok"
+
+stub 'error code: 1016' 530
+out=$(run); rc=$?; ok=""
+[ "$rc" -ne 0 ] && generic_ok 1016 && ok=ok
+verdict "a raw 1016 ending the body is named, with no paused claim" "$ok"
+
+stub '{"error":"error code: 10160"}' 500
+out=$(run); rc=$?; ok=""
+[ "$rc" -ne 0 ] && ! printf '%s' "$out" | grep -q 'Cloudflare error' && ok=ok
+verdict "a 5-digit number is not read as a Cloudflare code" "$ok"
+
+stub '{"error":"error code: 1016.5"}' 500
+out=$(run); rc=$?; ok=""
+[ "$rc" -ne 0 ] && ! printf '%s' "$out" | grep -q 'Cloudflare error' && ok=ok
+verdict "a decimal is not read as a Cloudflare code" "$ok"
+
+stub '{"error":"boom"}' 500
+out=$(run); rc=$?; ok=""
+[ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'body withheld' && ! printf '%s' "$out" | grep -q 'Cloudflare error' && ok=ok
+verdict "plain HTTP 500 keeps the withheld-body message, no Cloudflare claim" "$ok"
+
 echo "---"; [ "$fails" -eq 0 ] && echo "ALL PASS" || echo "$fails FAILED"
 exit "$fails"

@@ -37,7 +37,29 @@ body=$(printf '%s' "$resp" | sed '$d')
 
 case "$code" in
   2[0-9][0-9]) ;;
-  *) echo "::error::delinquency-check -> HTTP $code (body withheld: may contain tenant data)"; exit 1 ;;
+  *)
+    echo "::error::delinquency-check -> HTTP $code (body withheld: may contain tenant data)"
+    # The body stays withheld, but a Cloudflare 1xxx code inside it is not tenant
+    # data, so print that 4-digit code and never the rest of the body. Name a
+    # cause only when the evidence supports one: a 1016 inside the app's own JSON
+    # error means the Worker ran and a Supabase call came back with Cloudflare's
+    # origin DNS error, i.e. the SUPABASE_URL host stopped resolving, which is
+    # what a PAUSED free-plan project looks like. A raw code (no JSON wrapper) can
+    # come from the edge or from the ora-pm Worker itself (1101 = it threw), so it
+    # is reported with no layer claimed. The 2026-10-12 pause was logged only as
+    # "HTTP 500": on the laptop from 10-13, here from 11-01 (GitHub billing
+    # blocked this job until 10-31). Here-strings, not pipes, feed `grep -q` so
+    # pipefail cannot turn an early-exit match into a miss; `|| true` keeps
+    # grep's no-match status out of this branch, which always exits 1.
+    if grep -qE '"error" *: *"[^"]*error code: 1016([^0-9.]|$)' <<< "$body"; then
+      echo "::error::Cloudflare error 1016 (origin DNS error) on the Worker's Supabase calls: the host in the Pages SUPABASE_URL secret does not resolve. Most likely the Supabase project is PAUSED (the free plan pauses a project after 7 days without activity). Restore it from the Supabase dashboard, then re-run this workflow."
+    else
+      cf=$(grep -oE 'error code: 1[0-9]{3}([^0-9.]|$)' <<< "$body" | head -n1 | grep -oE '1[0-9]{3}' || true)
+      if [ -n "$cf" ]; then
+        echo "::error::Cloudflare error $cf in the response: an edge or Worker-runtime error, and the failing layer is not identified (a raw code can come from the ora-pm Worker itself, e.g. 1101 when it throws). Check the Pages Functions log and the Supabase project status."
+      fi
+    fi
+    exit 1 ;;
 esac
 
 # Strict shape check: both counters present AND numeric. A 2xx that is not the

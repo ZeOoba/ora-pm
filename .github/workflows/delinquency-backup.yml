@@ -1,7 +1,8 @@
 name: Delinquency check (off-host backup trigger)
 
 # Off-host backup for the laptop-bound `ora-pm-daily-crons` fleet task (CC/MCP
-# registry, 09:40 ET daily, runs C:\Users\Owner\ora-pm-cron\ping-crons.ps1).
+# registry, 09:40 ET; Mondays only since the at-most-weekly fleet retime, despite
+# the task id; runs C:\Users\Owner\ora-pm-cron\ping-crons.ps1).
 # That task only fires while Claude Desktop is open on the ORA laptop; during
 # the 2026-08-29 -> 09-01 host outage late-fee posting was silent for four days
 # (OI-229). This workflow re-fires ONLY the money-moving endpoint,
@@ -15,6 +16,15 @@ name: Delinquency check (off-host backup trigger)
 # workflow_dispatch has no inputs: the endpoint derives its period from the
 # server clock, so a manual run cannot target any month but the current one
 # (OI-235's concern with the monthly-billing dispatch inputs does not apply).
+#
+# Keep-alive dependency: this job is the only DAILY traffic to the free-plan
+# Supabase project, and Supabase pauses a free project after 7 days without
+# activity. GitHub billing blocked this job 2026-10-06 -> 10-31, the project
+# paused 2026-10-12, and every database-backed route then failed; the cron
+# routes returned HTTP 500 {"error":"error code: 1016\n"} (Cloudflare origin DNS
+# error: a paused project's host stops resolving). scripts/delinquency-backup.sh names that cause in the
+# job log; the remedy is restoring the project from the Supabase dashboard.
+# Expect a pause again whenever this job is blocked or disabled for a week.
 #
 # Required repo secret: ORA_PM_CRON_SECRET (same value as the Cloudflare Pages
 # CRON_SECRET). The job refuses to run without it.
