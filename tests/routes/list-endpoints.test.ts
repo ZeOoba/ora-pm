@@ -326,6 +326,15 @@ describe('out-of-range page (PGRST103)', () => {
     expect(head.or.mock.calls).toEqual(main.or.mock.calls)
   })
 
+  // F-010: server/lib/list-query.ts listErrorResponse falls back to 0 when the head count itself
+  // comes back with count: null (no error) -- pin it rather than leak null into `total`.
+  it.each(PAGED)('$route: a PGRST103 head count with count: null returns total 0', async ({ route, qs }) => {
+    mockFrom.mockReturnValueOnce(builder({ data: null, error: OOR })).mockReturnValueOnce(builder({ data: null, count: null }))
+    const res = await get(`${route}${qs}`)
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ data: [], total: 0 })
+  })
+
   it('insurance paged: out-of-range returns empty data without enrichment crash', async () => {
     mockFrom.mockReturnValueOnce(builder({ data: null, error: OOR })).mockReturnValueOnce(builder({ data: null, count: 9 }))
     const res = await get('/api/insurance?limit=10&offset=100')
