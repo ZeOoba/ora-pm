@@ -35,11 +35,14 @@ function builder(result: { data: unknown; count?: number | null; error?: unknown
   return b
 }
 
-// Expenses also issues amount-chunk queries after the page query; give it an empty chunk
-// (keyset paging stops on 0 rows) while every other route reuses the single builder.
-function wireList(route: string, b: Builder) {
+// Expenses also issues amount-chunk queries after the page query; give it one chunk of `count`
+// rows then an empty chunk (keyset paging stops on 0 rows) while every other route reuses the
+// single builder. The chunk must hold `count` rows: the route pairs total with the rows it summed
+// and re-reads when they disagree (F-002).
+function wireList(route: string, b: Builder, count = 0) {
   if (route !== '/api/expenses') return mockFrom.mockReturnValue(b)
-  const queue = [b]
+  const chunk = Array.from({ length: count }, (_, i) => ({ id: `x${String(i).padStart(4, '0')}`, amount: 0 }))
+  const queue = [b, builder({ data: chunk })]
   return mockFrom.mockImplementation(() => queue.shift() ?? builder({ data: [] }))
 }
 
@@ -76,7 +79,7 @@ const CASES: Case[] = [
 describe.each(CASES)('GET $route list contract', ({ route, table, defaultOrder, sortField }) => {
   it('returns { data, total } using the exact count and applies range(offset, offset+limit-1)', async () => {
     const b = builder({ data: ROWS, count: 137 })
-    wireList(route, b)
+    wireList(route, b, 137)
     const res = await get(`${route}?limit=20&offset=40`)
     expect(res.status).toBe(200)
     const body = (await res.json()) as ListBody
@@ -90,7 +93,7 @@ describe.each(CASES)('GET $route list contract', ({ route, table, defaultOrder, 
 
   it('uses the pre-existing default order when no sort is given', async () => {
     const b = builder({ data: ROWS, count: 2 })
-    wireList(route, b)
+    wireList(route, b, 2)
     const res = await get(`${route}?limit=50`)
     expect(res.status).toBe(200)
     expect(b.range).toHaveBeenCalledWith(0, 49)
@@ -110,7 +113,7 @@ describe.each(CASES)('GET $route list contract', ({ route, table, defaultOrder, 
 
   it('applies sort/dir from the allow-list', async () => {
     const b = builder({ data: ROWS, count: 2 })
-    wireList(route, b)
+    wireList(route, b, 2)
     const res = await get(`${route}?sort=${sortField}&dir=desc`)
     expect(res.status).toBe(200)
     expect(b.order).toHaveBeenCalledWith(sortField, { ascending: false })

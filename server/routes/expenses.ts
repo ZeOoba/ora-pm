@@ -20,6 +20,36 @@ function applyExpenseFilter<Q>(q: Q, propertyId: string | undefined): Q {
   return propertyId ? (q as unknown as { eq(col: string, val: string): Q }).eq('property_id', propertyId) : q
 }
 
+type AmountSum = { cents: number; rows: number } | { error: { message: string; code?: string } }
+
+// Whole-filter total (not just this page), summed in integer cents to avoid float drift.
+// Keyset-paged on id (not offset/short-chunk): PostgREST max-rows may be below AMOUNT_CHUNK, so a
+// short chunk does not mean the end. Only an empty chunk stops the loop. Also returns how many
+// rows were summed, so the caller can pair total_amount with an exactly matching row count.
+async function sumExpenseAmounts(db: ReturnType<typeof getDb>, propertyId: string | undefined): Promise<AmountSum> {
+  let cents = 0
+  let rows = 0
+  let lastId: string | undefined
+  for (let i = 0; i < MAX_AMOUNT_CHUNKS; i++) {
+    let q = applyExpenseFilter(db.from('expenses').select('id, amount'), propertyId).order('id')
+    if (lastId !== undefined) q = q.gt('id', lastId)
+    const { data: chunk, error: sumError } = await q.limit(AMOUNT_CHUNK)
+    if (sumError) return { error: sumError }
+    const amounts = (chunk ?? []) as Array<{ id: string; amount: number | string | null }>
+    if (amounts.length === 0) return { cents, rows }
+    for (const row of amounts) {
+      const n = Number(row.amount)
+      if (row.amount === null || !Number.isFinite(n)) {
+        return { error: { message: `non-numeric expense amount (id ${row.id})` } }
+      }
+      cents += Math.round(n * 100)
+    }
+    rows += amounts.length
+    lastId = amounts[amounts.length - 1].id
+  }
+  return { error: { message: `expense total exceeded ${MAX_AMOUNT_CHUNKS} chunks` } }
+}
+
 expensesRouter.get('/', async (c) => {
   const db = getDb(c.env)
   const propertyId = c.req.query('property_id')
@@ -28,49 +58,31 @@ expensesRouter.get('/', async (c) => {
     defaultSort: 'expense_date',
     defaultDir: 'desc',
   })
-  const { data, error, count } = await applyExpenseFilter(
-    db.from('expenses').select('*, properties(name)', { count: 'exact' }),
-    propertyId,
-  )
-    .order(lq.sort, { ascending: lq.ascending })
-    .order('id')
-    .range(...lq.range!)
-  if (error) {
-    return listErrorResponse(c, error, 'Failed to load expenses', () =>
-      applyExpenseFilter(db.from('expenses').select('id', { count: 'exact', head: true }), propertyId),
-    )
-  }
+  const readPage = () =>
+    applyExpenseFilter(db.from('expenses').select('*, properties(name)', { count: 'exact' }), propertyId)
+      .order(lq.sort, { ascending: lq.ascending })
+      .order('id')
+      .range(...lq.range!)
 
-  // Whole-filter total (not just this page), summed in integer cents to avoid float drift.
-  // Keyset-paged on id (not offset/short-chunk): PostgREST max-rows may be below AMOUNT_CHUNK, so a
-  // short chunk does not mean the end. Only an empty chunk stops the loop.
-  let cents = 0
-  let lastId: string | undefined
-  let finished = false
-  for (let i = 0; i < MAX_AMOUNT_CHUNKS; i++) {
-    let q = applyExpenseFilter(db.from('expenses').select('id, amount'), propertyId).order('id')
-    if (lastId !== undefined) q = q.gt('id', lastId)
-    const { data: chunk, error: sumError } = await q.limit(AMOUNT_CHUNK)
-    if (sumError) return dbError(c, sumError, 'Failed to load expenses')
-    const amounts = (chunk ?? []) as Array<{ id: string; amount: number | string | null }>
-    if (amounts.length === 0) {
-      finished = true
-      break
+  // F-002: the page count and the amount sum are separate reads, so a concurrent insert/delete
+  // between them could pair a total_amount with a count that excludes (or includes) a row. The
+  // sum reports how many rows it covered; if that differs from the page count, re-run page+sum
+  // once. If they still differ, return the second read's summed-row count as `total` so `total`
+  // and `total_amount` always describe the same set of rows (no extra head-count query needed).
+  for (let attempt = 0; ; attempt++) {
+    const { data, error, count } = await readPage()
+    if (error) {
+      return listErrorResponse(c, error, 'Failed to load expenses', () =>
+        applyExpenseFilter(db.from('expenses').select('id', { count: 'exact', head: true }), propertyId),
+      )
     }
-    for (const row of amounts) {
-      const n = Number(row.amount)
-      if (row.amount === null || !Number.isFinite(n)) {
-        return dbError(c, { message: `non-numeric expense amount (id ${row.id})` }, 'Failed to load expenses')
-      }
-      cents += Math.round(n * 100)
+    const sum = await sumExpenseAmounts(db, propertyId)
+    if ('error' in sum) return dbError(c, sum.error, 'Failed to load expenses')
+    const total = count ?? 0
+    if (total === sum.rows || attempt >= 1) {
+      return c.json({ data, total: sum.rows, total_amount: (sum.cents / 100).toFixed(2) })
     }
-    lastId = amounts[amounts.length - 1].id
   }
-  if (!finished) {
-    return dbError(c, { message: `expense total exceeded ${MAX_AMOUNT_CHUNKS} chunks` }, 'Failed to load expenses')
-  }
-
-  return c.json({ data, total: count ?? 0, total_amount: (cents / 100).toFixed(2) })
 })
 
 expensesRouter.post('/', async (c) => {

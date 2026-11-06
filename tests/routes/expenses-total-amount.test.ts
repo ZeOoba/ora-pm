@@ -148,3 +148,63 @@ describe('GET /api/expenses total_amount (keyset paging)', () => {
     expect(mockFrom).toHaveBeenCalledTimes(201) // page + exactly 200 chunks
   })
 })
+
+// Gate finding F-002: the page query's count and the keyset-paged sum are separate reads, so a
+// concurrent insert/delete between them returned a total_amount that included rows `total` did
+// not (or vice versa). The route compares the page count with the number of rows it summed;
+// on a mismatch it re-runs page+sum once, and if they still differ it returns the second read's
+// summed-row count as `total`, so `total` and `total_amount` always describe the same rows.
+describe('GET /api/expenses total vs total_amount under concurrent writes (F-002)', () => {
+  type Row = { id: string; amount: number }
+  // In-memory table; `afterPage` runs after each page (count) query resolves.
+  function simulate(table: Row[], afterPage: (n: number) => void) {
+    let pages = 0
+    mockFrom.mockImplementation(() => {
+      const st: { gt?: string; head: boolean; page: boolean } = { head: false, page: false }
+      const q: Record<string, unknown> = {}
+      for (const m of ['eq', 'order', 'limit']) q[m] = () => q
+      q.select = (_c: string, o?: { count?: string; head?: boolean }) => { st.page = o?.count === 'exact' && !o?.head; return q }
+      q.range = () => q
+      q.gt = (_c: string, v: string) => { st.gt = v; return q }
+      q.then = (res: (v: unknown) => unknown, rej?: (e: unknown) => unknown) => {
+        let out: unknown
+        if (st.page) {
+          out = { data: table.map((r) => ({ ...r })), count: table.length, error: null }
+          afterPage(++pages)
+        } else {
+          const rows = table.filter((r) => st.gt === undefined || r.id > st.gt).sort((x, y) => (x.id < y.id ? -1 : 1))
+          out = { data: rows, error: null }
+        }
+        return Promise.resolve(out).then(res, rej)
+      }
+      return q
+    })
+  }
+
+  it('an expense inserted between the page count and the sum: re-reads once and returns a consistent pair', async () => {
+    const table: Row[] = [{ id: 'a1', amount: 100 }, { id: 'a2', amount: 200 }]
+    simulate(table, (n) => { if (n === 1) table.push({ id: 'b9', amount: 500 }) })
+    const body = await getBody()
+    expect(body.total).toBe(3)
+    expect(body.total_amount).toBe('800.00')
+    expect(body.data).toHaveLength(3)
+  })
+
+  it('persistent churn: returns total = rows summed on the second read (consistent with total_amount)', async () => {
+    const table: Row[] = [{ id: 'a1', amount: 100 }, { id: 'a2', amount: 200 }]
+    let k = 0
+    simulate(table, () => { table.push({ id: `b${k++}`, amount: 1000 }) })
+    const body = await getBody()
+    // second read: page saw 3 rows, then b1 was inserted, so the sum covered 4 rows
+    expect(body.total).toBe(4)
+    expect(body.total_amount).toBe('2300.00')
+  })
+
+  it('no churn: a single page+sum read', async () => {
+    const table: Row[] = [{ id: 'a1', amount: 100 }, { id: 'a2', amount: 200 }]
+    simulate(table, () => {})
+    const body = await getBody()
+    expect(body).toMatchObject({ total: 2, total_amount: '300.00' })
+    expect(mockFrom).toHaveBeenCalledTimes(3) // page + 1 chunk + empty chunk
+  })
+})
