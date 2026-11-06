@@ -67,3 +67,15 @@ describe('no bare api.get to paged list endpoints anywhere in src/', () => {
     })
   }
 })
+
+// F-012: the payments lease picker must page through EVERY active lease (api.listAll), filtered
+// server-side to status=active -- not a 50-row bare get or an unfiltered list.
+describe('PaymentsList lease picker (F-012)', () => {
+  const src = readFileSync(join(__dirname, '../../src/pages/payments/PaymentsList.tsx'), 'utf-8')
+  it("calls api.listAll('/leases', { status: 'active' })", () => {
+    expect(src).toMatch(/api\.listAll(?:<[^>(]*>)?\(\s*'\/leases',\s*\{\s*status:\s*'active'\s*\}\s*\)/)
+  })
+  it('feeds the picker from that query', () => {
+    expect(src).toMatch(/queryKey: \['leases', 'active', 'picker'\],\s*queryFn: \(\) =>\s*api\.listAll</)
+  })
+})
