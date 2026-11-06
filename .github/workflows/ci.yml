@@ -45,6 +45,12 @@ jobs:
       - name: Run tests
         run: npm test
 
+      # Off-host backup-trigger self-test (no network: CURL_BIN stub). It also runs
+      # inside delinquency-backup.yml before each scheduled POST, which only ever
+      # exercised it after merge; running it here gates the script on every PR.
+      - name: Backup-trigger self-test (no network)
+        run: bash scripts/delinquency-backup.test.sh
+
       # Deploy-env gate (scripts/check-deploy-env.mjs): a required var missing from the
       # build env or from Pages production blocks the deploy; deferred vars only warn.
       # Strict on main pushes, warn-only elsewhere so PRs surface it without blocking.
