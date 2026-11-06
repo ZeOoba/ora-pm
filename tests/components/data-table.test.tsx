@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { createElement } from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -134,5 +136,17 @@ describe('DataTable client mode', () => {
     const html = render({ mode: 'client', rows: undefined, fetchPage: undefined, error: new Error('boom'), onRetry: () => {} })
     expect(html).toContain('boom')
     expect(html).toContain('Retry')
+  })
+})
+
+// F-001: server-mode CSV export de-duplicates by the table's row id and warns when rows
+// changed under the export on both passes (source-level: no jsdom in P1).
+describe('DataTable CSV export consistency wiring (F-001)', () => {
+  const src = readFileSync(join(__dirname, '../../src/components/data-table/DataTable.tsx'), 'utf-8')
+  it('passes the table getRowId to collectPages', () => {
+    expect(src).toMatch(/await collectPages\(fetchPage, state, EXPORT_MAX_ROWS, getRowId\)/)
+  })
+  it('surfaces the inconsistent flag as a toast warning', () => {
+    expect(src).toMatch(/if \(inconsistent\) \{\s*toast\.warning\('Rows changed during export — re-export to be sure'\)/)
   })
 })

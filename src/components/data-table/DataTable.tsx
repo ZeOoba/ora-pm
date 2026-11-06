@@ -290,9 +290,12 @@ export function DataTable<T extends RowData>({
         return
       }
       if (!fetchPage) throw new Error('DataTable: fetchPage is required in server mode')
-      const { rows: all, total: grand, truncated } = await collectPages(fetchPage, state)
+      const { rows: all, total: grand, truncated, inconsistent } = await collectPages(fetchPage, state, EXPORT_MAX_ROWS, getRowId)
       const cols = buildCsvColumns<T>(visibleColumns)
       downloadCsv(csvFilename ?? 'export', toCsv(all, cols))
+      if (inconsistent) {
+        toast.warning('Rows changed during export — re-export to be sure')
+      }
       if (truncated) {
         toast.warning(
           `Exported the first ${EXPORT_MAX_ROWS.toLocaleString()} of ${grand.toLocaleString()} rows. Narrow the filters to export the rest.`,

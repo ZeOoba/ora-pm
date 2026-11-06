@@ -93,11 +93,85 @@ describe('collectPages', () => {
     expect(fetchPage).toHaveBeenCalledTimes(10)
   })
 
-  it('stops on an empty page even if total is larger (defensive)', async () => {
+  it('stops on an empty page even if total is larger (defensive), retries once, then flags inconsistency', async () => {
     const fetchPage = vi.fn(async () => ({ data: [] as { i: number }[], total: 10 }))
     const res = await collectPages(fetchPage, base)
     expect(res.rows).toHaveLength(0)
-    expect(fetchPage).toHaveBeenCalledTimes(1)
+    // 0 collected rows vs total 10 is inconsistent: one full re-run, then the caller is warned.
+    expect(fetchPage).toHaveBeenCalledTimes(2)
+    expect(res.inconsistent).toBe(true)
+  })
+})
+
+// Gate finding F-001: offset paging under a concurrent insert/delete shifts rows across page
+// boundaries, so one row is exported twice and another dropped while rows === total.
+describe('collectPages under concurrent writes (F-001)', () => {
+  type P = { id: string; d: string }
+  const ordered = (db: P[]) =>
+    [...db].sort((a, b) => (a.d !== b.d ? (a.d < b.d ? 1 : -1) : a.id < b.id ? -1 : 1))
+  const seed = (n: number): P[] =>
+    Array.from({ length: n }, (_, i) => ({ id: `p${String(i).padStart(4, '0')}`, d: `2026-${String(1 + (i % 10)).padStart(2, '0')}-01` }))
+  const state: TableState = { ...base, sort: { id: 'd', desc: true } }
+
+  it('a row inserted after page 1: no duplicate ids, the collection is re-run once, result is consistent', async () => {
+    const db = seed(450)
+    let call = 0
+    const fetchPage = vi.fn(async (p: { limit: number; offset: number }) => {
+      const page = { data: ordered(db).slice(p.offset, p.offset + p.limit), total: db.length }
+      if (++call === 1) db.push({ id: 'pNEW', d: '2026-11-06' }) // sorts first: shifts every later page by one
+      return page
+    })
+    const res = await collectPages(fetchPage, state)
+    const ids = res.rows.map((r) => r.id)
+    expect(new Set(ids).size).toBe(ids.length)
+    expect(ids).toContain('pNEW')
+    expect(res.rows).toHaveLength(451)
+    expect(res.total).toBe(451)
+    expect(res.truncated).toBe(false)
+    expect(res.inconsistent).toBe(false)
+    expect(fetchPage.mock.calls.length).toBeGreaterThan(3) // first pass (3 pages) + a re-run
+    // the re-run starts from offset 0
+    expect(fetchPage.mock.calls[3][0].offset).toBe(0)
+  })
+
+  it('de-duplicates by the supplied getId', async () => {
+    const pages = [
+      { data: [{ k: 'a' }, { k: 'b' }], total: 3 },
+      { data: [{ k: 'b' }, { k: 'c' }], total: 3 },
+    ]
+    let n = 0
+    const fetchPage = vi.fn(async () => pages[n++ % 2])
+    const res = await collectPages(fetchPage, base, undefined, (r) => r.k)
+    expect(res.rows.map((r) => r.k)).toEqual(['a', 'b', 'c'])
+  })
+
+  it('persistent churn (every page sees a different total): retries once, then flags inconsistent', async () => {
+    const db = seed(450)
+    let next = 0
+    const fetchPage = vi.fn(async (p: { limit: number; offset: number }) => {
+      const page = { data: ordered(db).slice(p.offset, p.offset + p.limit), total: db.length }
+      db.push({ id: `pX${next++}`, d: '2026-12-01' }) // a new row after EVERY page
+      return page
+    })
+    const res = await collectPages(fetchPage, state)
+    const ids = res.rows.map((r) => r.id)
+    expect(new Set(ids).size).toBe(ids.length)
+    expect(res.inconsistent).toBe(true)
+    // exactly two passes, each starting at offset 0
+    const starts = fetchPage.mock.calls.filter((c) => c[0].offset === 0)
+    expect(starts).toHaveLength(2)
+  })
+
+  it('a stable dataset is collected in a single pass and is not flagged', async () => {
+    const db = seed(450)
+    const fetchPage = vi.fn(async (p: { limit: number; offset: number }) => ({
+      data: ordered(db).slice(p.offset, p.offset + p.limit),
+      total: db.length,
+    }))
+    const res = await collectPages(fetchPage, state)
+    expect(res.rows).toHaveLength(450)
+    expect(res.inconsistent).toBe(false)
+    expect(fetchPage).toHaveBeenCalledTimes(3)
   })
 })
 

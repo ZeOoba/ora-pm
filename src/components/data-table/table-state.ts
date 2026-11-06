@@ -66,27 +66,79 @@ export function rangeLabel(pageIndex: number, pageSize: number, total: number): 
   return `Showing ${start}–${end} of ${total}`
 }
 
+export type CollectResult<T> = {
+  rows: T[]
+  total: number
+  truncated: boolean
+  /** Rows changed under the export on both passes; the caller should warn the user. */
+  inconsistent: boolean
+}
+
+/** Row identity for export de-duplication; undefined = row cannot be de-duplicated. */
+export type GetRowKey<T> = (row: T, index: number) => string | undefined
+
+function defaultRowKey<T>(row: T): string | undefined {
+  const id = (row as { id?: unknown } | null)?.id
+  return id === undefined || id === null ? undefined : String(id)
+}
+
+// One pass over every page. `offset` advances by rows FETCHED (server offset), while the
+// returned rows are de-duplicated by key. `consistent` is false when any page reported a
+// different total than the first, or (when not capped) the unique count != the final total.
+async function collectOnce<T>(
+  fetchPage: FetchPage<T>,
+  state: TableState,
+  maxRows: number,
+  getKey: GetRowKey<T>,
+): Promise<CollectResult<T> & { consistent: boolean }> {
+  const rows: T[] = []
+  const seen = new Set<string>()
+  let fetched = 0
+  let firstTotal: number | undefined
+  let total = 0
+  let totalsVaried = false
+  while (rows.length < maxRows) {
+    const params = toListParams({ ...state, pageIndex: 0, pageSize: EXPORT_PAGE_LIMIT })
+    params.offset = fetched
+    const page = await fetchPage(params)
+    total = page.total
+    if (firstTotal === undefined) firstTotal = total
+    else if (total !== firstTotal) totalsVaried = true
+    if (page.data.length === 0) break
+    for (const row of page.data) {
+      const key = getKey(row, fetched)
+      fetched++
+      if (key !== undefined) {
+        if (seen.has(key)) continue
+        seen.add(key)
+      }
+      rows.push(row)
+    }
+    if (fetched >= total) break
+  }
+  const capped = rows.length >= maxRows
+  const out = rows.slice(0, maxRows)
+  const consistent = !totalsVaried && (capped || out.length === total)
+  return { rows: out, total, truncated: total > out.length, inconsistent: !consistent, consistent }
+}
+
 // Fetch every page of the current query (sort / q / filters preserved, paging
 // ignored) at EXPORT_PAGE_LIMIT, sequentially, until `total` is reached or
 // `maxRows` collected. `truncated` is true when rows were left behind.
+// Offset paging is not snapshot-isolated: a row inserted/deleted mid-export shifts later
+// pages (F-001). Rows are de-duplicated by `getKey` (default: row.id), and if the pass was
+// inconsistent (total changed between pages, or unique rows != total) the whole collection is
+// re-run once; if the re-run is still inconsistent, `inconsistent: true` tells the caller to warn.
 export async function collectPages<T>(
   fetchPage: FetchPage<T>,
   state: TableState,
   maxRows: number = EXPORT_MAX_ROWS,
-): Promise<{ rows: T[]; total: number; truncated: boolean }> {
-  const rows: T[] = []
-  let total = 0
-  while (rows.length < maxRows) {
-    const params = toListParams({ ...state, pageIndex: 0, pageSize: EXPORT_PAGE_LIMIT })
-    params.offset = rows.length
-    const page = await fetchPage(params)
-    total = page.total
-    if (page.data.length === 0) break
-    rows.push(...page.data)
-    if (rows.length >= total) break
-  }
-  const capped = rows.slice(0, maxRows)
-  return { rows: capped, total, truncated: total > capped.length }
+  getKey: GetRowKey<T> = defaultRowKey,
+): Promise<CollectResult<T>> {
+  let pass = await collectOnce(fetchPage, state, maxRows, getKey)
+  if (!pass.consistent) pass = await collectOnce(fetchPage, state, maxRows, getKey)
+  const { rows, total, truncated, inconsistent } = pass
+  return { rows, total, truncated, inconsistent }
 }
 
 // ── Client mode ────────────────────────────────────────────────────────────
