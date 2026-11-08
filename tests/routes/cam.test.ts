@@ -48,6 +48,8 @@ const state = {
   rec: null as Row | null,
   recSelectError: null as PgError | null,
   leaseUnits: { sf: 1000 } as Row | null,
+  leaseRentType: 'nnn' as string,
+  leaseExpenseStop: null as number | null,
   camEstimateCharges: [] as { amount: number; voided_at?: string | null }[],
   camChargesError: null as PgError | null,
   leaseSelectError: null as PgError | null,
@@ -151,7 +153,7 @@ function installDbMock() {
             single: vi.fn().mockImplementation(async () => (
               state.leaseSelectError
                 ? { data: null, error: state.leaseSelectError }
-                : { data: { units: state.leaseUnits }, error: null }
+                : { data: { units: state.leaseUnits, rent_type: state.leaseRentType, expense_stop_amount: state.leaseExpenseStop }, error: null }
             )),
           }),
         }),
@@ -241,6 +243,8 @@ beforeEach(() => {
   state.rec = freshRec()
   state.recSelectError = null
   state.leaseUnits = { sf: 1000 }
+  state.leaseRentType = 'nnn'
+  state.leaseExpenseStop = null
   state.camEstimateCharges = []
   state.camChargesError = null
   state.leaseSelectError = null
@@ -626,5 +630,55 @@ describe('GET /api/cam', () => {
     expect(res.status).toBe(500)
     const text = await res.text()
     expect(text).not.toContain('relation "cam_reconciliations" does not exist')
+  })
+})
+
+
+// ---------------------------------------------------------------------------
+// Audit finding cam-ignores-rent-type-expense-stop (route): /calculate must load
+// the lease's rent_type and expense_stop_amount and apply them.
+// tenant 1,000 SF of 50,000 SF = 2% of $10,000 = $200 share.
+// ---------------------------------------------------------------------------
+describe('POST /api/cam/calculate: rent type and expense stop', () => {
+  const BODY = {
+    lease_id: '11111111-1111-1111-1111-111111111111',
+    reconciliation_year: 2025,
+    total_property_recoverable_expenses: 10000,
+    total_leased_sf: 50000,
+  }
+
+  it('modified_gross WITHOUT an expense stop: 422, nothing saved', async () => {
+    state.leaseRentType = 'modified_gross'
+    state.leaseExpenseStop = null
+    const res = await calculate(BODY)
+    expect(res.status).toBe(422)
+    expect(((await res.json()) as { error: string }).error).toMatch(/expense stop/i)
+    expect(camUpdateSpy).not.toHaveBeenCalled()
+    expect(camInsertSpy).not.toHaveBeenCalled()
+  })
+
+  it('modified_gross with a stop: only the share above the stop is owed', async () => {
+    state.leaseRentType = 'modified_gross'
+    state.leaseExpenseStop = 0.15 // $0.15/SF x 1,000 SF = $150 stop; $200 share -> $50 owed
+    const res = await calculate(BODY)
+    expect(res.status).toBe(200)
+    const json = await res.json() as { data: Row }
+    expect(json.data.actual_cam_owed).toBe(50)
+  })
+
+  it('gross with no stop (full-service gross): owes nothing', async () => {
+    state.leaseRentType = 'gross'
+    state.leaseExpenseStop = null
+    const res = await calculate(BODY)
+    expect(res.status).toBe(200)
+    const json = await res.json() as { data: Row }
+    expect(json.data.actual_cam_owed).toBe(0)
+    expect(json.data.true_up_amount).toBe(0)
+  })
+
+  it('nnn: full pro-rata share (unchanged behaviour)', async () => {
+    const res = await calculate(BODY)
+    const json = await res.json() as { data: Row }
+    expect(json.data.actual_cam_owed).toBe(200)
   })
 })

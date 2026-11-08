@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { getDb } from '../db/client'
-import { calculateCAMTrueUp } from '../lib/cam'
+import { calculateCAMTrueUp, CAMTermsError, type CAMRentType } from '../lib/cam'
 import { CamCalculateSchema, CamRecoverableQuerySchema } from '../lib/schemas'
 import { dbError } from '../lib/api-error'
 import { fetchAllPages, POSTGREST_MAX_ROWS } from '../lib/postgrest-paging'
@@ -68,7 +68,7 @@ camRouter.post('/calculate', async (c) => {
   // later, and generically, via the cam_reconciliations FK constraint on insert).
   const { data: lease, error: leaseErr } = await db
     .from('leases')
-    .select('units(sf)')
+    .select('rent_type, expense_stop_amount, units(sf)')
     .eq('id', lease_id)
     .single()
   if (leaseErr) {
@@ -76,7 +76,18 @@ camRouter.post('/calculate', async (c) => {
     return dbError(c, leaseErr, 'Failed to load lease')
   }
 
-  const tenantSF: number = (lease as unknown as { units: { sf: number } } | null)?.units?.sf ?? 0
+  // rent_type + expense_stop_amount (audit finding cam-ignores-rent-type-expense-stop): the true-up
+  // used to bill every lease its full pro-rata share, so gross and modified-gross tenants were
+  // charged CAM their leases do not pass through. calculateCAMTrueUp applies the schema semantics.
+  const leaseRow = lease as unknown as {
+    units: { sf: number } | null
+    rent_type: CAMRentType | null
+    expense_stop_amount: number | string | null
+  } | null
+  const tenantSF: number = leaseRow?.units?.sf ?? 0
+  const rentType: CAMRentType = leaseRow?.rent_type ?? 'nnn' // column is NOT NULL DEFAULT 'nnn'
+  // NUMERIC can arrive as a string from PostgREST; null stays null (no stop).
+  const expenseStopPerSF = leaseRow?.expense_stop_amount == null ? null : Number(leaseRow.expense_stop_amount)
 
   // Sum all CAM estimate charges billed this year. OI-278 / migration 0016: a voided estimate was
   // never really billed, so it must not count as CAM paid (that would understate the true-up).
@@ -103,8 +114,13 @@ camRouter.post('/calculate', async (c) => {
       tenantSF,
       totalLeasedSF: total_leased_sf,
       estimatedCamPaid,
+      rentType,
+      expenseStopPerSF,
     })
   } catch (err) {
+    // Lease-terms problems (e.g. modified_gross with no expense stop) are a 422 the user fixes on
+    // the lease; nothing is saved either way.
+    if (err instanceof CAMTermsError) return c.json({ error: err.message }, 422)
     return c.json({ error: (err as Error).message }, 400)
   }
 
