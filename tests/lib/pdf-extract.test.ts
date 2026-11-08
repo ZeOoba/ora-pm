@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { extractPdfText } from '../../server/lib/pdf-extract'
-import { buildTextPdf, buildImageOnlyPdf } from '../fixtures/pdf'
+import { extractPdfText, extractPdfPages, pagesLackingTextLayer, MIN_PAGE_TEXT_CHARS } from '../../server/lib/pdf-extract'
+import { buildTextPdf, buildImageOnlyPdf, buildMultiPagePdf } from '../fixtures/pdf'
 
 describe('extractPdfText', () => {
   it('extracts real text from a PDF with a text layer', async () => {
@@ -18,5 +18,43 @@ describe('extractPdfText', () => {
   it('returns empty string (fail-open, never throws) for malformed bytes', async () => {
     const garbage = new Uint8Array([0x25, 0x50, 0x44, 0x46, 1, 2, 3, 4, 5])
     await expect(extractPdfText(garbage)).resolves.toBe('')
+  })
+})
+
+describe('extractPdfPages (per-page text, for the intake text-layer gate)', () => {
+  it('returns one entry per page, in order, with each page own text', async () => {
+    const bytes = await buildMultiPagePdf(['Page one lease recitals and parties', null, 'Page three rent schedule and term'])
+    const pages = await extractPdfPages(bytes)
+    expect(pages).not.toBeNull()
+    expect(pages).toHaveLength(3)
+    expect(pages![0]).toMatch(/Page one lease recitals/)
+    expect(pages![1].trim()).toBe('')
+    expect(pages![2]).toMatch(/Page three rent schedule/)
+  })
+
+  it('returns null (never throws) for malformed bytes', async () => {
+    const garbage = new Uint8Array([0x25, 0x50, 0x44, 0x46, 1, 2, 3, 4, 5])
+    await expect(extractPdfPages(garbage)).resolves.toBeNull()
+  })
+})
+
+describe('pagesLackingTextLayer', () => {
+  it('flags every page below the non-whitespace threshold (1-based page numbers)', () => {
+    const full = 'x'.repeat(MIN_PAGE_TEXT_CHARS)
+    expect(pagesLackingTextLayer([full, '', full, '   \n\t  ', 'Page 3'])).toEqual([2, 4, 5])
+  })
+
+  it('counts NON-whitespace characters, so a page padded with spaces/newlines is not a text layer', () => {
+    const padded = 'a b c d e f g h i j k l m n o p q r s t u v w x'.padEnd(500, ' ')
+    expect(padded.replace(/\s/g, '').length).toBeLessThan(MIN_PAGE_TEXT_CHARS)
+    expect(pagesLackingTextLayer([padded])).toEqual([1])
+  })
+
+  it('a document with zero pages is treated as lacking (fail closed)', () => {
+    expect(pagesLackingTextLayer([])).toEqual([0])
+  })
+
+  it('passes a document whose every page clears the threshold', () => {
+    expect(pagesLackingTextLayer(['Ordinary lease terms, nothing sensitive here'])).toEqual([])
   })
 })

@@ -25,6 +25,25 @@ export async function buildImageOnlyPdf(): Promise<Uint8Array> {
   return doc.save()
 }
 
+/** A multi-page PDF: each entry is one page. A string is drawn as real text
+ *  (extractable text layer); `null` is a page with only a drawn shape (no
+ *  text layer, the scanned/image-only stand-in). Models the mixed document
+ *  the per-page text-layer gate exists for: a typed cover page in front of
+ *  scanned lease pages. */
+export async function buildMultiPagePdf(pages: Array<string | null>): Promise<Uint8Array> {
+  const doc = await PDFDocument.create()
+  const font = await doc.embedFont(StandardFonts.Helvetica)
+  for (const text of pages) {
+    const page = doc.addPage([400, 150])
+    if (text === null) {
+      page.drawRectangle({ x: 10, y: 10, width: 100, height: 50, color: undefined, borderWidth: 1 })
+    } else {
+      page.drawText(text, { x: 20, y: 100, size: 10, font })
+    }
+  }
+  return doc.save()
+}
+
 /** Base64-encode PDF bytes the same way the intake route expects
  *  (pdfBase64 of the raw file bytes — real PDFs always start with "%PDF",
  *  which base64-encodes to a "JVBER" prefix; see intake.ts's magic-byte check). */

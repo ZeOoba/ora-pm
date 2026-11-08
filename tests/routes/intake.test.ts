@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { Hono } from 'hono'
 import { intakeRouter } from '../../server/routes/intake'
 import { createApp } from '../../server/index'
-import { buildTextPdf, buildImageOnlyPdf, toBase64 } from '../fixtures/pdf'
+import { buildTextPdf, buildImageOnlyPdf, buildMultiPagePdf, toBase64 } from '../fixtures/pdf'
 
 const env = { ANTHROPIC_API_KEY: 'sk-test', CONFIDENTIAL_TERMS: 'zeta,99999' }
 function app() { const a = new Hono(); a.route('/intake', intakeRouter); return a }
@@ -277,5 +277,63 @@ describe('admin gating (real app)', () => {
     const res = await createApp().request('/api/intake/lease',
       body({ filename: 'a.pdf', pdfBase64: 'X', tenant_id: 't', unit_id: 'u' }), {})
     expect(res.status).toBe(401)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Audit finding intake-partial-text-layer-egress: the content scan used to pass
+// as soon as the MERGED text was non-empty, so a typed cover page in front of
+// scanned (image-only) lease pages cleared the scan on the cover page alone and
+// the WHOLE PDF, scanned pages included, egressed to api.anthropic.com.
+// The gate is now per page: every page must carry a real text layer.
+// ---------------------------------------------------------------------------
+describe('per-page text-layer gate (partial text layer)', () => {
+  it('422 and NO egress when one page has text but another is image-only', async () => {
+    const fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock)
+    const pdfBytes = await buildMultiPagePdf(['Commercial lease cover sheet for the premises', null])
+    const res = await app().request('/intake/lease',
+      body({ filename: 'acme-lease.pdf', pdfBase64: toBase64(pdfBytes), tenant_id: 't', unit_id: 'u' }), env)
+    expect(res.status).toBe(422)
+    const json = await res.json() as { error: string }
+    expect(json.error).toMatch(/content scan unavailable/i)
+    expect(json.error).toMatch(/page\(s\) 2\b/i)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('422 and NO egress when a page carries only a stray stamp below the text threshold', async () => {
+    const fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock)
+    const pdfBytes = await buildMultiPagePdf(['Commercial lease cover sheet for the premises', 'Page 2 of 9'])
+    const res = await app().request('/intake/lease',
+      body({ filename: 'acme-lease.pdf', pdfBase64: toBase64(pdfBytes), tenant_id: 't', unit_id: 'u' }), env)
+    expect(res.status).toBe(422)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('422 and NO egress when the confidential term appears only on a later page', async () => {
+    const fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock)
+    const pdfBytes = await buildMultiPagePdf([
+      'Commercial lease cover sheet for the premises',
+      'Assignment to the Zeta acquisition vehicle at closing',
+    ])
+    const res = await app().request('/intake/lease',
+      body({ filename: 'acme-lease.pdf', pdfBase64: toBase64(pdfBytes), tenant_id: 't', unit_id: 'u' }), env)
+    expect(res.status).toBe(422)
+    const json = await res.json() as { error: string }
+    expect(json.error).toMatch(/confidential/i)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('200 for a multi-page document whose every page has a clean text layer', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ content: [{ type: 'tool_use', name: 'extract_lease', input: { base_rent_monthly: 4500, _confidence: {} } }] }),
+    }))
+    const pdfBytes = await buildMultiPagePdf([
+      'Commercial lease cover sheet for the premises',
+      'Base rent schedule and the term of the lease',
+    ])
+    const res = await app().request('/intake/lease',
+      body({ filename: 'acme-lease.pdf', pdfBase64: toBase64(pdfBytes), tenant_id: 't', unit_id: 'u' }), env)
+    expect(res.status).toBe(200)
   })
 })
