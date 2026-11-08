@@ -48,7 +48,10 @@ const ALLOWLIST: Record<string, string[]> = {
   // cam.ts:63 — calculateCAMTrueUp() throws a controlled validation message
   // (e.g. "totalLeasedSF must be positive"), not a raw DB error. Task 7
   // reviewed clean; out of Task 9's scope (cam.ts explicitly excluded).
-  'cam.ts': ["(err as Error).message"],
+  // camTermsJson (audit findings cam-ignores-rent-type-expense-stop / cam-denominator-client-
+  // snapshot): returns a CAMTermsError's own message, which server/lib/cam.ts authors for the user
+  // (lease-data problems such as a modified-gross lease with no expense stop); typed to that class.
+  'cam.ts': ["(err as Error).message", "camTermsJson = (err: CAMTermsError)"],
   // cron.ts — operator-only /api/cron/* endpoints; Task 2's deliberate
   // judgment call to keep DB detail visible to the ops/alerting consumer,
   // not a tenant-reachable surface. Out of Task 9's scope (explicitly

@@ -11,6 +11,12 @@ type PgErr = { message: string; code?: string }
 
 export const camRouter = new Hono<{ Bindings: Env }>()
 
+// CAMTermsError messages are authored in server/lib/cam.ts (lease-data problems the user fixes on
+// the lease, e.g. "modified-gross lease has no expense stop"), never DB/driver text, so they are
+// safe to return verbatim. Typed to CAMTermsError so nothing else can be routed through it
+// (allowlisted by name in tests/lib/no-raw-db-errors.test.ts).
+const camTermsJson = (err: CAMTermsError) => ({ error: err.message })
+
 camRouter.get('/', async (c) => {
   const db = getDb(c.env)
   const { data, error } = await db
@@ -126,7 +132,7 @@ camRouter.get('/pool', async (c) => {
   const recoverable = await loadRecoverableTotal(db, property_id, year)
   if (recoverable.error) return dbError(c, recoverable.error, 'Failed to load recoverable expenses')
   const loaded = await loadCamPool(db, property_id, year)
-  if (loaded.error instanceof CAMTermsError) return c.json({ error: loaded.error.message }, 422)
+  if (loaded.error instanceof CAMTermsError) return c.json(camTermsJson(loaded.error), 422)
   if (loaded.error) return dbError(c, loaded.error, 'Failed to load CAM pool')
 
   return c.json({
@@ -197,7 +203,7 @@ camRouter.post('/calculate', async (c) => {
   if (recoverable.error) return dbError(c, recoverable.error, 'Failed to load recoverable expenses')
   const total_property_recoverable_expenses = recoverable.total
   const loaded = await loadCamPool(db, propertyId, reconciliation_year)
-  if (loaded.error instanceof CAMTermsError) return c.json({ error: loaded.error.message }, 422)
+  if (loaded.error instanceof CAMTermsError) return c.json(camTermsJson(loaded.error), 422)
   if (loaded.error) return dbError(c, loaded.error, 'Failed to load CAM pool')
   const tenantInPool = loaded.pool.byLease[lease_id]
   if (!tenantInPool) {
@@ -238,7 +244,7 @@ camRouter.post('/calculate', async (c) => {
   } catch (err) {
     // Lease-terms problems (e.g. modified_gross with no expense stop) are a 422 the user fixes on
     // the lease; nothing is saved either way.
-    if (err instanceof CAMTermsError) return c.json({ error: err.message }, 422)
+    if (err instanceof CAMTermsError) return c.json(camTermsJson(err), 422)
     return c.json({ error: (err as Error).message }, 400)
   }
 
