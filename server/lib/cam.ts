@@ -25,6 +25,79 @@ export interface CAMOutput {
  *  this to a 422: it is a lease-data problem a human must fix, not a server error. */
 export class CAMTermsError extends Error {}
 
+// ---------------------------------------------------------------------------
+// CAM pool: the pro-rata denominator (audit finding cam-denominator-client-snapshot).
+//
+// The denominator used to be summed in the browser from TODAY's active rent-roll rows and trusted
+// by /calculate, so a tenant that left mid-year vanished from it (every remaining tenant's share
+// went up) and a tenant that arrived after year-end was counted in it. It is now computed server
+// side, preserving the existing basis (leased SF, not building SF) but occupancy-weighted over the
+// reconciliation year: each lease that was in effect at any point in the year contributes
+//   sf x (days in effect during the year / days in the year)
+// and the tenant's own numerator is weighted the same way, so the shares of every lease in the
+// pool sum to exactly 100% of recoverable expenses.
+// ---------------------------------------------------------------------------
+
+const ISO_DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/
+const DAY_MS = 86_400_000
+
+/** UTC day number for an ISO calendar date; throws CAMTermsError if missing or not a real date. */
+function isoDay(iso: string | null | undefined, field: string): number {
+  const m = typeof iso === 'string' ? ISO_DATE_RE.exec(iso) : null
+  if (!m) throw new CAMTermsError(`Lease ${field} is missing or not an ISO date`)
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])]
+  const t = Date.UTC(y, mo - 1, d)
+  const back = new Date(t)
+  if (back.getUTCFullYear() !== y || back.getUTCMonth() !== mo - 1 || back.getUTCDate() !== d) {
+    throw new CAMTermsError(`Lease ${field} is not a valid date`)
+  }
+  return Math.round(t / DAY_MS)
+}
+
+/** Inclusive days of [startDate, endDate] that fall in calendar `year` (0 if none). */
+export function yearOverlapDays(startDate: string, endDate: string, year: number): number {
+  const start = isoDay(startDate, 'start_date')
+  const end = isoDay(endDate, 'end_date')
+  if (end < start) throw new CAMTermsError('Lease end_date is before its start_date')
+  const yearFirst = Math.round(Date.UTC(year, 0, 1) / DAY_MS)
+  const yearLast = Math.round(Date.UTC(year, 11, 31) / DAY_MS)
+  const first = Math.max(start, yearFirst)
+  const last = Math.min(end, yearLast)
+  return last >= first ? last - first + 1 : 0
+}
+
+export interface CAMPoolLeaseInput {
+  id: string
+  sf: number
+  start_date: string
+  end_date: string
+}
+
+export interface CAMPool {
+  year: number
+  daysInYear: number
+  /** The pro-rata denominator: Σ sf x overlapDays / daysInYear over every lease in the pool. */
+  weightedLeasedSF: number
+  /** Only leases with overlapDays > 0. */
+  byLease: Record<string, { sf: number; overlapDays: number; weightedSF: number }>
+}
+
+export function computeCamPool(leases: readonly CAMPoolLeaseInput[], year: number): CAMPool {
+  const daysInYear = Math.round((Date.UTC(year + 1, 0, 1) - Date.UTC(year, 0, 1)) / DAY_MS)
+  const byLease: CAMPool['byLease'] = {}
+  let weightedLeasedSF = 0
+  for (const l of leases) {
+    const overlapDays = yearOverlapDays(l.start_date, l.end_date, year)
+    if (overlapDays === 0) continue
+    const sf = Number(l.sf)
+    if (!Number.isFinite(sf) || sf < 0) throw new CAMTermsError(`Unit SF for lease ${l.id} is not a valid number`)
+    const weightedSF = overlapDays === daysInYear ? sf : (sf * overlapDays) / daysInYear
+    byLease[l.id] = { sf, overlapDays, weightedSF }
+    weightedLeasedSF += weightedSF
+  }
+  return { year, daysInYear, weightedLeasedSF, byLease }
+}
+
 /**
  * CAM true-up for one lease.
  *

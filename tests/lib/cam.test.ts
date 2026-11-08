@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { calculateCAMTrueUp } from '../../server/lib/cam'
+import { calculateCAMTrueUp, yearOverlapDays, computeCamPool, CAMTermsError } from '../../server/lib/cam'
 
 describe('calculateCAMTrueUp', () => {
   it('calculates positive true-up when tenant owes more than estimated', () => {
@@ -131,5 +131,70 @@ describe('calculateCAMTrueUp: rent type and expense stop', () => {
     for (const rentType of ['nnn', 'gross', 'modified_gross'] as const) {
       expect(calculateCAMTrueUp({ ...pool, rentType, expenseStopPerSF: 3 }).tenantProRataSharePct).toBeCloseTo(0.2)
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Audit finding cam-denominator-client-snapshot: the pro-rata denominator was
+// summed in the browser from TODAY's active leases. It is now computed server-side
+// as occupancy-weighted leased SF over the reconciliation year: every lease that
+// overlapped the year contributes sf x (days in effect / days in year).
+// ---------------------------------------------------------------------------
+describe('yearOverlapDays', () => {
+  it('counts inclusive days of the lease term inside the calendar year', () => {
+    expect(yearOverlapDays('2020-01-01', '2030-12-31', 2025)).toBe(365)
+    expect(yearOverlapDays('2020-01-01', '2030-12-31', 2024)).toBe(366) // leap year
+    expect(yearOverlapDays('2025-07-01', '2030-12-31', 2025)).toBe(184)
+    expect(yearOverlapDays('2020-01-01', '2025-03-31', 2025)).toBe(90)
+    expect(yearOverlapDays('2025-01-01', '2025-01-01', 2025)).toBe(1)
+  })
+
+  it('is 0 for a lease entirely outside the year', () => {
+    expect(yearOverlapDays('2026-01-01', '2030-12-31', 2025)).toBe(0)
+    expect(yearOverlapDays('2020-01-01', '2024-12-31', 2025)).toBe(0)
+  })
+
+  it('throws CAMTermsError on missing / malformed / inverted dates (fail closed)', () => {
+    expect(() => yearOverlapDays('', '2030-12-31', 2025)).toThrow(CAMTermsError)
+    expect(() => yearOverlapDays('2025-02-30', '2030-12-31', 2025)).toThrow(CAMTermsError)
+    expect(() => yearOverlapDays('2026-01-01', '2025-01-01', 2025)).toThrow(CAMTermsError)
+  })
+})
+
+describe('computeCamPool', () => {
+  it('weights each lease SF by the share of the year it was in effect', () => {
+    const pool = computeCamPool([
+      { id: 'a', sf: 1000, start_date: '2020-01-01', end_date: '2030-12-31' }, // full year
+      { id: 'b', sf: 3650, start_date: '2020-01-01', end_date: '2025-03-31' }, // 90 days
+    ], 2025)
+    expect(pool.daysInYear).toBe(365)
+    expect(pool.byLease.a.weightedSF).toBe(1000)
+    expect(pool.byLease.b.weightedSF).toBeCloseTo(900, 9)
+    expect(pool.weightedLeasedSF).toBeCloseTo(1900, 9)
+  })
+
+  it('drops leases that did not overlap the year', () => {
+    const pool = computeCamPool([
+      { id: 'a', sf: 1000, start_date: '2020-01-01', end_date: '2030-12-31' },
+      { id: 'z', sf: 9999, start_date: '2026-01-01', end_date: '2030-12-31' },
+    ], 2025)
+    expect(Object.keys(pool.byLease)).toEqual(['a'])
+    expect(pool.weightedLeasedSF).toBe(1000)
+  })
+
+  it('pro-rata shares derived from the pool sum to 100% of recoverable expenses', () => {
+    const leases = [
+      { id: 'a', sf: 1000, start_date: '2020-01-01', end_date: '2030-12-31' },
+      { id: 'b', sf: 2500, start_date: '2025-04-15', end_date: '2030-12-31' },
+      { id: 'c', sf: 1200, start_date: '2019-01-01', end_date: '2025-08-31' },
+    ]
+    const pool = computeCamPool(leases, 2025)
+    const owed = leases.map((l) => calculateCAMTrueUp({
+      totalRecoverableExpenses: 100000,
+      tenantSF: pool.byLease[l.id].weightedSF,
+      totalLeasedSF: pool.weightedLeasedSF,
+      estimatedCamPaid: 0,
+    }).actualCamOwed)
+    expect(owed.reduce((x, y) => x + y, 0)).toBeCloseTo(100000, 1)
   })
 })

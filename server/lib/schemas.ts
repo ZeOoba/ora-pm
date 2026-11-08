@@ -125,11 +125,14 @@ export const ExpenseInsertSchema = z.object({
 export const ExpenseUpdateSchema = ExpenseInsertSchema.partial()
 
 // CAM reconciliation calculate/save (OI-041 slice)
+// total_property_recoverable_expenses / total_leased_sf: optional and IGNORED by /cam/calculate,
+// which recomputes both from the DB (audit finding cam-denominator-client-snapshot). Still
+// shape-validated when present so an older page bundle that sends them gets the same 422 on junk.
 export const CamCalculateSchema = z.object({
   lease_id: z.string().uuid(),
   reconciliation_year: z.number().int().positive(),
-  total_property_recoverable_expenses: positiveAmount,
-  total_leased_sf: positiveAmount,
+  total_property_recoverable_expenses: positiveAmount.optional(),
+  total_leased_sf: positiveAmount.optional(),
 })
 
 // GET /cam/recoverable-expenses query — uuid-checked so a malformed id is a 400, not a Postgres
