@@ -22,12 +22,37 @@ type CAMRow = CAMReconciliation & {
 // GET /cam/pool: the server-computed CAM pool for a property/year (audit finding
 // cam-denominator-client-snapshot). Display + which leases to reconcile only: /cam/calculate
 // recomputes the denominator and recoverable total itself and ignores anything the page sends.
+type ShareBasis = 'lease_stated_pct' | 'premises_rsf_over_denominator'
+type CamPoolLease = {
+  lease_id: string; status: string; rent_type: string; sf: number; overlap_days: number; weighted_sf: number
+  stated_share_pct: number | null; computed_share_pct: number | null
+  share_basis: ShareBasis | null; annual_share_pct: number | null; effective_share_pct: number | null
+  share_error: string | null; warnings: string[]
+}
 type CamPool = {
   recoverable_total: number
   recoverable_count: number
   days_in_year: number
   weighted_leased_sf: number
-  leases: { lease_id: string; status: string; rent_type: string; sf: number; overlap_days: number; weighted_sf: number }[]
+  // CAM ruling 2026-11-08: Proportionate Share = the lease-stated %, else premises SF / this
+  // building/project rentable SF (properties.cam_denominator_rsf). The landlord carries vacancy.
+  denominator_rsf: number | null
+  peak_leased_sf: number
+  /** Pool-level, non-blocking (e.g. concurrent stated shares totalling more than 100%). */
+  warnings: string[]
+  leases: CamPoolLease[]
+}
+
+const pct = (f: number | null | undefined) => (f == null ? '—' : `${(f * 100).toFixed(2)}%`)
+const SHARE_BASIS_LABEL: Record<ShareBasis, string> = {
+  lease_stated_pct: 'Stated in lease',
+  premises_rsf_over_denominator: 'Premises SF / building RSF',
+}
+const RECOVERY_BASIS_LABEL: Record<NonNullable<CAMReconciliation['recovery_basis']>, string> = {
+  full_pro_rata: 'Full share',
+  above_expense_stop: 'Above expense stop',
+  none_gross: 'Gross (none)',
+  above_base_year: 'Above base year',
 }
 
 const currentYear = new Date().getFullYear()
@@ -39,6 +64,7 @@ export function CAMList() {
   const [year, setYear] = useState<number>(currentYear - 1)
   const [calculating, setCalculating] = useState(false)
   const [calcError, setCalcError] = useState<string | null>(null)
+  const [calcWarnings, setCalcWarnings] = useState<string[]>([])
   const [approvingId, setApprovingId] = useState<string | null>(null)
   const [confirmRow, setConfirmRow] = useState<CAMRow | null>(null)
   // Row shown in the dialog text. Set alongside confirmRow but NOT cleared on close, so the text
@@ -88,6 +114,7 @@ export function CAMList() {
   const poolReady = pool.isSuccess && !pool.isFetching
   const poolLeases = pool.data?.leases ?? []
   const weightedLeasedSF = pool.data?.weighted_leased_sf ?? 0
+  const denominatorRSF = pool.data?.denominator_rsf ?? null
 
   // Only a loaded, current total may be sent to /cam/calculate — never a loading/failed/stale one.
   const recoverableReady = recoverable.isSuccess && !recoverable.isFetching
@@ -105,8 +132,9 @@ export function CAMList() {
 
   // ── Calculate reconciliation ───────────────────────────────────────────────
   async function handleCalculate() {
-    if (!propertyId || !recoverableReady || !poolReady || poolLeases.length === 0 || weightedLeasedSF === 0) return
+    if (!propertyId || !recoverableReady || !poolReady || poolLeases.length === 0) return
     setCalcError(null)
+    setCalcWarnings([])
     setCalculating(true)
     try {
       // One request per lease in the server's pool; the server computes the denominator and the
@@ -114,13 +142,15 @@ export function CAMList() {
       // expense stop) must not hide the results of the others.
       const results = await Promise.allSettled(
         poolLeases.map(l =>
-          api.post<{ data: CAMReconciliation }>('/cam/calculate', {
+          api.post<{ data: CAMReconciliation; warnings?: string[] }>('/cam/calculate', {
             lease_id: l.lease_id,
             reconciliation_year: year,
           })
         )
       )
       await qc.invalidateQueries({ queryKey: ['cam'] })
+      const warned = results.flatMap(r => (r.status === 'fulfilled' ? r.value.warnings ?? [] : []))
+      if (warned.length > 0) setCalcWarnings(warned)
       const failed = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected')
       if (failed.length > 0) {
         const reasons = [...new Set(failed.map(f => (f.reason instanceof Error ? f.reason.message : 'Calculation failed.')))]
@@ -158,7 +188,7 @@ export function CAMList() {
   }
 
   // ── Render ─────────────────────────────────────────────────────────────────
-  const canCalculate = !!propertyId && recoverableReady && poolReady && weightedLeasedSF > 0 && !calculating
+  const canCalculate = !!propertyId && recoverableReady && poolReady && poolLeases.length > 0 && !calculating
 
   return (
     <div>
@@ -200,9 +230,15 @@ export function CAMList() {
               <span className="font-medium">Total recoverable expenses ({year}):</span>{' '}
               <span className="font-mono">{recoverableReady ? formatCurrency(recoverableTotal) : '…'}</span>
               {' · '}
-              <span className="font-medium">Total leased SF:</span>{' '}
+              <span className="font-medium">Share denominator:</span>{' '}
+              <span className="font-mono">
+                {!poolReady ? '…' : denominatorRSF != null ? `${Math.round(denominatorRSF).toLocaleString()} rentable SF` : 'not entered'}
+              </span>
+              <span className="text-xs text-muted-foreground"> (building/project RSF per the lease form; landlord carries vacancy)</span>
+              {' · '}
+              <span className="font-medium">Avg leased SF:</span>{' '}
               <span className="font-mono">{poolReady ? Math.round(weightedLeasedSF).toLocaleString() : '…'}</span>
-              <span className="text-xs text-muted-foreground"> (occupancy-weighted for {year})</span>
+              <span className="text-xs text-muted-foreground"> (occupancy-weighted for {year}; display only)</span>
               {' · '}
               <span className="font-medium">Leases in pool:</span>{' '}
               <span className="font-mono">{poolReady ? poolLeases.length : '…'}</span>
@@ -226,10 +262,42 @@ export function CAMList() {
               </p>
             )}
 
-            {poolReady && weightedLeasedSF === 0 && poolLeases.length > 0 && (
-              <p className="text-xs text-status-danger mt-1">
-                Leases found but total leased SF is 0 — check unit SF values.
+            {poolReady && (pool.data?.warnings ?? []).map(w => (
+              <p key={w} className="text-xs text-amber-600 mt-1">{w}</p>
+            ))}
+
+            {poolReady && denominatorRSF == null && (
+              <p className="text-xs text-amber-600 mt-1">
+                No CAM denominator (rentable SF) on this property — only leases with a stated Proportionate Share can be reconciled. Enter it on the property.
               </p>
+            )}
+
+            {poolReady && poolLeases.length > 0 && (
+              <table className="mt-3 min-w-full text-xs">
+                <thead>
+                  <tr className="text-left text-muted-foreground">
+                    {['Lease', 'SF', 'Days', 'Share basis', 'Stated', 'Computed', 'Applied'].map(h => (
+                      <th key={h} className="pr-4 py-1 font-medium">{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {poolLeases.map(l => (
+                    <tr key={l.lease_id} className="align-top">
+                      <td className="pr-4 py-1 font-mono">{l.lease_id.slice(0, 8)}</td>
+                      <td className="pr-4 py-1 font-mono">{Math.round(l.sf).toLocaleString()}</td>
+                      <td className="pr-4 py-1 font-mono">{l.overlap_days}/{pool.data?.days_in_year}</td>
+                      <td className="pr-4 py-1">
+                        {l.share_basis ? SHARE_BASIS_LABEL[l.share_basis] : <span className="text-status-danger">{l.share_error ?? 'No basis'}</span>}
+                        {l.warnings.map(w => <p key={w} className="text-amber-600">{w}</p>)}
+                      </td>
+                      <td className="pr-4 py-1 font-mono">{pct(l.stated_share_pct)}</td>
+                      <td className="pr-4 py-1 font-mono">{pct(l.computed_share_pct)}</td>
+                      <td className="pr-4 py-1 font-mono">{pct(l.effective_share_pct)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             )}
 
             {poolReady && poolLeases.length === 0 && (
@@ -242,6 +310,12 @@ export function CAMList() {
 
         {calcError && (
           <p className="text-sm text-status-danger mb-3">{calcError}</p>
+        )}
+
+        {calcWarnings.length > 0 && (
+          <div className="text-sm text-amber-600 mb-3">
+            {calcWarnings.map(w => <p key={w}>{w}</p>)}
+          </div>
         )}
 
         <button
@@ -279,7 +353,7 @@ export function CAMList() {
         <table className="min-w-full divide-y divide-border text-sm">
           <thead className="bg-muted">
             <tr>
-              {['Property', 'Suite', 'Tenant', 'Year', 'Pro-rata %', 'Est. Paid', 'Actual Owed', 'True-Up', 'Status', 'Action'].map(h => (
+              {['Property', 'Suite', 'Tenant', 'Year', 'Pro-rata %', 'Basis', 'Est. Paid', 'Actual Owed', 'True-Up', 'Status', 'Action'].map(h => (
                 <th key={h} className="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wide">
                   {h}
                 </th>
@@ -289,7 +363,7 @@ export function CAMList() {
           <tbody className="divide-y divide-border">
             {filteredRows.length === 0 && (
               <tr>
-                <td colSpan={10} className="px-4 py-8 text-center text-muted-foreground">
+                <td colSpan={11} className="px-4 py-8 text-center text-muted-foreground">
                   No reconciliations yet. Run one above.
                 </td>
               </tr>
@@ -315,6 +389,11 @@ export function CAMList() {
                   </td>
                   <td className="px-4 py-3 font-mono text-foreground">
                     {(row.tenant_pro_rata_share_pct * 100).toFixed(2)}%
+                  </td>
+                  <td className="px-4 py-3 text-xs text-muted-foreground">
+                    {row.share_basis ? SHARE_BASIS_LABEL[row.share_basis] : 'Pre-0019 (leased SF)'}
+                    {row.recovery_basis && <span> · {RECOVERY_BASIS_LABEL[row.recovery_basis]}</span>}
+                    {row.basis_warnings && <p className="text-amber-600">{row.basis_warnings}</p>}
                   </td>
                   <td className="px-4 py-3 font-mono text-foreground">
                     {formatCurrency(row.estimated_cam_paid)}

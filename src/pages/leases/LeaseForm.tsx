@@ -20,6 +20,10 @@ interface FormState {
   cam_estimate_monthly: string
   security_deposit: string
   expense_stop_amount: string
+  /** Percent as typed / as the lease prints it (12.5 = 12.5%); sent as a fraction. */
+  proportionate_share_percent: string
+  base_year: string
+  base_year_expense_amount: string
   ti_allowance: string
   notes: string
 }
@@ -35,6 +39,9 @@ const EMPTY: FormState = {
   cam_estimate_monthly: '0',
   security_deposit: '0',
   expense_stop_amount: '',
+  proportionate_share_percent: '',
+  base_year: '',
+  base_year_expense_amount: '',
   ti_allowance: '',
   notes: '',
 }
@@ -47,6 +54,9 @@ interface FormErrors {
   base_rent_monthly?: string
   cam_estimate_monthly?: string
   security_deposit?: string
+  proportionate_share_percent?: string
+  base_year?: string
+  base_year_expense_amount?: string
 }
 
 function validate(f: FormState): FormErrors {
@@ -69,6 +79,19 @@ function validate(f: FormState): FormErrors {
   }
   if (f.security_deposit !== '' && Number(f.security_deposit) < 0) {
     e.security_deposit = 'Must be ≥ 0'
+  }
+  if (f.proportionate_share_percent !== '') {
+    const pct = Number(f.proportionate_share_percent)
+    if (!(Number.isFinite(pct) && pct > 0 && pct <= 100)) e.proportionate_share_percent = 'Enter a percent above 0 and at most 100'
+  }
+  if (f.base_year !== '') {
+    const y = Number(f.base_year)
+    if (!(Number.isInteger(y) && y >= 1900 && y <= 2200)) e.base_year = 'Enter a calendar year, e.g. 2026'
+  }
+  if (f.base_year_expense_amount !== '') {
+    const amt = Number(f.base_year_expense_amount)
+    if (!(Number.isFinite(amt) && amt >= 0)) e.base_year_expense_amount = 'Must be ≥ 0'
+    else if (f.base_year === '') e.base_year = 'Required when a base-year amount is entered'
   }
   return e
 }
@@ -138,6 +161,10 @@ export function LeaseForm({
       cam_estimate_monthly: form.cam_estimate_monthly === '' ? 0 : Number(form.cam_estimate_monthly),
       security_deposit: form.security_deposit === '' ? 0 : Number(form.security_deposit),
       expense_stop_amount: form.expense_stop_amount === '' ? null : Number(form.expense_stop_amount),
+      // Typed as a percent (12.5), stored as a fraction (0.125): leases.proportionate_share_pct.
+      proportionate_share_pct: form.proportionate_share_percent === '' ? null : Number(form.proportionate_share_percent) / 100,
+      base_year: form.base_year === '' ? null : Number(form.base_year),
+      base_year_expense_amount: form.base_year_expense_amount === '' ? null : Number(form.base_year_expense_amount),
       ti_allowance: form.ti_allowance === '' ? null : Number(form.ti_allowance),
       notes: form.notes.trim() || null,
     })
@@ -307,6 +334,58 @@ export function LeaseForm({
                 id="expense_stop_amount"
                 value={form.expense_stop_amount}
                 onChange={e => set('expense_stop_amount', e.target.value)}
+                placeholder="Optional"
+                min={0}
+              />
+            </Field>
+          </div>
+
+          {/* CAM Proportionate Share and base year (0019; CAM ruling 2026-11-08) */}
+          <div className="grid grid-cols-2 gap-4">
+            <Field
+              label="Proportionate Share (%)"
+              htmlFor="proportionate_share_percent"
+              error={errors.proportionate_share_percent}
+              hint={lowConf('proportionate_share_percent') ? '⚠ Verify — auto-extracted' : 'As stated in the lease, e.g. 12.5. Blank = premises SF / property CAM denominator.'}
+            >
+              <NumberInput
+                id="proportionate_share_percent"
+                value={form.proportionate_share_percent}
+                onChange={e => set('proportionate_share_percent', e.target.value)}
+                placeholder="Optional"
+                min={0}
+                max={100}
+                step="any"
+              />
+            </Field>
+            <Field
+              label="Base Year (calendar year)"
+              htmlFor="base_year"
+              error={errors.base_year}
+              hint={lowConf('base_year') ? '⚠ Verify — auto-extracted' : 'Only for base-year leases: tenant pays its share of the increase'}
+            >
+              <NumberInput
+                id="base_year"
+                value={form.base_year}
+                onChange={e => set('base_year', e.target.value)}
+                placeholder="Optional"
+                min={1900}
+                max={2200}
+              />
+            </Field>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <Field
+              label="Base-Year Expenses ($ total, whole pool)"
+              htmlFor="base_year_expense_amount"
+              error={errors.base_year_expense_amount}
+              hint={lowConf('base_year_expense_amount') ? '⚠ Verify — auto-extracted' : 'Base year recoverable Operating Costs + Taxes, total dollars (not $/SF)'}
+            >
+              <NumberInput
+                id="base_year_expense_amount"
+                value={form.base_year_expense_amount}
+                onChange={e => set('base_year_expense_amount', e.target.value)}
                 placeholder="Optional"
                 min={0}
               />

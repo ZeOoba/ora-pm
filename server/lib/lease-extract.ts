@@ -24,6 +24,11 @@ const FieldsSchema = z.object({
   rent_type: z.enum(['nnn', 'gross', 'modified_gross']).optional().catch(undefined),
   ti_allowance: z.number().optional().catch(undefined),
   expense_stop_amount: z.number().optional().catch(undefined),
+  // Percent as printed in the lease (12.5 = 12.5%), (0, 100]; LeaseForm converts it to the
+  // fraction stored in leases.proportionate_share_pct. Out-of-range values are dropped.
+  proportionate_share_percent: z.number().gt(0).max(100).optional().catch(undefined),
+  base_year: z.number().int().min(1900).max(2200).optional().catch(undefined),
+  base_year_expense_amount: z.number().min(0).optional().catch(undefined),
   notes: z.string().optional().catch(undefined),
 })
 export interface ExtractionResult {
@@ -46,6 +51,9 @@ const EXTRACT_TOOL = {
       rent_type: { type: 'string', enum: ['nnn', 'gross', 'modified_gross'] },
       ti_allowance: { type: 'number' },
       expense_stop_amount: { type: 'number', description: 'expense stop in dollars per square foot per YEAR ($/SF/yr); if the lease states only a total or monthly figure, omit this field and mention it in notes' },
+      proportionate_share_percent: { type: 'number', description: "Tenant's Proportionate Share as a PERCENT exactly as the lease states it (12.5 for 12.5%). Omit if the lease states only the square-foot formula without a percentage." },
+      base_year: { type: 'integer', description: 'Base Year for Operating Costs and Taxes, a calendar year (e.g. 2026). Omit for a full NNN lease with no base year.' },
+      base_year_expense_amount: { type: 'number', description: 'Base-year Operating Costs and Taxes TOTAL in dollars for the whole Building or Project, only if the lease states that dollar figure. Never a $/SF figure; otherwise omit.' },
       notes: { type: 'string', description: 'any notable clauses (options, escalations, percentage rent)' },
       _confidence: { type: 'object', description: 'per-field confidence 0..1' },
     },

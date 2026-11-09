@@ -17,6 +17,10 @@ export const PropertyInsertSchema = z.object({
   state: z.string().length(2),
   zip: z.string().regex(/^\d{5}(-\d{4})?$/, 'Invalid zip').nullish(),
   total_sf: z.number().positive().nullish(),
+  // 0019 / CAM building-RSF ruling 2026-11-08: the building or project rentable SF the lease form
+  // names — the CAM Proportionate Share denominator. Entered by a human from the lease; never
+  // derived from summed unit SF (that is what total_sf holds after an import).
+  cam_denominator_rsf: z.number().positive().nullish(),
   property_type: z.enum(['commercial', 'industrial', 'retail', 'multifamily', 'office', 'other']),
   entity_llc: z.string().nullish(),
   notes: z.string().nullish(),
@@ -47,6 +51,11 @@ export const LeaseInsertSchema = z.object({
   rent_type: z.enum(['nnn', 'gross', 'modified_gross']).default('nnn'),
   security_deposit: nonNegativeAmount.optional(),
   expense_stop_amount: nonNegativeAmount.nullish(),
+  // 0019 / CAM ruling 2026-11-08. proportionate_share_pct is a FRACTION in (0, 1] (12.5% = 0.125),
+  // matching the DB CHECK; LeaseForm converts the percent the user types.
+  proportionate_share_pct: z.number().gt(0, 'Must be above 0').max(1, 'Must be a fraction of at most 1 (100%)').nullish(),
+  base_year: z.number().int().min(1900).max(2200).nullish(),
+  base_year_expense_amount: nonNegativeAmount.nullish(),
   ti_allowance: nonNegativeAmount.nullish(),
   notes: z.string().nullish(),
 })

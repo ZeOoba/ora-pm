@@ -2,17 +2,29 @@ export type CAMRentType = 'nnn' | 'gross' | 'modified_gross'
 
 export interface CAMInput {
   totalRecoverableExpenses: number
+  /** The SF an expense stop is applied to: premises SF x days in effect / days in year. */
   tenantSF: number
-  totalLeasedSF: number
+  /** The tenant's Proportionate Share actually applied for the year, as a fraction in [0, 1]:
+   *  resolveTenantShare(...).effectivePct (already prorated for a partial year). */
+  tenantSharePct: number
   estimatedCamPaid: number
   /** leases.rent_type. Omitted = 'nnn' (the pre-fix behaviour, kept for existing callers). */
   rentType?: CAMRentType
   /** leases.expense_stop_amount: $/SF per year (LeaseForm "Expense Stop ($/SF/yr)"). */
   expenseStopPerSF?: number | null
+  /** leases.base_year (calendar year). Set = recover only the increase over the base year. */
+  baseYear?: number | null
+  /** leases.base_year_expense_amount: the base year's recoverable total ($, whole pool). */
+  baseYearExpenseAmount?: number | null
+  /** The calendar year being reconciled. Required when baseYear is set. */
+  reconciliationYear?: number
 }
 
 /** How actualCamOwed was derived — persisted context for a human reviewing the draft. */
-export type CAMRecoveryBasis = 'full_pro_rata' | 'above_expense_stop' | 'none_gross'
+export type CAMRecoveryBasis = 'full_pro_rata' | 'above_expense_stop' | 'none_gross' | 'above_base_year'
+
+/** Which Proportionate Share basis applied (persisted as cam_reconciliations.share_basis). */
+export type CAMShareBasis = 'lease_stated_pct' | 'premises_rsf_over_denominator'
 
 export interface CAMOutput {
   tenantProRataSharePct: number
@@ -26,16 +38,15 @@ export interface CAMOutput {
 export class CAMTermsError extends Error {}
 
 // ---------------------------------------------------------------------------
-// CAM pool: the pro-rata denominator (audit finding cam-denominator-client-snapshot).
+// CAM pool: which leases were in effect during the reconciliation year, and for how many days
+// (audit finding cam-denominator-client-snapshot: computed server side from the DB, never the
+// browser's snapshot of today's rent roll).
 //
-// The denominator used to be summed in the browser from TODAY's active rent-roll rows and trusted
-// by /calculate, so a tenant that left mid-year vanished from it (every remaining tenant's share
-// went up) and a tenant that arrived after year-end was counted in it. It is now computed server
-// side, preserving the existing basis (leased SF, not building SF) but occupancy-weighted over the
-// reconciliation year: each lease that was in effect at any point in the year contributes
-//   sf x (days in effect during the year / days in the year)
-// and the tenant's own numerator is weighted the same way, so the shares of every lease in the
-// pool sum to exactly 100% of recoverable expenses.
+// The pool is NOT the pro-rata denominator any more. Gabriel ruling 2026-11-08: the denominator is
+// the building (or project) RENTABLE SF the lease form names — standard NNN Proportionate Share —
+// so the landlord carries the vacancy share and the leases' shares need not sum to 100%. See
+// resolveTenantShare. The pool still supplies each lease's days in effect (partial-year proration),
+// the same-unit overlap check, and the peak leased SF the denominator RSF must cover.
 // ---------------------------------------------------------------------------
 
 const ISO_DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/
@@ -108,10 +119,11 @@ export function assertNoStaleClosedLeases(
 export interface CAMPool {
   year: number
   daysInYear: number
-  /** The pro-rata denominator: Σ sf x overlapDays / daysInYear over every lease in the pool. */
+  /** Σ sf x overlapDays / daysInYear over every lease in the pool (average leased SF). Display
+   *  only: it is no longer the pro-rata denominator (building RSF ruling, 2026-11-08). */
   weightedLeasedSF: number
-  /** Only leases with overlapDays > 0. */
-  byLease: Record<string, { sf: number; overlapDays: number; weightedSF: number }>
+  /** Only leases with overlapDays > 0. from/to: the in-year part of the term (ISO, inclusive). */
+  byLease: Record<string, { sf: number; overlapDays: number; weightedSF: number; from: string; to: string }>
 }
 
 export function computeCamPool(leases: readonly CAMPoolLeaseInput[], year: number): CAMPool {
@@ -146,10 +158,159 @@ export function computeCamPool(leases: readonly CAMPoolLeaseInput[], year: numbe
     const sf = Number(l.sf)
     if (!Number.isFinite(sf) || sf < 0) throw new CAMTermsError(`Unit SF for lease ${l.id} is not a valid number`)
     const weightedSF = overlapDays === daysInYear ? sf : (sf * overlapDays) / daysInYear
-    byLease[l.id] = { sf, overlapDays, weightedSF }
+    byLease[l.id] = { sf, overlapDays, weightedSF, from: isoOfDay(iv.first), to: isoOfDay(iv.last) }
     weightedLeasedSF += weightedSF
   }
   return { year, daysInYear, weightedLeasedSF, byLease }
+}
+
+const fmtSF = (n: number) => Math.round(n).toLocaleString('en-US')
+const fmtPct = (f: number) => `${(f * 100).toFixed(2)}%`
+
+/** The most SF leased on any single day of the pool's year, and the first day it was reached. */
+export function peakConcurrentLeasedSF(pool: CAMPool): { sf: number; on: string | null } {
+  const { peak, on } = peakConcurrent(pool, (_id, e) => e.sf)
+  return { sf: peak, on }
+}
+
+/**
+ * Over-recovery check (warning only): the sum of the annual shares of the leases in effect on any
+ * single day. Above 100% (+ the 0.5 pp tolerance) the landlord would recover more than the pool —
+ * possible only via stated percentages (the computed basis is capped by assertDenominatorCoversPool).
+ * `annualShareById` holds the resolved annual share of each lease that has one.
+ */
+export function overRecoveryWarning(pool: CAMPool, annualShareById: ReadonlyMap<string, number>): string | null {
+  const { peak, on } = peakConcurrent(pool, (id) => annualShareById.get(id) ?? 0)
+  if (peak <= 1 + SHARE_MISMATCH_TOLERANCE + 1e-12) return null
+  return `The Proportionate Shares of the leases in effect on ${on} total ${fmtPct(peak)}, more than 100% `
+    + 'of recoverable expenses. Check the stated shares and the property\'s rentable SF.'
+}
+
+function peakConcurrent(
+  pool: CAMPool,
+  weight: (id: string, e: CAMPool['byLease'][string]) => number,
+): { peak: number; on: string | null } {
+  // Sweep: +w on the first day, -w the day after the last. Removals sort before additions on the
+  // same day so a back-to-back pair (A ends 06-30, B starts 07-01) never counts both.
+  const events: Array<{ day: number; delta: number }> = []
+  for (const [id, e] of Object.entries(pool.byLease)) {
+    const w = weight(id, e)
+    events.push({ day: isoDay(e.from, 'start_date'), delta: w })
+    events.push({ day: isoDay(e.to, 'end_date') + 1, delta: -w })
+  }
+  events.sort((a, b) => a.day - b.day || a.delta - b.delta)
+  let cur = 0
+  let peak = 0
+  let on: number | null = null
+  for (const ev of events) {
+    cur += ev.delta
+    if (cur > peak) { peak = cur; on = ev.day }
+  }
+  return { peak, on: on === null ? null : isoOfDay(on) }
+}
+
+/**
+ * The denominator RSF must cover every SF leased on any day of the year: a smaller RSF means the
+ * property's cam_denominator_rsf (or a unit's SF) is wrong, and every computed share would be
+ * overstated. Fail closed (CAMTermsError -> 422). No RSF (null): nothing to check.
+ */
+export function assertDenominatorCoversPool(pool: CAMPool, denominatorRSF: number | null): void {
+  if (denominatorRSF === null) return
+  const peak = peakConcurrentLeasedSF(pool)
+  if (peak.sf > denominatorRSF) {
+    throw new CAMTermsError(
+      `The property's CAM denominator (${fmtSF(denominatorRSF)} rentable SF) is smaller than the SF `
+      + `leased in the ${pool.year} CAM pool (${fmtSF(peak.sf)} SF on ${peak.on}). Correct the `
+      + 'property\'s building/project rentable SF or the unit SF, then recalculate.'
+    )
+  }
+}
+
+/** Stated and computed annual shares further apart than this (0.5 percentage points) -> warning. */
+export const SHARE_MISMATCH_TOLERANCE = 0.005
+
+export interface ShareInput {
+  leaseId: string
+  /** leases.proportionate_share_pct: the share the lease states, a fraction in (0, 1], or null. */
+  statedPct: number | null
+  /** The premises' rentable SF (units.sf). */
+  premisesSF: number
+  /** properties.cam_denominator_rsf: the building or project RSF the lease form names, or null. */
+  denominatorRSF: number | null
+  overlapDays: number
+  daysInYear: number
+}
+
+export interface ResolvedShare {
+  basis: CAMShareBasis
+  /** Full-year share under the basis used. */
+  annualPct: number
+  /** annualPct x overlapDays / daysInYear: what is applied to the recoverable pool. */
+  effectivePct: number
+  /** premisesSF / denominatorRSF when an RSF exists (the cross-check), else null. */
+  computedPct: number | null
+  warnings: string[]
+}
+
+/**
+ * Tenant's Proportionate Share (Gabriel ruling 2026-11-08):
+ *   1. the lease-stated % (v3.1 §36 "stated in the Basic Lease Information"; v2.8 §47 "estimated
+ *      to be [X]%"; the single-tenant form's 100%), when set;
+ *   2. otherwise premises RSF / the building or project RSF the lease form names
+ *      (v2.8 §47 "the proportion that the rentable square footage of the Demised Premises bears to
+ *      the total rentable square footage of the Building");
+ *   3. neither -> CAMTermsError (422).
+ * Both present and more than 0.5 pp apart (annual shares) -> a warning, never a refusal.
+ * Prorated by days in effect (v3.1 §35 "prorated for a partial year"; v2.8 §40 "or portion
+ * thereof").
+ */
+export function resolveTenantShare(input: ShareInput): ResolvedShare {
+  const { leaseId, statedPct, premisesSF, denominatorRSF, overlapDays, daysInYear } = input
+  if (statedPct !== null && !(Number.isFinite(statedPct) && statedPct > 0 && statedPct <= 1)) {
+    throw new CAMTermsError(`Lease ${leaseId}: the stated Proportionate Share must be a fraction above 0 and at most 1 (100%)`)
+  }
+  if (denominatorRSF !== null && !(Number.isFinite(denominatorRSF) && denominatorRSF > 0)) {
+    throw new CAMTermsError(`Lease ${leaseId}: the property's CAM denominator rentable SF must be a positive number`)
+  }
+  if (!Number.isFinite(premisesSF) || premisesSF < 0) {
+    throw new CAMTermsError(`Lease ${leaseId}: the premises SF is not a valid number`)
+  }
+  if (!(Number.isInteger(overlapDays) && overlapDays > 0 && overlapDays <= daysInYear)) {
+    throw new CAMTermsError(`Lease ${leaseId}: days in effect must be between 1 and ${daysInYear}`)
+  }
+
+  const computedPct = denominatorRSF === null ? null : premisesSF / denominatorRSF
+  const warnings: string[] = []
+  let basis: CAMShareBasis
+  let annualPct: number
+  if (statedPct !== null) {
+    basis = 'lease_stated_pct'
+    annualPct = statedPct
+    if (computedPct !== null && Math.abs(statedPct - computedPct) > SHARE_MISMATCH_TOLERANCE + 1e-12) {
+      warnings.push(
+        `Lease ${leaseId}: the stated Proportionate Share ${fmtPct(statedPct)} differs from premises `
+        + `${fmtSF(premisesSF)} SF / ${fmtSF(denominatorRSF as number)} rentable SF = ${fmtPct(computedPct)} by more `
+        + 'than 0.5 percentage points. The stated share was used; check the lease and the property\'s rentable SF.'
+      )
+    }
+  } else if (computedPct !== null) {
+    if (computedPct > 1) {
+      throw new CAMTermsError(
+        `Lease ${leaseId}: premises ${fmtSF(premisesSF)} SF exceeds the property's CAM denominator `
+        + `(${fmtSF(denominatorRSF as number)} rentable SF). Correct the unit SF or the property's rentable SF.`
+      )
+    }
+    basis = 'premises_rsf_over_denominator'
+    annualPct = computedPct
+  } else {
+    throw new CAMTermsError(
+      `Lease ${leaseId} has no stated Proportionate Share and its property has no CAM denominator `
+      + '(building or project rentable SF). Enter the lease\'s stated share or the property\'s rentable SF '
+      + 'from the lease form, then recalculate.'
+    )
+  }
+  const effectivePct = overlapDays === daysInYear ? annualPct : (annualPct * overlapDays) / daysInYear
+  return { basis, annualPct, effectivePct, computedPct, warnings }
 }
 
 /**
@@ -166,27 +327,70 @@ export function computeCamPool(leases: readonly CAMPoolLeaseInput[], year: numbe
  *                     comes back as a credit through the negative true-up).
  * `tenantSF` is the SF the stop is applied to, so a caller that occupancy-weights tenantSF for a
  * partial year prorates the stop by the same factor.
- * Base-year stops, CAM caps, admin-fee and gross-up provisions are NOT modelled: the schema has no
- * fields for them.
+ *
+ * Base year (Gabriel ruling 2026-11-08; ORA form v3.1 §35 / v2.8 §40: "Tenant's Proportionate Share
+ * of the amount by which Operating Costs and Taxes for that year exceed those for the Base Year").
+ * When leases.base_year is set, for ANY rent_type:
+ *     owed = share% x max(0, current recoverable - base_year_expense_amount)
+ * The forms compare Operating Costs and Taxes together, matching the single recoverable pool here.
+ * Fails closed (CAMTermsError) on: a base year with no base amount; a base amount with no base year;
+ * a negative/non-finite amount; a reconciliation year before the base year; a gross/modified-gross
+ * lease that also carries an expense stop (two conflicting recovery terms).
+ * Gross-up is NOT applied: both forms make it permissive ("Landlord may ... gross up"), so it is a
+ * landlord election, not a lease requirement. CAM caps and admin fees are not modelled (no fields).
  */
 export function calculateCAMTrueUp(input: CAMInput): CAMOutput {
-  const { totalRecoverableExpenses, tenantSF, totalLeasedSF, estimatedCamPaid } = input
+  const { totalRecoverableExpenses, tenantSF, tenantSharePct, estimatedCamPaid } = input
   const rentType: CAMRentType = input.rentType ?? 'nnn'
   const stop = input.expenseStopPerSF ?? null
+  const baseYear = input.baseYear ?? null
+  const baseAmount = input.baseYearExpenseAmount ?? null
 
-  if (totalLeasedSF === 0) throw new Error('totalLeasedSF cannot be zero')
-  if (tenantSF < 0) throw new Error('tenantSF cannot be negative')
-  if (tenantSF > totalLeasedSF) throw new Error('tenantSF cannot exceed totalLeasedSF')
+  if (!(Number.isFinite(tenantSharePct) && tenantSharePct >= 0 && tenantSharePct <= 1)) {
+    throw new Error('tenant share must be a fraction between 0 and 1')
+  }
+  if (!Number.isFinite(tenantSF) || tenantSF < 0) throw new Error('tenantSF cannot be negative')
   if (stop !== null && (!Number.isFinite(stop) || stop < 0)) {
     throw new CAMTermsError('Lease expense stop must be a non-negative $/SF amount')
   }
 
-  const tenantProRataSharePct = tenantSF / totalLeasedSF
+  const tenantProRataSharePct = tenantSharePct
   const share = totalRecoverableExpenses * tenantProRataSharePct
 
   let owed: number
   let recoveryBasis: CAMRecoveryBasis
-  if (rentType === 'nnn') {
+  if (baseYear === null && baseAmount !== null) {
+    throw new CAMTermsError(
+      'Lease has a base-year expense amount but no base year. Enter the base year (or clear the amount), then recalculate.'
+    )
+  }
+  if (baseYear !== null) {
+    if (baseAmount === null) {
+      throw new CAMTermsError(
+        `Lease has base year ${baseYear} but no base-year expense amount (the ${baseYear} recoverable `
+        + 'Operating Costs and Taxes total). Enter it on the lease, then recalculate.'
+      )
+    }
+    if (!Number.isFinite(baseAmount) || baseAmount < 0) {
+      throw new CAMTermsError('Lease base-year expense amount must be a non-negative dollar amount')
+    }
+    if (input.reconciliationYear === undefined || !Number.isInteger(input.reconciliationYear)) {
+      throw new CAMTermsError('A base-year lease needs the reconciliation year')
+    }
+    if (input.reconciliationYear < baseYear) {
+      throw new CAMTermsError(
+        `Reconciliation year ${input.reconciliationYear} is before the lease's base year ${baseYear}; there is no increase to recover.`
+      )
+    }
+    if (rentType !== 'nnn' && stop !== null) {
+      throw new CAMTermsError(
+        'Lease has both a base year and an expense stop; only one recovery term can apply. Clear the '
+        + 'one the lease does not contain, then recalculate.'
+      )
+    }
+    owed = tenantProRataSharePct * Math.max(0, totalRecoverableExpenses - baseAmount)
+    recoveryBasis = 'above_base_year'
+  } else if (rentType === 'nnn') {
     owed = share
     recoveryBasis = 'full_pro_rata'
   } else if (stop !== null) {

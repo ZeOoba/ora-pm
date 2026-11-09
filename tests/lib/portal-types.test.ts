@@ -45,6 +45,7 @@ describe('portal-api Charge/Lease — schema-derived, no reintroduced field drif
       cam_estimate_monthly: 300,
       security_deposit: 6000,
       expense_stop_amount: null,
+      proportionate_share_pct: null, base_year: null, base_year_expense_amount: null,
       ti_allowance: null,
       ti_reimbursement_schedule: null,
       percentage_rent_terms: null,
