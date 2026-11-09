@@ -32,16 +32,10 @@ describe('POST /api/cron/critical-dates-alerts', () => {
     date_type: 'lease_expiration', reference_id, tenant_name: 'Acme', property_name: '9050 Red Branch', suite: '101',
     critical_date: '2026-07-01', days_until: 26, urgency: 'urgent', ...over,
   })
-  const sentRow = (reference_id: string, recipient = RECIPIENT, notification_type = 'critical_date_alert'): Row =>
-    ({ notification_type, reference_id, recipient })
-  // Enforces UNIQUE(notification_type, reference_id, recipient) (0003_operations_tables.sql) against
-  // `existing`, so a handler that re-inserts an already-sent row gets the production error back.
-  const uniqueInsert = (existing: Row[]) => vi.fn().mockImplementation((rows: Row[]) => {
-    const key = (r: Row) => `${r.notification_type}|${r.reference_id}|${r.recipient}`
-    const have = new Set(existing.map(key))
-    const dup = rows.find(r => have.has(key(r)))
-    return Promise.resolve({ error: dup ? { message: `duplicate key value violates unique constraint (${key(dup)})` } : null })
-  })
+  // OI-321: dedup is per (reference_id, urgency tier) — alert_tier (0019) — so an alert fires
+  // again as it escalates notice -> warning -> urgent -> overdue.
+  const sentRow = (reference_id: string, recipient = RECIPIENT, notification_type = 'critical_date_alert', alert_tier: string | null = 'urgent'): Row =>
+    ({ notification_type, reference_id, recipient, alert_tier })
   function install(crit: ReturnType<typeof pgTable>, sent: ReturnType<typeof pgTable>) {
     mockFrom.mockImplementation((table: string) => {
       if (table === 'critical_dates') return crit
@@ -52,23 +46,25 @@ describe('POST /api/cron/critical-dates-alerts', () => {
   function post() {
     return app.request('/api/cron/critical-dates-alerts', { method: 'POST', headers: { Authorization: 'Bearer test' } }, env)
   }
-  type Body = { new_alerts: number; skipped: number; email: { subject: string; body: string } | null; error?: string }
+  type Body = { new_alerts: number; skipped: number; email: { subject: string; body: string } | null; ack_token?: string | null; error?: string }
+  const tokenAlerts = (b: Body) => (JSON.parse(b.ack_token!) as { v: number; alerts: [string, string][] }).alerts
 
   it('returns 401 without cron secret', async () => {
     const res = await app.request('/api/cron/critical-dates-alerts', { method: 'POST' }, env)
     expect(res.status).toBe(401)
   })
 
-  it('queries critical_dates and returns email: null when no alerts due', async () => {
+  it('queries critical_dates and returns email: null and ack_token: null when no alerts due', async () => {
     install(pgTable([]), pgTable([]))
     const res = await post()
     expect(res.status).toBe(200)
     const body = await res.json() as Body
     expect(body.new_alerts).toBe(0)
     expect(body.email).toBeNull()
+    expect(body.ack_token).toBeNull()
   })
 
-  it('records new alerts and returns a populated email digest, not a Resend call', async () => {
+  it('returns a populated digest plus an ack_token, and records NOTHING before the send is confirmed (OI-321)', async () => {
     const sent = pgTable([])
     install(pgTable([critRow('lease_1')]), sent)
 
@@ -77,23 +73,28 @@ describe('POST /api/cron/critical-dates-alerts', () => {
     const body = await res.json() as Body
     expect(body.new_alerts).toBe(1)
     expect(body.skipped).toBe(0)
-    // Proves the handler called insert with the right dedup rows before
-    // returning this response — it does NOT by itself prove the insert
-    // resolved before the digest was built (that ordering is proven by the
-    // separate "never returns email content when the dedup write fails"
-    // test below, which shows no digest is returned when the insert fails).
-    expect(sent.insert).toHaveBeenCalledWith([
-      { notification_type: 'critical_date_alert', reference_id: 'lease_1', recipient: RECIPIENT },
-    ])
-    expect(body.email).not.toBeNull()
+    // Pre-OI-321 the handler inserted the dedup rows here, so a failed Outlook send lost the
+    // alerts for good. Rows are now written only by POST /critical-dates-alerts/ack.
+    expect(sent.insert).not.toHaveBeenCalled()
+    expect(sent.upsert).not.toHaveBeenCalled()
     expect(body.email!.subject).toContain('1 Critical Date')
     expect(body.email!.body).toContain('Acme')
     expect(body.email!.body).toContain('9050 Red Branch')
-    // Resend is gone — no fetch of any kind from this handler anymore.
+    expect(JSON.parse(body.ack_token!)).toEqual({ v: 1, alerts: [['lease_1', 'urgent']] })
+    // The token carries ids and tiers only, never tenant data.
+    expect(body.ack_token).not.toContain('Acme')
     expect(fetch).not.toHaveBeenCalled()
   })
 
-  it('skips alerts already sent to the (single) recipient', async () => {
+  it('an alert that was never acked is re-reported by the next run (a failed send is not lost)', async () => {
+    const sent = pgTable([])
+    install(pgTable([critRow('lease_1')]), sent)
+    expect((await (await post()).json() as Body).new_alerts).toBe(1)
+    install(pgTable([critRow('lease_1')]), sent)
+    expect((await (await post()).json() as Body).new_alerts).toBe(1)
+  })
+
+  it('skips alerts already acked at the same urgency tier', async () => {
     install(pgTable([critRow('lease_1')]), pgTable([sentRow('lease_1')]))
     const res = await post()
     expect(res.status).toBe(200)
@@ -101,17 +102,26 @@ describe('POST /api/cron/critical-dates-alerts', () => {
     expect(body.new_alerts).toBe(0)
     expect(body.skipped).toBe(1)
     expect(body.email).toBeNull()
+    expect(body.ack_token).toBeNull()
+  })
+
+  it('alerts again when the urgency tier escalates (OI-321: notice was sent, now urgent)', async () => {
+    install(pgTable([critRow('lease_1', { urgency: 'urgent' })]), pgTable([sentRow('lease_1', RECIPIENT, 'critical_date_alert', 'notice')]))
+    const body = await (await post()).json() as Body
+    expect(body.new_alerts).toBe(1)
+    expect(tokenAlerts(body)).toEqual([['lease_1', 'urgent']])
+  })
+
+  it('a legacy row with no tier (pre-0019, not backfilled) does not suppress the alert', async () => {
+    install(pgTable([critRow('lease_1')]), pgTable([sentRow('lease_1', RECIPIENT, 'critical_date_alert', null)]))
+    expect((await (await post()).json() as Body).new_alerts).toBe(1)
   })
 
   it('does not treat a different notification_type for the same reference as already sent', async () => {
-    // UNIQUE is (notification_type, reference_id, recipient): an insurance_expiry row for this id
-    // neither blocks the insert nor means a critical-date alert went out.
-    const sent = pgTable([sentRow('lease_1', RECIPIENT, 'insurance_expiry')])
-    install(pgTable([critRow('lease_1')]), sent)
+    install(pgTable([critRow('lease_1')]), pgTable([sentRow('lease_1', RECIPIENT, 'insurance_expiry')]))
     const res = await post()
     expect(res.status).toBe(200)
     expect((await res.json() as Body).new_alerts).toBe(1)
-    expect(sent.insert).toHaveBeenCalledTimes(1)
   })
 
   it('digest lists alerts by urgency, then soonest first within an urgency', async () => {
@@ -126,37 +136,34 @@ describe('POST /api/cron/critical-dates-alerts', () => {
     expect(text.indexOf('Sooner')).toBeLessThan(text.indexOf('Later'))
   })
 
-  it('never returns email content when the dedup write fails', async () => {
-    install(pgTable([critRow('lease_1')]), pgTable([], { insert: vi.fn().mockResolvedValue({ error: { message: 'boom' } }) }))
+  it('fails closed (500, no digest, no token) on an urgency outside the four known tiers', async () => {
+    // alert_tier has a CHECK constraint; an unknown tier could never be acked, so it would
+    // re-alert every week forever. Contract drift in the view must surface, not loop.
+    install(pgTable([critRow('lease_1', { urgency: 'someday' })]), pgTable([]))
     const res = await post()
     expect(res.status).toBe(500)
-    const body = await res.json() as { error: string; email?: unknown }
-    expect(body.error).toContain('boom')
+    const body = await res.json() as Body
+    expect(body.error).toMatch(/urgency/)
     expect(body.email).toBeUndefined()
-    expect(fetch).not.toHaveBeenCalled()
   })
 
   // PostgREST returns at most `max_rows` (supabase/config.toml, 1000) rows per request and
   // truncates SILENTLY. Each test is built so the pre-fix handler does the wrong thing against a
-  // capped response — drops alerts, or re-inserts a dedup row and 500s — not merely so a length
+  // capped response — drops alerts, or re-reports already-acked ones — not merely so a length
   // check trips.
   describe('PostgREST max_rows truncation', () => {
     const refId = (i: number) => `ref_${String(i).padStart(5, '0')}`
 
     it('alerts on EVERY critical date when the view exceeds one PostgREST page (keyset-paged on reference_id, not truncated)', async () => {
-      // Direction: DROPPED alerts. critical_dates has no lower date bound, so overdue history
-      // accumulates; past row 1000 the pre-fix handler never alerts on the rest, with a 200.
       const ids = Array.from({ length: PG_MAX_ROWS + 1 }, (_, i) => refId(i))
       const crit = pgTable(ids.map(id => critRow(id)))
-      const sent = pgTable([])
-      install(crit, sent)
+      install(crit, pgTable([]))
 
       const res = await post()
       expect(res.status).toBe(200)
       const body = await res.json() as Body
       expect(body.new_alerts).toBe(ids.length)
-      const inserted = sent.insert.mock.calls.flatMap(c => c[0] as Row[]).map(r => r.reference_id)
-      expect(new Set(inserted)).toEqual(new Set(ids))
+      expect(new Set(tokenAlerts(body).map(a => a[0]))).toEqual(new Set(ids))
       expect(crit.pages).toHaveLength(2)
       for (const page of crit.pages) {
         expect(page.find(c => c.method === 'order')?.args[0]).toBe('reference_id')
@@ -164,26 +171,28 @@ describe('POST /api/cron/critical-dates-alerts', () => {
       }
     })
 
-    it('fails closed (500, nothing recorded) if a critical_dates page does not advance the reference_id cursor', async () => {
+    it('fails closed (500, no digest) if a critical_dates page does not advance the reference_id cursor', async () => {
       const crit = pgTable(Array.from({ length: PG_MAX_ROWS }, (_, i) => critRow(refId(i))), { ignoreGt: 'reference_id' })
-      const sent = pgTable([])
-      install(crit, sent)
+      install(crit, pgTable([]))
 
       const res = await post()
       expect(res.status).toBe(500)
       expect((await res.json() as Body).error).toMatch(/keyset page/)
-      expect(sent.insert).not.toHaveBeenCalled()
       expect(crit.pages.length).toBeLessThanOrEqual(3)
     })
 
-    it('never re-inserts an already-sent dedup row when sent_notifications for the batch exceeds one page', async () => {
-      // Direction: PERMANENT 500. 600 dates already alerted, but each id also carries a row for a
-      // retired recipient, so the unfiltered pre-fix read returns 1200 rows, capped at 1000. The
-      // current recipient's rows past the cap read as unsent -> re-inserted -> UNIQUE violation ->
-      // 500 on every run from then on.
-      const ids = Array.from({ length: 600 }, (_, i) => refId(i))
-      const sentRows = [...ids.map(id => sentRow(id, 'retired@oxfordra.net')), ...ids.map(id => sentRow(id))]
-      const sent = pgTable(sentRows, { insert: uniqueInsert(sentRows) })
+    it('never re-reports an already-acked alert when sent_notifications for the batch exceeds one page', async () => {
+      // 300 dates already acked at this tier, each also carrying rows for a retired recipient and
+      // two older tiers: the unfiltered read is 1200 rows, capped at 1000. Rows past the cap must
+      // not read as unsent.
+      const ids = Array.from({ length: 300 }, (_, i) => refId(i))
+      const sentRows = [
+        ...ids.map(id => sentRow(id, 'retired@oxfordra.net')),
+        ...ids.map(id => sentRow(id, RECIPIENT, 'critical_date_alert', 'notice')),
+        ...ids.map(id => sentRow(id, RECIPIENT, 'critical_date_alert', 'warning')),
+        ...ids.map(id => sentRow(id)),
+      ]
+      const sent = pgTable(sentRows)
       install(pgTable(ids.map(id => critRow(id))), sent)
 
       const res = await post()
@@ -191,15 +200,12 @@ describe('POST /api/cron/critical-dates-alerts', () => {
       const body = await res.json() as Body
       expect(body.new_alerts).toBe(0)
       expect(body.skipped).toBe(ids.length)
-      expect(sent.insert).not.toHaveBeenCalled()
-      // Chunked: no single `.in('reference_id', ...)` carries an unbounded id list (URL length).
       const idLists = sent.pages.map(p => p.find(c => c.method === 'in' && c.args[0] === 'reference_id')?.args[1] as unknown[])
       expect(idLists.length).toBeGreaterThan(1)
       for (const list of idLists) expect(list.length).toBeLessThanOrEqual(100)
     })
 
-    it('fails closed (500, nothing recorded, no email) when the sent_notifications dedup read errors', async () => {
-      // Pre-fix the error was never checked: every alert read as unsent and was re-inserted.
+    it('fails closed (500, no email) when the sent_notifications dedup read errors', async () => {
       const sent = pgTable([], { error: { message: 'dedup read failed' } })
       install(pgTable([critRow('lease_1')]), sent)
 
@@ -208,8 +214,105 @@ describe('POST /api/cron/critical-dates-alerts', () => {
       const body = await res.json() as { error: string; email?: unknown }
       expect(body.error).toContain('dedup read failed')
       expect(body.email).toBeUndefined()
-      expect(sent.insert).not.toHaveBeenCalled()
     })
+  })
+})
+
+describe('POST /api/cron/critical-dates-alerts/ack (OI-321)', () => {
+  const RECIPIENT = 'ggoldberg@oxfordra.net'
+  const U1 = '11111111-1111-4111-8111-111111111111'
+  const U2 = '22222222-2222-4222-8222-222222222222'
+  const token = (alerts: unknown, v: unknown = 1) => JSON.stringify({ v, alerts })
+  function ack(body: unknown, auth = true) {
+    return app.request('/api/cron/critical-dates-alerts/ack', {
+      method: 'POST',
+      headers: { ...(auth ? { Authorization: 'Bearer test' } : {}), 'Content-Type': 'application/json' },
+      body: typeof body === 'string' ? body : JSON.stringify(body),
+    }, env)
+  }
+  function installSent(sent: ReturnType<typeof pgTable>) {
+    mockFrom.mockImplementation((table: string) => {
+      if (table === 'sent_notifications') return sent
+      return { select: vi.fn() }
+    })
+  }
+
+  it('returns 401 without cron secret, and writes nothing', async () => {
+    const sent = pgTable([])
+    installSent(sent)
+    const res = await ack({ ack_token: token([[U1, 'urgent']]) }, false)
+    expect(res.status).toBe(401)
+    expect(sent.upsert).not.toHaveBeenCalled()
+  })
+
+  it('records one dedup row per acked (reference_id, tier), idempotently', async () => {
+    const sent = pgTable([])
+    installSent(sent)
+    const res = await ack({ ack_token: token([[U1, 'urgent'], [U2, 'notice']]) })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ recorded: 2 })
+    expect(sent.upsert).toHaveBeenCalledTimes(1)
+    expect(sent.upsert).toHaveBeenCalledWith(
+      [
+        { notification_type: 'critical_date_alert', reference_id: U1, recipient: RECIPIENT, alert_tier: 'urgent' },
+        { notification_type: 'critical_date_alert', reference_id: U2, recipient: RECIPIENT, alert_tier: 'notice' },
+      ],
+      { onConflict: 'notification_type,reference_id,recipient,alert_tier', ignoreDuplicates: true },
+    )
+  })
+
+  it('chunks a large ack into bounded upserts', async () => {
+    const sent = pgTable([])
+    installSent(sent)
+    const ids = Array.from({ length: 1201 }, (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`)
+    const res = await ack({ ack_token: token(ids.map(id => [id, 'notice'])) })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ recorded: 1201 })
+    const sizes = sent.upsert.mock.calls.map(c => (c[0] as unknown[]).length)
+    expect(sizes.reduce((a, b) => a + b, 0)).toBe(1201)
+    for (const n of sizes) expect(n).toBeLessThanOrEqual(500)
+  })
+
+  it.each([
+    ['a non-JSON body', 'not json'],
+    ['no ack_token', {}],
+    ['a non-string ack_token', { ack_token: 5 }],
+    ['an ack_token that is not JSON', { ack_token: 'nope' }],
+    ['an unknown token version', { ack_token: token([[U1, 'urgent']], 2) }],
+    ['an empty alert list', { ack_token: token([]) }],
+    ['a non-uuid reference_id', { ack_token: token([['lease_1', 'urgent']]) }],
+    ['an unknown tier', { ack_token: token([[U1, 'someday']]) }],
+    ['a malformed pair', { ack_token: token([[U1]]) }],
+    ['more than 5000 alerts', { ack_token: token(Array.from({ length: 5001 }, () => [U1, 'urgent'])) }],
+  ])('rejects %s with 400 and writes nothing', async (_name, body) => {
+    const sent = pgTable([])
+    installSent(sent)
+    const res = await ack(body)
+    expect(res.status).toBe(400)
+    expect(sent.upsert).not.toHaveBeenCalled()
+  })
+
+  it('returns 500 when the dedup write fails, so the caller reports the ack as failed', async () => {
+    installSent(pgTable([], { upsert: vi.fn().mockResolvedValue({ error: { message: 'boom' } }) }))
+    const res = await ack({ ack_token: token([[U1, 'urgent']]) })
+    expect(res.status).toBe(500)
+    expect((await res.json() as { error: string }).error).toContain('boom')
+  })
+
+  it('round-trips: a token minted by /critical-dates-alerts is accepted by /ack', async () => {
+    const sent = pgTable([])
+    mockFrom.mockImplementation((table: string) => {
+      if (table === 'critical_dates') return pgTable([{
+        date_type: 'insurance_expiry', reference_id: U1, tenant_name: 'Acme', property_name: null, suite: null,
+        critical_date: '2026-07-01', days_until: 50, urgency: 'warning',
+      }])
+      if (table === 'sent_notifications') return sent
+      return { select: vi.fn() }
+    })
+    const first = await (await app.request('/api/cron/critical-dates-alerts', { method: 'POST', headers: { Authorization: 'Bearer test' } }, env)).json() as { ack_token: string }
+    const res = await ack({ ack_token: first.ack_token })
+    expect(res.status).toBe(200)
+    expect(sent.upsert.mock.calls[0][0]).toEqual([{ notification_type: 'critical_date_alert', reference_id: U1, recipient: RECIPIENT, alert_tier: 'warning' }])
   })
 })
 
