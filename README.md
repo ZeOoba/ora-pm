@@ -173,6 +173,10 @@ scripts/
   check-migrations-applied.mjs  CI deploy gate: fails closed if a local migration is not applied remotely
   check-refute-required.ts      CI gate (npm run check:refute): financial-decision files need a Refute-Reviewed / Refute-Skip commit trailer
   prepare-migration-for-dashboard.mjs   Wraps a migration + tracking INSERT for the Dashboard-paste fallback
+  prepush_confidential_scan.py  Fail-closed git pre-push gate (Invariant 3; this repo is public): blocks a push carrying
+                                any active term from ~/.claude/hooks/confidential-terms.json; never prints terms.
+                                Install once per clone: python scripts/install_prepush_hook.py (shim: git-hooks/pre-push);
+                                tests: test_prepush_confidential_scan.py (CI). Same file as in ora-skills / website-canonical
   verify-rls.sql                Manual, read-only check that the claimed RLS policies exist on the live database
 evals/lease-intake-model-eval/  Opt-in accuracy eval for INTAKE_MODEL candidates (synthetic fixtures; real API cost) -
                                 npm run eval:lease-intake-model; see its README
