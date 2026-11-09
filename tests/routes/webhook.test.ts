@@ -239,4 +239,55 @@ describe('POST /api/webhooks/stripe', () => {
     expect(res.status).toBe(500)
     expect(mockHandleStripeEvent).not.toHaveBeenCalled()
   })
+
+  // E8 (PR #53 REFUTE follow-up): neither status write was error-checked. A failed 'processed'
+  // write returned 200, so Stripe stopped retrying while the row stayed 'pending'. That is safe
+  // only by accident; the route now reports it (500 -> Stripe retries -> the CAS-guarded handler
+  // re-runs as a no-op and the processed write gets another chance) and logs it.
+  it('E8: returns 500 (Stripe retries) and logs when the processed-status write fails', async () => {
+    const fakeEvent = { id: 'evt_mark_fail', type: 'payment_intent.succeeded', data: { object: { id: 'pi_x' } } }
+    mockConstructEventAsync.mockResolvedValue(fakeEvent)
+    mockHandleStripeEvent.mockResolvedValue(undefined)
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    const { insert } = makeInsert(null)
+    const { update } = makeUpdateChain({ code: '08006', message: 'connection reset while marking processed' })
+    mockFrom.mockReturnValue({ insert, update })
+
+    const res = await app.request('/api/webhooks/stripe', {
+      method: 'POST',
+      headers: { 'stripe-signature': 'sig_test' },
+      body: JSON.stringify(fakeEvent),
+    }, env)
+    expect(res.status).toBe(500)
+    const json = await res.json() as { error: string }
+    expect(json.error).not.toMatch(/connection reset/) // generic public message
+    expect(mockHandleStripeEvent).toHaveBeenCalledTimes(1)
+    expect(update).toHaveBeenCalledWith({ status: 'processed' })
+    expect(errSpy.mock.calls.flat().join(' ')).toMatch(/evt_mark_fail/)
+    errSpy.mockRestore()
+  })
+
+  it('E8: still returns 500 and logs both failures when the handler throws AND the failed-status write fails', async () => {
+    const fakeEvent = { id: 'evt_double_fail', type: 'payment_intent.succeeded', data: { object: {} } }
+    mockConstructEventAsync.mockResolvedValue(fakeEvent)
+    mockHandleStripeEvent.mockRejectedValue(new Error('handler blew up'))
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    const { insert } = makeInsert(null)
+    const { update } = makeUpdateChain({ code: '08006', message: 'connection reset while marking failed' })
+    mockFrom.mockReturnValue({ insert, update })
+
+    const res = await app.request('/api/webhooks/stripe', {
+      method: 'POST',
+      headers: { 'stripe-signature': 'sig_test' },
+      body: JSON.stringify(fakeEvent),
+    }, env)
+    expect(res.status).toBe(500)
+    expect(update).toHaveBeenCalledWith({ status: 'failed' })
+    const logged = errSpy.mock.calls.flat().map(String).join(' ')
+    expect(logged).toMatch(/evt_double_fail/)
+    expect(logged).toMatch(/marking failed/)
+    errSpy.mockRestore()
+  })
 })

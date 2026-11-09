@@ -53,11 +53,24 @@ webhookRouter.post('/stripe', async (c) => {
   try {
     await handleStripeEvent(event, db)
   } catch (err) {
-    await db.from('stripe_webhook_events').update({ status: 'failed' }).eq('id', event.id)
+    const { error: markFailedError } = await db.from('stripe_webhook_events').update({ status: 'failed' }).eq('id', event.id)
+    if (markFailedError) {
+      // The 500 below already makes Stripe retry, and a row left 'pending' is re-run on retry
+      // exactly like a 'failed' one (only 'processed' is skipped), so this is log-only.
+      console.error(`[ORA PM] webhook ${event.id} (${event.type}): could not mark event failed:`, markFailedError.code, markFailedError.message)
+    }
     return dbError(c, err as Error, 'Event handling failed')
   }
 
-  await db.from('stripe_webhook_events').update({ status: 'processed' }).eq('id', event.id)
+  // E8: an unchecked write here returned 200 with the row still 'pending', so Stripe stopped
+  // retrying and the idempotency ledger silently disagreed with what was applied. Report it
+  // instead: a 500 makes Stripe redeliver, and re-running the handler is safe because every
+  // payments transition in stripe-events.ts is a compare-and-swap (a replay matches no row).
+  const { error: markProcessedError } = await db.from('stripe_webhook_events').update({ status: 'processed' }).eq('id', event.id)
+  if (markProcessedError) {
+    console.error(`[ORA PM] webhook ${event.id} (${event.type}): handled, but could not mark processed; returning 500 so Stripe retries`)
+    return dbError(c, markProcessedError, 'Failed to record event status')
+  }
 
   return c.json({ received: true })
 })
