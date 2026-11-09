@@ -106,6 +106,18 @@ describe('migration 0019 — sent_notifications.alert_tier / alert_date (runtime
     expect(db.many(`SELECT 1 FROM sent_notifications WHERE alert_tier IS NOT NULL`)).toHaveLength(4)
   })
 
+  it('backfill leaves a row untagged when its date was edited after the send (more than 90 days past sent_at)', () => {
+    // REFUTE round 2: the old Worker only alerted dates within 90 days of the send, so a date
+    // further out was re-dated afterwards; tagging it would record an alert that never went out.
+    db.none(`CREATE TABLE critical_dates (reference_id UUID, critical_date DATE, urgency TEXT)`)
+    db.none(`INSERT INTO critical_dates VALUES ('${R1}', '2026-12-10', 'notice'), ('${R2}', '2026-12-04', 'notice')`)
+    ins(db, R1, null, null, { sentAt: '2026-09-05T13:00:00Z' })   // 96 days -> re-dated -> untagged
+    ins(db, R2, null, null, { sentAt: '2026-09-05T13:00:00Z' })   // exactly 90 days -> notice
+    db.none(backfillStatement())
+    expect(row(db, R1).alert_tier).toBeNull()
+    expect(row(db, R2).alert_tier).toBe('notice')
+  })
+
   it('the backfill uses the view thresholds (30 / 60 days, past due = overdue)', () => {
     const sql = backfillStatement()
     expect(sql).toMatch(/<\s*sent_notifications\.sent_at::date\s+THEN\s+'overdue'/)

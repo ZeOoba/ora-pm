@@ -61,4 +61,8 @@ UPDATE sent_notifications
   FROM critical_dates cd
   WHERE sent_notifications.notification_type = 'critical_date_alert'
     AND sent_notifications.alert_tier IS NULL
-    AND cd.reference_id = sent_notifications.reference_id;
+    AND cd.reference_id = sent_notifications.reference_id
+    -- The old Worker only ever alerted dates within its 90-day horizon of the send. A date further
+    -- out was re-dated after the alert (e.g. a lease extended in place): tagging it would record an
+    -- alert that never went out, so it stays untagged and alerts afresh.
+    AND cd.critical_date <= sent_notifications.sent_at::date + 90;
