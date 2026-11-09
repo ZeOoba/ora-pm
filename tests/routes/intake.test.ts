@@ -3,6 +3,7 @@ import { Hono } from 'hono'
 import { intakeRouter } from '../../server/routes/intake'
 import { createApp } from '../../server/index'
 import { buildTextPdf, buildImageOnlyPdf, buildMultiPagePdf, buildImagePlusFooterPdf, buildFormFieldPdf, toBase64 } from '../fixtures/pdf'
+import { buildRefuteProbes, buildLinkUrlTermPdf, buildZeroPagePdf, BENIGN_LINE } from '../fixtures/refute-pdfs'
 
 const env = { ANTHROPIC_API_KEY: 'sk-test', CONFIDENTIAL_TERMS: 'zeta,99999' }
 function app() { const a = new Hono(); a.route('/intake', intakeRouter); return a }
@@ -339,31 +340,67 @@ describe('per-page text-layer gate (partial text layer)', () => {
 })
 
 // ---------------------------------------------------------------------------
-// REFUTE C1b: the per-page text gate was not fail-closed. (G) a page painting an image plus a
-// 25+ char footer still egressed the whole PDF; (A) AcroForm field values are never in
-// getTextContent. Any image XObject, form field or (non-link) annotation now blocks, and
-// annotation/field text is run through the term scan.
+// REFUTE C1b + round 2: a PDF can paint content pdf.js never extracts (images, form-field and
+// annotation appearances, a lying ToUnicode map, outlined glyphs, Type3 image glyphs...). Instead
+// of trying to detect every such construct, the request to Anthropic now carries ONLY the scanned
+// per-page text: whatever pdf.js could not see is never sent. Annotation/form-field text is still
+// scanned for terms (blocks), but it is not part of the outgoing text either.
 // ---------------------------------------------------------------------------
-describe('image / form-field gate (REFUTE C1b)', () => {
-  const post = (pdfBytes: Uint8Array) => app().request('/intake/lease',
-    body({ filename: 'acme-lease.pdf', pdfBase64: toBase64(pdfBytes), tenant_id: 't', unit_id: 'u' }), env)
+type SentRequest = { messages: Array<{ content: Array<{ type: string; text?: string }> }> }
+function okFetch() {
+  return vi.fn().mockResolvedValue({
+    ok: true,
+    json: async () => ({ content: [{ type: 'tool_use', name: 'extract_lease', input: { base_rent_monthly: 4500, _confidence: {} } }] }),
+  })
+}
+function sentBody(fetchMock: ReturnType<typeof vi.fn>): { raw: string; json: SentRequest } {
+  const raw = (fetchMock.mock.calls[0][1] as RequestInit).body as string
+  return { raw, json: JSON.parse(raw) as SentRequest }
+}
 
-  it('(G) 422 and NO egress for an image page whose footer clears the text threshold', async () => {
-    const fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock)
-    const res = await post(await buildImagePlusFooterPdf('CONFIDENTIAL  ORA-000123  Page 3 of 20'))
-    expect(res.status).toBe(422)
-    const json = await res.json() as { error: string }
-    expect(json.error).toMatch(/text-only/i)
-    expect(json.error).toMatch(/image/i)
-    expect(fetchMock).not.toHaveBeenCalled()
+describe('egress is exactly the scanned text (REFUTE C1b, round 2)', () => {
+  const post = (pdfBytes: Uint8Array, terms = env.CONFIDENTIAL_TERMS) => app().request('/intake/lease',
+    body({ filename: 'acme-lease.pdf', pdfBase64: toBase64(pdfBytes), tenant_id: 't', unit_id: 'u' }),
+    { ...env, CONFIDENTIAL_TERMS: terms })
+
+  it('a clean document: the request has only text blocks, page-separated, and never the PDF bytes', async () => {
+    const fetchMock = okFetch(); vi.stubGlobal('fetch', fetchMock)
+    const pdf = await buildMultiPagePdf(['Commercial lease cover sheet for the premises', 'Base rent schedule and the term of the lease'])
+    const res = await post(pdf)
+    expect(res.status).toBe(200)
+    const { raw, json } = sentBody(fetchMock)
+    expect(json.messages[0].content.every(b => b.type === 'text')).toBe(true)
+    expect(raw).not.toContain(toBase64(pdf).slice(0, 40))
+    expect(raw).not.toMatch(/"document"|application\/pdf|"base64"/)
+    expect(raw).toMatch(/--- Page 1 of 2 ---/)
+    expect(raw).toContain('Base rent schedule')
   })
 
-  it('(A) 422 and NO egress when the confidential term is only in a form-field value', async () => {
+  it('(G) an image page with a typed footer now proceeds: only the footer text is sent, with a warning', async () => {
+    const fetchMock = okFetch(); vi.stubGlobal('fetch', fetchMock)
+    const pdf = await buildImagePlusFooterPdf('CONFIDENTIAL  ORA-000123  Page 3 of 20')
+    const res = await post(pdf)
+    expect(res.status).toBe(200)
+    const { raw } = sentBody(fetchMock)
+    expect(raw).toContain('ORA-000123')
+    expect(raw).not.toContain(toBase64(pdf).slice(0, 40))
+    const json = await res.json() as { warnings: string[] }
+    expect(json.warnings.join(' ')).toMatch(/image/i)
+  })
+
+  it('(A) a confidential term only in a form-field value still blocks with no egress', async () => {
     const fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock)
     const res = await post(await buildFormFieldPdf('Lease Agreement - Exhibit B - Page 3', 'Zeta Partners'))
     expect(res.status).toBe(422)
     expect(((await res.json()) as { error: string }).error).toMatch(/confidential/i)
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('a harmless form field proceeds, and its value is NOT part of the outgoing text', async () => {
+    const fetchMock = okFetch(); vi.stubGlobal('fetch', fetchMock)
+    const res = await post(await buildFormFieldPdf('Lease Agreement - Exhibit B - Page 3', 'Acme Logistics'))
+    expect(res.status).toBe(200)
+    expect(sentBody(fetchMock).raw).not.toContain('Acme Logistics')
   })
 
   it('(probe D) 422 and NO egress for a term split across a page break', async () => {
@@ -372,19 +409,39 @@ describe('image / form-field gate (REFUTE C1b)', () => {
       'This lease is between the Landlord, ZZP',
       'Partnership, and the Tenant named herein below.',
     ])
-    const res = await app().request('/intake/lease',
-      body({ filename: 'acme-lease.pdf', pdfBase64: toBase64(pdf), tenant_id: 't', unit_id: 'u' }),
-      { ...env, CONFIDENTIAL_TERMS: 'zeta,ZZP Partnership' })
+    const res = await post(pdf, 'zeta,ZZP Partnership')
     expect(res.status).toBe(422)
     expect(((await res.json()) as { error: string }).error).toMatch(/confidential/i)
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('422 and NO egress for a form field even when its value is harmless (unscannable-by-design)', async () => {
+  // intake-probe2.mjs P1-P7: the term is painted in a way pdf.js does not extract. Whatever the
+  // gate decides, the term and the raw PDF must never be in an outgoing request.
+  it.each(['P1_link_appearance_stream', 'P2_lying_tounicode', 'P3_outlined_text', 'P4_image_in_tiling_pattern', 'P5_image_in_form_xobject', 'P6_type3_glyph_image', 'P7_shading'])(
+    'probe %s: the hidden term never leaves, and neither does the PDF', async (name) => {
+      const fetchMock = okFetch(); vi.stubGlobal('fetch', fetchMock)
+      const pdf = (await buildRefuteProbes('Blueridge Partners'))[name]
+      const res = await post(pdf, 'Blueridge Partners')
+      expect([200, 422]).toContain(res.status)
+      for (const call of fetchMock.mock.calls) {
+        const raw = (call[1] as RequestInit).body as string
+        expect(raw).not.toMatch(/blueridge/i)
+        expect(raw).not.toContain(toBase64(pdf).slice(0, 40))
+        expect(raw).toContain(BENIGN_LINE.slice(0, 30))
+      }
+    })
+
+  it('probe P8: a Link URL carrying the term blocks (URLs are scanned)', async () => {
     const fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock)
-    const res = await post(await buildFormFieldPdf('Lease Agreement - Exhibit B - Page 3', 'Acme Logistics'))
+    const res = await post(buildLinkUrlTermPdf('https://blueridge-partners.com/x'), 'Blueridge Partners')
     expect(res.status).toBe(422)
-    expect(((await res.json()) as { error: string }).error).toMatch(/form field|annotation/i)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('probe P9: a zero-page PDF blocks with no egress', async () => {
+    const fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock)
+    const res = await post(buildZeroPagePdf())
+    expect(res.status).toBe(422)
     expect(fetchMock).not.toHaveBeenCalled()
   })
 })

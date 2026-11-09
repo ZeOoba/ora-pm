@@ -14,7 +14,7 @@ describe('expense stop unit is labelled $/SF/yr at every capture point', () => {
   })
 
   it('the lease-extract tool schema describes expense_stop_amount as $/SF per year', () => {
-    const tool = buildExtractionRequest('JVBER', 'model').tools[0]
+    const tool = buildExtractionRequest(['page'], 'model').tools[0]
     const desc = (tool.input_schema.properties.expense_stop_amount as { description?: string }).description ?? ''
     expect(desc).toMatch(/\$\/SF/)
     expect(desc).toMatch(/per year|\/yr/i)

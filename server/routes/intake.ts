@@ -103,16 +103,18 @@ intakeRouter.post('/lease', async (c) => {
   // carry a text layer of at least MIN_PAGE_TEXT_CHARS non-whitespace characters (rationale for the
   // threshold: server/lib/pdf-extract.ts), or the request fails closed with no egress.
   //
-  // REFUTE C1b: per-page text alone was still not fail-closed. A page can paint a raster image (a
-  // scanned page, a logo) AND carry a 25+ char typed footer, and AcroForm/annotation content is
-  // rendered by viewers yet invisible to getTextContent; both rode along inside the raw PDF. So:
-  //   1. the term scan covers page text AND every annotation/form-field string (inspectPdf);
-  //   2. any page that paints an image XObject, any non-link annotation and any AcroForm field
-  //      blocks the request outright, because that content cannot be scanned.
-  // DELIBERATE TRADEOFF: legitimate leases that carry a logo, a signature image or form fields now
-  // get a 422 and must be re-exported text-only (or entered manually). A pre-egress confidentiality
-  // gate that cannot see part of the document must refuse it; false refusals cost a manual entry,
-  // a false pass costs a confidential document leaving the firm.
+  // REFUTE C1b (rounds 1-2): a PDF can paint content pdf.js never extracts: raster images (a
+  // scanned page behind a typed footer), AcroForm / annotation appearances (including a Link /AP
+  // stream), a lying ToUnicode map, outlined or Type3 glyphs, images inside patterns. Detecting
+  // every such construct is not tractable, so the fix changes WHAT LEAVES instead: extractLease
+  // receives the scanned per-page text (inspection.pages) and never the raw PDF bytes, so the
+  // outgoing request is exactly the text this scan cleared. Consequently:
+  //   1. the term scan covers page text AND every annotation/form-field string (inspectPdf) — the
+  //      latter is not in the outgoing text, but a term there still marks a confidential matter;
+  //   2. images, form fields and annotations no longer block (they are simply not sent); a warning
+  //      tells the user which pages carried content the extraction did not see;
+  //   3. the per-page MIN_PAGE_TEXT_CHARS rule stays: a scanned page has no text to send, and a
+  //      lease missing pages would extract wrong terms, so it still blocks.
   const inspection = await safeDecodeAndInspect(pdfBase64)
   const pages = inspection?.pages ?? null
   // Pages joined with a newline: a term split across a page break still matches (whitespace runs
@@ -140,24 +142,26 @@ intakeRouter.post('/lease', async (c) => {
       : `page(s) ${lacking.join(', ')} of ${pages.length} have no usable text layer (fewer than ${MIN_PAGE_TEXT_CHARS} characters)`
     return c.json({
       error: `Content scan unavailable for this document (image-based/scanned PDF: ${where}). `
-        + TEXT_ONLY_REQUIREMENT,
+        + 'Enter this lease manually, or convert it to a fully text-based PDF and re-upload.',
     }, 422)
   }
-  const unscannable = describeUnscannable(inspection!)
-  if (unscannable) {
-    return c.json({ error: `Content scan unavailable for this document: it contains ${unscannable}. ${TEXT_ONLY_REQUIREMENT}` }, 422)
-  }
+  const scanned = inspection!
 
   let result
   try {
     const model = resolveModel(c.env.INTAKE_MODEL)
-    result = await extractLease(pdfBase64, { apiKey: c.env.ANTHROPIC_API_KEY, model })
+    // Scanned text only — never pdfBase64 (see the REFUTE C1b comment above).
+    result = await extractLease(scanned.pages, { apiKey: c.env.ANTHROPIC_API_KEY, model })
   } catch {
     return c.json({ error: 'Lease extraction failed. Enter the lease manually.' }, 502)
   }
 
   // Post-egress defense: scrub any field whose text hits the denylist.
   const warnings = [...result.warnings]
+  const notSent = describeNotSent(scanned)
+  if (notSent) {
+    warnings.push(`Only the document's extracted text was sent for extraction; ${notSent} were not. Check the extracted fields against the document.`)
+  }
   const fields: Record<string, unknown> = {}
   for (const [k, v] of Object.entries(result.fields)) {
     if (typeof v === 'string' && containsConfidentialTerm(v, terms)) {
@@ -169,14 +173,9 @@ intakeRouter.post('/lease', async (c) => {
   return c.json({ fields, confidence: result.confidence, warnings })
 })
 
-const TEXT_ONLY_REQUIREMENT =
-  'Lease intake only accepts text-only PDFs: no embedded images (scanned pages, logos, signature '
-  + 'images), form fields or annotations, because that content cannot be scanned for confidential '
-  + 'terms before the PDF is sent for extraction. Re-export the lease as a text-only PDF (an '
-  + 'OCR-flattened copy qualifies only if the page images were removed), or enter it manually.'
-
-/** Human-readable list of the content that makes a document unscannable, or null if none. */
-function describeUnscannable(i: PdfInspection): string | null {
+/** Human-readable list of page content that was NOT sent for extraction (images, form fields,
+ *  annotations), or null if none. Informational only: nothing here blocks. */
+function describeNotSent(i: PdfInspection): string | null {
   const parts: string[] = []
   if (i.imagePages.length > 0) parts.push(`embedded images on page(s) ${i.imagePages.join(', ')}`)
   if (i.annotationPages.length > 0) parts.push(`form fields or annotations on page(s) ${i.annotationPages.join(', ')}`)

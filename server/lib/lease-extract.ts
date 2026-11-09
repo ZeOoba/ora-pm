@@ -2,6 +2,14 @@ import { z } from 'zod'
 
 // Anthropic lease extraction. The model is asked to fill an extract_lease tool whose
 // schema mirrors the writable LeaseForm fields, plus a _confidence map (0..1 per field).
+//
+// INPUT IS SCANNED TEXT ONLY (REFUTE C1b round 2): the request carries the per-page text that the
+// intake confidentiality scan already cleared, never the raw PDF. A PDF can paint content pdf.js
+// does not extract (images, form-field / annotation appearances, a lying ToUnicode map, outlined or
+// Type3 glyphs); sending the raw bytes would send that unscanned content too. Sending only the
+// scanned text makes "what leaves" identical to "what was scanned". Accepted tradeoff: extraction
+// quality can drop on complex layouts (tables, multi-column, rent schedules in images) because the
+// model no longer sees the rendered page.
 export type ExtractedFields = Record<string, unknown>
 
 // Server-side validation of the model's tool output. Unknown keys are stripped;
@@ -26,7 +34,7 @@ export interface ExtractionResult {
 
 const EXTRACT_TOOL = {
   name: 'extract_lease',
-  description: 'Return the lease terms found in the document. Omit any field not clearly stated.',
+  description: 'Return the lease terms found in the extracted lease text. Omit any field not clearly stated in the text.',
   input_schema: {
     type: 'object',
     properties: {
@@ -44,7 +52,14 @@ const EXTRACT_TOOL = {
   },
 } as const
 
-export function buildExtractionRequest(pdfBase64: string, model: string) {
+/** One text block: every scanned page, in order, under a "--- Page n of N ---" separator. */
+function formatPages(pages: readonly string[]): string {
+  return pages.map((text, i) => `--- Page ${i + 1} of ${pages.length} ---\n${text}`).join('\n\n')
+}
+
+export function buildExtractionRequest(pages: readonly string[], model: string) {
+  // Runtime guard as well as the type: a raw base64 PDF string must never reach this request.
+  if (!Array.isArray(pages)) throw new TypeError('buildExtractionRequest expects scanned page text (string[]), not a PDF')
   return {
     model,
     max_tokens: 1024,
@@ -53,8 +68,14 @@ export function buildExtractionRequest(pdfBase64: string, model: string) {
     messages: [{
       role: 'user',
       content: [
-        { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdfBase64 } },
-        { type: 'text', text: 'Extract the lease terms into the extract_lease tool. Only include fields clearly stated in the document; set a _confidence value (0..1) for each field you fill.' },
+        {
+          type: 'text',
+          text: 'Below is the extracted text of a commercial lease, page by page. Text was extracted '
+            + 'from a PDF, so layout, tables and images are not preserved and words may be split '
+            + 'across lines. Extract the lease terms into the extract_lease tool. Only include fields '
+            + 'clearly stated in the text; set a _confidence value (0..1) for each field you fill.\n\n'
+            + formatPages(pages),
+        },
       ],
     }],
   }
@@ -86,7 +107,7 @@ export function parseExtractionResponse(json: unknown): ExtractionResult {
 }
 
 export async function extractLease(
-  pdfBase64: string,
+  pages: readonly string[],
   opts: { apiKey: string; model: string },
 ): Promise<ExtractionResult> {
   const res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -96,7 +117,7 @@ export async function extractLease(
       'anthropic-version': '2023-06-01',
       'content-type': 'application/json',
     },
-    body: JSON.stringify(buildExtractionRequest(pdfBase64, opts.model)),
+    body: JSON.stringify(buildExtractionRequest(pages, opts.model)),
   })
   if (!res.ok) {
     // Never surface the raw upstream body — it may echo document text.
