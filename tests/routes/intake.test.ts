@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { Hono } from 'hono'
 import { intakeRouter } from '../../server/routes/intake'
 import { createApp } from '../../server/index'
-import { buildTextPdf, buildImageOnlyPdf, buildMultiPagePdf, toBase64 } from '../fixtures/pdf'
+import { buildTextPdf, buildImageOnlyPdf, buildMultiPagePdf, buildImagePlusFooterPdf, buildFormFieldPdf, toBase64 } from '../fixtures/pdf'
 
 const env = { ANTHROPIC_API_KEY: 'sk-test', CONFIDENTIAL_TERMS: 'zeta,99999' }
 function app() { const a = new Hono(); a.route('/intake', intakeRouter); return a }
@@ -335,5 +335,56 @@ describe('per-page text-layer gate (partial text layer)', () => {
     const res = await app().request('/intake/lease',
       body({ filename: 'acme-lease.pdf', pdfBase64: toBase64(pdfBytes), tenant_id: 't', unit_id: 'u' }), env)
     expect(res.status).toBe(200)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// REFUTE C1b: the per-page text gate was not fail-closed. (G) a page painting an image plus a
+// 25+ char footer still egressed the whole PDF; (A) AcroForm field values are never in
+// getTextContent. Any image XObject, form field or (non-link) annotation now blocks, and
+// annotation/field text is run through the term scan.
+// ---------------------------------------------------------------------------
+describe('image / form-field gate (REFUTE C1b)', () => {
+  const post = (pdfBytes: Uint8Array) => app().request('/intake/lease',
+    body({ filename: 'acme-lease.pdf', pdfBase64: toBase64(pdfBytes), tenant_id: 't', unit_id: 'u' }), env)
+
+  it('(G) 422 and NO egress for an image page whose footer clears the text threshold', async () => {
+    const fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock)
+    const res = await post(await buildImagePlusFooterPdf('CONFIDENTIAL  ORA-000123  Page 3 of 20'))
+    expect(res.status).toBe(422)
+    const json = await res.json() as { error: string }
+    expect(json.error).toMatch(/text-only/i)
+    expect(json.error).toMatch(/image/i)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('(A) 422 and NO egress when the confidential term is only in a form-field value', async () => {
+    const fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock)
+    const res = await post(await buildFormFieldPdf('Lease Agreement - Exhibit B - Page 3', 'Zeta Partners'))
+    expect(res.status).toBe(422)
+    expect(((await res.json()) as { error: string }).error).toMatch(/confidential/i)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('(probe D) 422 and NO egress for a term split across a page break', async () => {
+    const fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock)
+    const pdf = await buildMultiPagePdf([
+      'This lease is between the Landlord, ZZP',
+      'Partnership, and the Tenant named herein below.',
+    ])
+    const res = await app().request('/intake/lease',
+      body({ filename: 'acme-lease.pdf', pdfBase64: toBase64(pdf), tenant_id: 't', unit_id: 'u' }),
+      { ...env, CONFIDENTIAL_TERMS: 'zeta,ZZP Partnership' })
+    expect(res.status).toBe(422)
+    expect(((await res.json()) as { error: string }).error).toMatch(/confidential/i)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('422 and NO egress for a form field even when its value is harmless (unscannable-by-design)', async () => {
+    const fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock)
+    const res = await post(await buildFormFieldPdf('Lease Agreement - Exhibit B - Page 3', 'Acme Logistics'))
+    expect(res.status).toBe(422)
+    expect(((await res.json()) as { error: string }).error).toMatch(/form field|annotation/i)
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 })

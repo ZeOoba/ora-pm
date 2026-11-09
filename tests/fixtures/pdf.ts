@@ -52,3 +52,31 @@ export function toBase64(bytes: Uint8Array): string {
   for (const b of bytes) binary += String.fromCharCode(b)
   return btoa(binary)
 }
+
+// 1x1 PNG: the smallest real raster image pdf-lib can embed as an image XObject.
+const TINY_PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='
+
+/** REFUTE C1b (G): a page that paints a raster image (a scanned page, or a logo) plus a text
+ *  footer long enough to clear the per-page text threshold on its own. */
+export async function buildImagePlusFooterPdf(footer: string): Promise<Uint8Array> {
+  const doc = await PDFDocument.create()
+  const font = await doc.embedFont(StandardFonts.Helvetica)
+  const png = await doc.embedPng(Uint8Array.from(atob(TINY_PNG_B64), (ch) => ch.charCodeAt(0)))
+  const page = doc.addPage([400, 200])
+  page.drawImage(png, { x: 10, y: 30, width: 380, height: 150 })
+  page.drawText(footer, { x: 20, y: 10, size: 8, font })
+  return doc.save()
+}
+
+/** REFUTE C1b (A): a text page whose AcroForm text field carries `fieldValue` — rendered by
+ *  viewers, but invisible to getTextContent. */
+export async function buildFormFieldPdf(header: string, fieldValue: string): Promise<Uint8Array> {
+  const doc = await PDFDocument.create()
+  const font = await doc.embedFont(StandardFonts.Helvetica)
+  const page = doc.addPage([400, 200])
+  page.drawText(header, { x: 20, y: 170, size: 10, font })
+  const field = doc.getForm().createTextField('landlord')
+  field.setText(fieldValue)
+  field.addToPage(page, { x: 20, y: 60, width: 250, height: 30 })
+  return doc.save()
+}
