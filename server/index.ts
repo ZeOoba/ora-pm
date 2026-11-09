@@ -22,6 +22,7 @@ import { portalRouter } from './routes/portal'
 import { portalInsuranceRouter } from './routes/portal-insurance'
 import { intakeRouter } from './routes/intake'
 import { searchRouter } from './routes/search'
+import { statementsRouter } from './routes/statements'
 import { errorHandlerMiddleware } from './middleware/error-handler'
 import { checkRateLimit } from './lib/rate-limit'
 
@@ -148,6 +149,7 @@ export function createApp() {
   app.route('/api/exports', exportsRouter)
   app.route('/api/intake', intakeRouter)
   app.route('/api/search', searchRouter)
+  app.route('/api/statements', statementsRouter)
   app.route('/api/stripe', stripeRouter)
   app.route('/api/admin', portalAuthRouter)
   app.route('/api/portal', portalRouter)
