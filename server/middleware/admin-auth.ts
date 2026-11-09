@@ -57,12 +57,14 @@ export async function adminAuthMiddleware(
     return c.json({ error: 'Forbidden: admin access requires an allowlisted email' }, 403)
   }
 
-  // M2 (2026-11-08 audit): the allowlist is only as strong as proof that the caller owns the
-  // address. One Supabase auth project serves admins and tenants, and the committed
-  // supabase/config.toml permits sign-up without email confirmation; whether production does is a
-  // dashboard setting this code cannot see. Fail CLOSED on any unconfirmed, missing or unparseable
-  // email_confirmed_at, before any table is read. (Admins sign in with an email OTP / magic link
-  // (AdminLogin.tsx), and verifying one sets email_confirmed_at, so a signed-in admin carries it.)
+  // M2 (2026-11-08 audit), DEFENCE IN DEPTH ONLY: fail CLOSED on any unconfirmed, missing or
+  // unparseable email_confirmed_at, before any table is read. This does NOT by itself prove the
+  // caller owns the address: with confirmations OFF (the committed supabase/config.toml has
+  // enable_confirmations = false) GoTrue auto-confirms at sign-up and stamps email_confirmed_at
+  // anyway. The actual control is the production auth configuration (public sign-up disabled
+  // and/or confirmations on), a dashboard setting this code cannot see; that is Gabriel's
+  // decision D1. Admins sign in with an email OTP (AdminLogin.tsx, shouldCreateUser: false), and
+  // verifying one sets email_confirmed_at, so a signed-in admin is never locked out by this check.
   const confirmedAt: unknown = (user as { email_confirmed_at?: unknown }).email_confirmed_at
   if (typeof confirmedAt !== 'string' || confirmedAt === '' || Number.isNaN(Date.parse(confirmedAt))) {
     return c.json({ error: 'Forbidden: admin access requires a confirmed email address' }, 403)

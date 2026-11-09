@@ -5,7 +5,10 @@ import { createApp, isAdminExempt } from '../../server/index'
 // merely began with an exempt prefix ("/api/portalX", "/api/stripe-x", "/api/cronjob") skipped
 // adminAuthMiddleware. No such route exists today, which is exactly why it would go unnoticed the
 // day one is added. Exemption is now on a path-segment boundary, and this file enumerates the
-// app's real routes so a new admin route that is accidentally exempt fails here.
+// app's real routes: every non-exempt route must answer 401 from the admin gate, and every route
+// under an exempt root (other than the public health check and the signature-verified webhook)
+// must answer 401 from its OWN router's auth, so an unauthenticated handler added under an exempt
+// root fails here too.
 
 const env = {
   SUPABASE_URL: 'http://localhost',
@@ -55,5 +58,20 @@ describe('admin gate: segment-boundary exemption (M13)', () => {
       if (res.status !== 401) leaks.push(`${r.method} ${r.path} -> ${res.status}`)
     }
     expect(leaks).toEqual([])
+  })
+
+  it('every route under an exempt root, except /api/health and the Stripe webhook, enforces its own auth (401 with none)', async () => {
+    const PUBLIC = new Set(['/api/health', '/api/webhooks/stripe'])
+    const routes = app.routes.filter(
+      (r) => r.method !== 'ALL' && r.path.startsWith('/api/') && isAdminExempt(r.path) && !PUBLIC.has(r.path),
+    )
+    expect(routes.length).toBeGreaterThan(5)
+    const open: string[] = []
+    for (const r of routes) {
+      const path = r.path.replace(/:[A-Za-z_]+(\{[^}]*\})?/g, '00000000-0000-0000-0000-000000000000')
+      const res = await app.request(path, { method: r.method }, env)
+      if (res.status !== 401) open.push(`${r.method} ${r.path} -> ${res.status}`)
+    }
+    expect(open).toEqual([])
   })
 })
