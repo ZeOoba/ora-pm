@@ -57,7 +57,7 @@ export const PG_MEM_SKIP: RegExp[] = [
   /^DO\s+\$\$/i,
   // 0019's backfill reads the critical_dates VIEW, which pg-mem never creates (views are skipped
   // above); tests/db/sent-notifications-tier-migration-0019.test.ts runs it standalone.
-  /^UPDATE sent_notifications SET alert_tier = cd\.urgency\s+FROM critical_dates cd\b/i,
+  /^UPDATE sent_notifications\s+SET alert_tier = CASE\b[\s\S]*\bFROM critical_dates cd\b/i,
 ]
 
 // pg-mem gives an unnamed table constraint NO name, while Postgres names it
