@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import { getDb } from '../db/client'
 import { getStripe } from '../lib/stripe'
-import { buildMonthlyCharges } from '../lib/billing'
+import { buildMonthlyCharges, leaseTermStatusForPeriod } from '../lib/billing'
 import { cronAuthMiddleware } from '../middleware/auth'
 import { checkRateLimit } from '../lib/rate-limit'
 import { fetchChunked, fetchAllPages, POSTGREST_MAX_ROWS } from '../lib/postgrest-paging'
@@ -143,7 +143,7 @@ cronRouter.post('/monthly-billing', async (c) => {
   const { data: leases, error: leaseErr } = await fetchAllPages((after) => {
     let q = db
       .from('leases')
-      .select('id, tenant_id, base_rent_monthly, cam_estimate_monthly, start_date, autopay_enabled, autopay_payment_method_id, tenants(id, stripe_customer_id)')
+      .select('id, tenant_id, base_rent_monthly, cam_estimate_monthly, start_date, end_date, autopay_enabled, autopay_payment_method_id, tenants(id, stripe_customer_id)')
       .eq('status', 'active')
     if (after !== null) q = q.gt('id', after)
     return q.order('id').limit(POSTGREST_MAX_ROWS)
@@ -154,16 +154,58 @@ cronRouter.post('/monthly-billing', async (c) => {
   let posted = 0, skipped = 0
   let chargeErrors = 0, autopayErrors = 0
   const errorMessages: string[] = []
+
+  // --- Step 0: lease-term gate (audit finding billing-ignores-lease-term). ---
+  // status='active' alone used to decide billing, so a lease was charged, late-fee'd and
+  // ACH-debited for months before its start_date and after its end_date (nothing transitions a lease
+  // to 'expired'). Now, per lease, against THIS billing month:
+  //   - not_started (start_date after month end): skipped quietly — a signed future lease is normal.
+  //   - ended (end_date before month start): EXCLUDED from charges and autopay and surfaced in
+  //     `leaseExceptions` + errorMessages for a human. Deliberately NOT billed at the old rent:
+  //     whether a holdover tenant owes base rent, a holdover premium, or nothing (renewal pending,
+  //     surrendered) is a business decision this endpoint cannot make — no holdover rate is invented.
+  //   - invalid (missing/malformed dates): excluded and surfaced the same way (fail closed).
+  //   - in_term: billed; buildMonthlyCharges prorates a mid-month start AND a mid-month end.
+  // This is not an error (HTTP stays 200, `errors` unchanged): the run did what it should, and
+  // trigger-billing.ps1 must not treat a lease awaiting a holdover decision as a failed run.
+  type LeaseException = { lease_id: string; reason: 'past_end_date' | 'invalid_term_dates'; start_date: string | null; end_date: string | null }
+  const leaseExceptions: LeaseException[] = []
+  let notStarted = 0
+  const inTermLeases = (leases ?? []).filter((lease) => {
+    const term = leaseTermStatusForPeriod(lease.start_date, lease.end_date, year, month)
+    if (term === 'in_term') return true
+    if (term === 'not_started') { notStarted++; return false }
+    leaseExceptions.push({
+      lease_id: lease.id,
+      reason: term === 'ended' ? 'past_end_date' : 'invalid_term_dates',
+      start_date: lease.start_date ?? null,
+      end_date: lease.end_date ?? null,
+    })
+    return false
+  })
+  const expiredUnbilled = leaseExceptions.filter((e) => e.reason === 'past_end_date').length
+  if (expiredUnbilled > 0) {
+    errorMessages.push(
+      `${expiredUnbilled} lease(s) still status='active' but past its end_date were NOT billed and NOT `
+      + 'autopay-debited for this period (see leaseExceptions) — decide holdover terms or mark the '
+      + 'lease expired/renewed, then post any holdover charge manually.'
+    )
+  }
+  const invalidTerm = leaseExceptions.length - expiredUnbilled
+  if (invalidTerm > 0) {
+    errorMessages.push(`${invalidTerm} lease(s) with missing/invalid start_date/end_date were NOT billed (see leaseExceptions) — fix the lease dates.`)
+  }
   let chargesBulkFailed = false
   let voidRecheckFailed = false
 
   // --- Step 1: charge posting — one bulk upsert for the whole portfolio, not one insert/charge. ---
-  const allCharges = (leases ?? []).flatMap((lease) =>
+  const allCharges = inTermLeases.flatMap((lease) =>
     buildMonthlyCharges({
       leaseId: lease.id,
       baseRentMonthly: lease.base_rent_monthly,
       camEstimateMonthly: lease.cam_estimate_monthly,
       leaseStartDate: lease.start_date,
+      leaseEndDate: lease.end_date,
       periodYear: year,
       periodMonth: month,
     }).charges
@@ -235,7 +277,9 @@ cronRouter.post('/monthly-billing', async (c) => {
   }
 
   // --- Step 2: autopay eligibility + prior-period pre-check (bulk, one query for all eligible). ---
-  const eligibleLeases = (leases ?? []).filter((lease) => {
+  // In-term leases only: an excluded lease (past end / not started / invalid dates) has no charge
+  // this period and must never reach a Stripe debit, even via arrears headroom.
+  const eligibleLeases = inTermLeases.filter((lease) => {
     const tenant = Array.isArray(lease.tenants) ? lease.tenants[0] : lease.tenants
     return Boolean(lease.autopay_enabled && lease.autopay_payment_method_id && tenant?.stripe_customer_id)
   })
@@ -443,7 +487,7 @@ cronRouter.post('/monthly-billing', async (c) => {
   // the charge-bulk-upsert failing means the ENTIRE portfolio got zero charges this run; a failed
   // autopay pre-check or debit-input lookup means that whole batch got zero debit attempts.
   const status = (chargesBulkFailed || voidRecheckFailed || priorAutopayCheckFailed || debitInputsBulkFailed) ? 500 : 200
-  return c.json({ posted, skipped, errors, chargeErrors, autopayErrors, errorMessages, remaining, year, month, voidedSkipped }, status)
+  return c.json({ posted, skipped, errors, chargeErrors, autopayErrors, errorMessages, remaining, year, month, voidedSkipped, notStarted, expiredUnbilled, leaseExceptions }, status)
 })
 
 cronRouter.post('/critical-dates-alerts', async (c) => {

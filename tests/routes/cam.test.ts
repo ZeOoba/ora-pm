@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { createApp } from '../../server/index'
+import { pgTable } from '../fixtures/pg-table'
 
 // ---------------------------------------------------------------------------
 // Bypass admin auth (same pattern as tests/routes/notices.test.ts) — this
@@ -48,6 +49,21 @@ const state = {
   rec: null as Row | null,
   recSelectError: null as PgError | null,
   leaseUnits: { sf: 1000 } as Row | null,
+  leaseRentType: 'nnn' as string,
+  leaseExpenseStop: null as number | null,
+  // Server-side CAM pool (audit finding cam-denominator-client-snapshot). The default property has
+  // the tenant's lease (1,000 SF via leaseUnits) plus one other full-year 49,000 SF lease, and one
+  // $10,000 recoverable 2025 expense, so the server-computed figures reproduce the 2% / $200 share
+  // the older tests in this file were written against (they used to send 50,000 / $10,000 in the
+  // body; the server now ignores those).
+  tenantLeaseStart: '2020-01-01',
+  tenantLeaseEnd: '2030-12-31',
+  tenantLeaseStatus: 'active',
+  extraUnits: [] as Row[],
+  extraLeases: [] as Row[],
+  expenses: [] as Row[],
+  unitsError: null as PgError | null,
+  expensesError: null as PgError | null,
   camEstimateCharges: [] as { amount: number; voided_at?: string | null }[],
   camChargesError: null as PgError | null,
   leaseSelectError: null as PgError | null,
@@ -57,6 +73,35 @@ const state = {
   camInsertError: null as PgError | null,
   listReconciliations: [] as Row[],
   listError: null as PgError | null,
+}
+
+const PROPERTY_ID = '99999999-9999-4999-8999-999999999999'
+const TENANT_LEASE_ID = '11111111-1111-1111-1111-111111111111'
+const OTHER_LEASE_ID = '22222222-2222-4222-8222-222222222222'
+
+function unitRows(): Row[] {
+  return [
+    { id: 'u_tenant', property_id: PROPERTY_ID, sf: (state.leaseUnits as { sf: number } | null)?.sf ?? 0 },
+    { id: 'u_other', property_id: PROPERTY_ID, sf: 49000 },
+    ...state.extraUnits,
+  ]
+}
+
+function leaseRows(): Row[] {
+  const sfOf = (unitId: string) => unitRows().find((u) => u.id === unitId)
+  const row = (r: Row): Row => ({ ...r, units: { sf: sfOf(r.unit_id as string)?.sf, property_id: sfOf(r.unit_id as string)?.property_id } })
+  return [
+    row({
+      id: TENANT_LEASE_ID, unit_id: 'u_tenant', status: state.tenantLeaseStatus,
+      start_date: state.tenantLeaseStart, end_date: state.tenantLeaseEnd,
+      rent_type: state.leaseRentType, expense_stop_amount: state.leaseExpenseStop,
+    }),
+    row({
+      id: OTHER_LEASE_ID, unit_id: 'u_other', status: 'active',
+      start_date: '2020-01-01', end_date: '2030-12-31', rent_type: 'nnn', expense_stop_amount: null,
+    }),
+    ...state.extraLeases.map(row),
+  ]
 }
 
 function installDbMock() {
@@ -145,17 +190,13 @@ function installDbMock() {
       }
     }
     if (table === 'leases') {
-      return {
-        select: vi.fn().mockReturnValue({
-          eq: vi.fn().mockReturnValue({
-            single: vi.fn().mockImplementation(async () => (
-              state.leaseSelectError
-                ? { data: null, error: state.leaseSelectError }
-                : { data: { units: state.leaseUnits }, error: null }
-            )),
-          }),
-        }),
-      }
+      return pgTable(leaseRows(), state.leaseSelectError ? { error: state.leaseSelectError } : {})
+    }
+    if (table === 'units') {
+      return pgTable(unitRows(), state.unitsError ? { error: state.unitsError } : {})
+    }
+    if (table === 'expenses') {
+      return pgTable(state.expenses, state.expensesError ? { error: state.expensesError } : {})
     }
     if (table === 'charges') {
       return {
@@ -241,6 +282,16 @@ beforeEach(() => {
   state.rec = freshRec()
   state.recSelectError = null
   state.leaseUnits = { sf: 1000 }
+  state.leaseRentType = 'nnn'
+  state.leaseExpenseStop = null
+  state.tenantLeaseStart = '2020-01-01'
+  state.tenantLeaseEnd = '2030-12-31'
+  state.tenantLeaseStatus = 'active'
+  state.extraUnits = []
+  state.extraLeases = []
+  state.expenses = [{ id: 'e_1', property_id: PROPERTY_ID, expense_date: '2025-06-01', amount: 10000, recoverable: true }]
+  state.unitsError = null
+  state.expensesError = null
   state.camEstimateCharges = []
   state.camChargesError = null
   state.leaseSelectError = null
@@ -626,5 +677,219 @@ describe('GET /api/cam', () => {
     expect(res.status).toBe(500)
     const text = await res.text()
     expect(text).not.toContain('relation "cam_reconciliations" does not exist')
+  })
+})
+
+
+// ---------------------------------------------------------------------------
+// Audit finding cam-ignores-rent-type-expense-stop (route): /calculate must load
+// the lease's rent_type and expense_stop_amount and apply them.
+// tenant 1,000 SF of 50,000 SF = 2% of $10,000 = $200 share.
+// ---------------------------------------------------------------------------
+describe('POST /api/cam/calculate: rent type and expense stop', () => {
+  const BODY = {
+    lease_id: '11111111-1111-1111-1111-111111111111',
+    reconciliation_year: 2025,
+    total_property_recoverable_expenses: 10000,
+    total_leased_sf: 50000,
+  }
+
+  it('modified_gross WITHOUT an expense stop: 422, nothing saved', async () => {
+    state.leaseRentType = 'modified_gross'
+    state.leaseExpenseStop = null
+    const res = await calculate(BODY)
+    expect(res.status).toBe(422)
+    expect(((await res.json()) as { error: string }).error).toMatch(/expense stop/i)
+    expect(camUpdateSpy).not.toHaveBeenCalled()
+    expect(camInsertSpy).not.toHaveBeenCalled()
+  })
+
+  it('modified_gross with a stop: only the share above the stop is owed', async () => {
+    state.leaseRentType = 'modified_gross'
+    state.leaseExpenseStop = 0.15 // $0.15/SF x 1,000 SF = $150 stop; $200 share -> $50 owed
+    const res = await calculate(BODY)
+    expect(res.status).toBe(200)
+    const json = await res.json() as { data: Row }
+    expect(json.data.actual_cam_owed).toBe(50)
+  })
+
+  it('gross with no stop (full-service gross): owes nothing', async () => {
+    state.leaseRentType = 'gross'
+    state.leaseExpenseStop = null
+    const res = await calculate(BODY)
+    expect(res.status).toBe(200)
+    const json = await res.json() as { data: Row }
+    expect(json.data.actual_cam_owed).toBe(0)
+    expect(json.data.true_up_amount).toBe(0)
+  })
+
+  it('nnn: full pro-rata share (unchanged behaviour)', async () => {
+    const res = await calculate(BODY)
+    const json = await res.json() as { data: Row }
+    expect(json.data.actual_cam_owed).toBe(200)
+  })
+})
+
+
+// ---------------------------------------------------------------------------
+// Audit finding cam-denominator-client-snapshot: the denominator (and the
+// recoverable total) are recomputed server-side from the DB; client values are
+// ignored. Denominator = occupancy-weighted leased SF over the year, including
+// leases that ended or started mid-year, excluding 'pending' leases.
+// Default pool: tenant 1,000 SF + other 49,000 SF, both full-year; $10,000.
+// ---------------------------------------------------------------------------
+describe('POST /api/cam/calculate: server-side pool (denominator + recoverable total)', () => {
+  const BODY = { lease_id: TENANT_LEASE_ID, reconciliation_year: 2025 }
+  type Saved = { data: Row }
+
+  it('accepts a body WITHOUT client totals and computes them from the DB', async () => {
+    const res = await calculate(BODY)
+    expect(res.status).toBe(200)
+    const json = await res.json() as Saved
+    expect(json.data.tenant_pro_rata_share_pct).toBeCloseTo(0.02, 12)
+    expect(json.data.total_property_recoverable_expenses).toBe(10000)
+    expect(json.data.actual_cam_owed).toBe(200)
+  })
+
+  it('IGNORES a client-supplied denominator and recoverable total (a stale or tampered browser value)', async () => {
+    const res = await calculate({ ...BODY, total_leased_sf: 1000, total_property_recoverable_expenses: 999999 })
+    expect(res.status).toBe(200)
+    const json = await res.json() as Saved
+    expect(json.data.tenant_pro_rata_share_pct).toBeCloseTo(0.02, 12)
+    expect(json.data.total_property_recoverable_expenses).toBe(10000)
+    expect(json.data.actual_cam_owed).toBe(200)
+  })
+
+  it('includes a lease that EXPIRED mid-year in the denominator, weighted by its days in effect', async () => {
+    // 36,500 SF expired 2025-03-31: 90/365 of the year -> 9,000 weighted SF.
+    state.extraUnits = [{ id: 'u_gone', property_id: PROPERTY_ID, sf: 36500 }]
+    state.extraLeases = [{ id: '33333333-3333-4333-8333-333333333333', unit_id: 'u_gone', status: 'expired', start_date: '2019-01-01', end_date: '2025-03-31', rent_type: 'nnn', expense_stop_amount: null }]
+    const json = await (await calculate(BODY)).json() as Saved
+    expect(json.data.tenant_pro_rata_share_pct).toBeCloseTo(1000 / 59000, 12)
+  })
+
+  it('excludes pending leases and leases that did not overlap the year', async () => {
+    state.extraUnits = [{ id: 'u_x', property_id: PROPERTY_ID, sf: 50000 }, { id: 'u_y', property_id: PROPERTY_ID, sf: 50000 }]
+    state.extraLeases = [
+      { id: '44444444-4444-4444-8444-444444444444', unit_id: 'u_x', status: 'pending', start_date: '2025-01-01', end_date: '2030-12-31', rent_type: 'nnn', expense_stop_amount: null },
+      { id: '55555555-5555-4555-8555-555555555555', unit_id: 'u_y', status: 'expired', start_date: '2018-01-01', end_date: '2024-12-31', rent_type: 'nnn', expense_stop_amount: null },
+    ]
+    const json = await (await calculate(BODY)).json() as Saved
+    expect(json.data.tenant_pro_rata_share_pct).toBeCloseTo(0.02, 12)
+  })
+
+  it('a tenant that moved in mid-year is weighted by its own days in effect (numerator and denominator)', async () => {
+    state.tenantLeaseStart = '2025-07-01' // 184 days
+    const json = await (await calculate(BODY)).json() as Saved
+    const w = 1000 * 184 / 365
+    expect(json.data.tenant_pro_rata_share_pct).toBeCloseTo(w / (w + 49000), 12)
+  })
+
+  it('a lease not in effect at any point in the year: 422, nothing saved', async () => {
+    state.tenantLeaseStart = '2026-01-01'
+    const res = await calculate(BODY)
+    expect(res.status).toBe(422)
+    expect(camUpdateSpy).not.toHaveBeenCalled()
+    expect(camInsertSpy).not.toHaveBeenCalled()
+  })
+
+  it('only counts expenses for THIS property, recoverable, inside the year', async () => {
+    state.expenses = [
+      { id: 'e_1', property_id: PROPERTY_ID, expense_date: '2025-01-01', amount: 4000, recoverable: true },
+      { id: 'e_2', property_id: PROPERTY_ID, expense_date: '2025-12-31', amount: 6000, recoverable: true },
+      { id: 'e_3', property_id: PROPERTY_ID, expense_date: '2024-12-31', amount: 99999, recoverable: true },
+      { id: 'e_4', property_id: PROPERTY_ID, expense_date: '2025-05-01', amount: 99999, recoverable: false },
+      { id: 'e_5', property_id: 'other-prop', expense_date: '2025-05-01', amount: 99999, recoverable: true },
+    ]
+    const json = await (await calculate(BODY)).json() as Saved
+    expect(json.data.total_property_recoverable_expenses).toBe(10000)
+  })
+
+  it('fails closed (500, nothing saved) when the units read fails', async () => {
+    state.unitsError = { message: 'boom units' }
+    const res = await calculate(BODY)
+    expect(res.status).toBe(500)
+    expect(camInsertSpy).not.toHaveBeenCalled()
+    expect(await res.text()).not.toContain('boom units')
+  })
+
+  it('fails closed (500, nothing saved) when the expenses read fails', async () => {
+    state.expensesError = { message: 'boom expenses' }
+    const res = await calculate(BODY)
+    expect(res.status).toBe(500)
+    expect(camInsertSpy).not.toHaveBeenCalled()
+  })
+})
+
+describe('GET /api/cam/pool', () => {
+  const pool = (qs: string) => app.request(`/api/cam/pool?${qs}`, {}, env)
+  type PoolBody = { data: { recoverable_total: number; weighted_leased_sf: number; days_in_year: number; leases: { lease_id: string; weighted_sf: number; overlap_days: number; status: string; rent_type: string }[] } }
+
+  it('returns the server-computed pool for a property/year', async () => {
+    const res = await pool(`property_id=${PROPERTY_ID}&year=2025`)
+    expect(res.status).toBe(200)
+    const body = await res.json() as PoolBody
+    expect(body.data.recoverable_total).toBe(10000)
+    expect(body.data.weighted_leased_sf).toBe(50000)
+    expect(body.data.days_in_year).toBe(365)
+    expect(body.data.leases.map((l) => l.lease_id).sort()).toEqual([TENANT_LEASE_ID, OTHER_LEASE_ID].sort())
+  })
+
+  it('400 on a malformed property_id', async () => {
+    expect((await pool('property_id=nope&year=2025')).status).toBe(400)
+  })
+})
+
+describe('POST /api/cam/calculate: same-unit overlap (REFUTE C4b)', () => {
+  it('422 naming the unit and leases when a terminated lease and its replacement overlap on one unit; nothing saved', async () => {
+    state.extraLeases = [{
+      id: '66666666-6666-4666-8666-666666666666', unit_id: 'u_other', status: 'terminated',
+      start_date: '2019-01-01', end_date: '2028-12-31', rent_type: 'nnn', expense_stop_amount: null,
+    }]
+    const res = await calculate({ lease_id: TENANT_LEASE_ID, reconciliation_year: 2025 })
+    expect(res.status).toBe(422)
+    const { error } = await res.json() as { error: string }
+    expect(error).toMatch(/u_other/)
+    expect(error).toMatch(/66666666-6666-4666-8666-666666666666/)
+    expect(error).toMatch(new RegExp(OTHER_LEASE_ID))
+    expect(camUpdateSpy).not.toHaveBeenCalled()
+    expect(camInsertSpy).not.toHaveBeenCalled()
+  })
+})
+
+describe('POST /api/cam/calculate: implausible expense stop (REFUTE C4d)', () => {
+  it('422 and nothing saved when stop x SF exceeds the share by more than 1x', async () => {
+    state.leaseRentType = 'modified_gross'
+    state.leaseExpenseStop = 42000 // a total typed into the $/SF/yr field; share is $200
+    const res = await calculate({ lease_id: TENANT_LEASE_ID, reconciliation_year: 2025 })
+    expect(res.status).toBe(422)
+    expect(((await res.json()) as { error: string }).error).toMatch(/\$\/SF\/yr/)
+    expect(camInsertSpy).not.toHaveBeenCalled()
+  })
+})
+
+describe("POST /api/cam/calculate: stale terminated lease on a vacant unit (REFUTE C4b')", () => {
+  it('422 telling the user to correct the end_date; nothing saved', async () => {
+    state.extraUnits = [{ id: 'u_vacant', property_id: PROPERTY_ID, sf: 10000 }]
+    state.extraLeases = [{
+      id: '77777777-7777-4777-8777-777777777777', unit_id: 'u_vacant', status: 'terminated',
+      start_date: '2019-01-01', end_date: '2099-12-31', rent_type: 'nnn', expense_stop_amount: null,
+    }]
+    const res = await calculate({ lease_id: TENANT_LEASE_ID, reconciliation_year: 2025 })
+    expect(res.status).toBe(422)
+    const { error } = await res.json() as { error: string }
+    expect(error).toMatch(/77777777-7777-4777-8777-777777777777/)
+    expect(error).toMatch(/correct.*end_date/i)
+    expect(camInsertSpy).not.toHaveBeenCalled()
+  })
+
+  it('a terminated lease whose end_date is already past is fine (weighted by its days in effect)', async () => {
+    state.extraUnits = [{ id: 'u_gone', property_id: PROPERTY_ID, sf: 36500 }]
+    state.extraLeases = [{
+      id: '88888888-8888-4888-8888-888888888888', unit_id: 'u_gone', status: 'terminated',
+      start_date: '2019-01-01', end_date: '2025-03-31', rent_type: 'nnn', expense_stop_amount: null,
+    }]
+    const res = await calculate({ lease_id: TENANT_LEASE_ID, reconciliation_year: 2025 })
+    expect(res.status).toBe(200)
   })
 })

@@ -1,13 +1,21 @@
 import { Hono } from 'hono'
 import { getDb } from '../db/client'
-import { calculateCAMTrueUp } from '../lib/cam'
+import { assertNoStaleClosedLeases, calculateCAMTrueUp, computeCamPool, CAMTermsError, type CAMPool, type CAMRentType } from '../lib/cam'
 import { CamCalculateSchema, CamRecoverableQuerySchema } from '../lib/schemas'
 import { dbError } from '../lib/api-error'
-import { fetchAllPages, POSTGREST_MAX_ROWS } from '../lib/postgrest-paging'
+import { fetchAllPages, fetchChunked, POSTGREST_MAX_ROWS } from '../lib/postgrest-paging'
 
 type Env = { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string }
+type Db = ReturnType<typeof getDb>
+type PgErr = { message: string; code?: string }
 
 export const camRouter = new Hono<{ Bindings: Env }>()
+
+// CAMTermsError messages are authored in server/lib/cam.ts (lease-data problems the user fixes on
+// the lease, e.g. "modified-gross lease has no expense stop"), never DB/driver text, so they are
+// safe to return verbatim. Typed to CAMTermsError so nothing else can be routed through it
+// (allowlisted by name in tests/lib/no-raw-db-errors.test.ts).
+const camTermsJson = (err: CAMTermsError) => ({ error: err.message })
 
 camRouter.get('/', async (c) => {
   const db = getDb(c.env)
@@ -19,12 +27,93 @@ camRouter.get('/', async (c) => {
   return c.json({ data })
 })
 
-// Total recoverable expenses for a property/year — the figure the CAM page sends to /calculate as
-// total_property_recoverable_expenses. Computed here, not in the browser: GET /expenses returns one
-// PaginationSchema page (50 rows by default), so a client-side sum silently dropped every expense
-// past it, and a browser `getFullYear()` on a DATE shifted Jan 1 into the prior year. Keyset-paged
-// on expenses.id (uuid PK) so the total is complete regardless of PostgREST's max_rows cap; the
-// year is an inclusive DATE range compared in Postgres.
+// Total recoverable expenses for a property/year. Computed here, not in the browser: GET /expenses
+// returns one PaginationSchema page (50 rows by default), so a client-side sum silently dropped
+// every expense past it, and a browser `getFullYear()` on a DATE shifted Jan 1 into the prior year.
+// Keyset-paged on expenses.id (uuid PK) so the total is complete regardless of PostgREST's max_rows
+// cap; the year is an inclusive DATE range compared in Postgres. Shared by GET
+// /recoverable-expenses, GET /pool and POST /calculate (which no longer trusts a client total).
+async function loadRecoverableTotal(db: Db, propertyId: string, year: number): Promise<{ total: number; count: number; error: PgErr | null }> {
+  const { data: rows, error } = await fetchAllPages<{ id: string; amount: number }>((after) => {
+    let q = db.from('expenses').select('id, amount')
+      .eq('property_id', propertyId)
+      .eq('recoverable', true)
+      .gte('expense_date', `${year}-01-01`).lte('expense_date', `${year}-12-31`)
+    if (after !== null) q = q.gt('id', after)
+    return q.order('id').limit(POSTGREST_MAX_ROWS)
+  }, (e) => e.id)
+  if (error) return { total: 0, count: 0, error }
+  // Summed in integer cents: thousands of float additions can drift before a final round.
+  const total = rows.reduce((cents, e) => cents + Math.round(Number(e.amount) * 100), 0) / 100
+  return { total, count: rows.length, error: null }
+}
+
+// Lease statuses that can have occupied space during a past reconciliation year. 'pending' (not yet
+// commenced/executed) never counts. 'expired' and 'terminated' DO count for the days they were in
+// effect: that is the point of the server-side pool (audit finding cam-denominator-client-snapshot).
+const POOL_LEASE_STATUSES = ['active', 'expired', 'terminated']
+const UNIT_ID_CHUNK = 100
+
+type PoolLeaseRow = {
+  id: string
+  unit_id: string
+  status: string
+  start_date: string
+  end_date: string
+  rent_type: CAMRentType
+}
+
+/**
+ * The CAM pool for a property/year, from the DB (audit finding cam-denominator-client-snapshot).
+ * Every lease on the property's units whose term overlaps the year (status active / expired /
+ * terminated), weighted by days in effect: see computeCamPool in server/lib/cam.ts. Fails closed:
+ * any read error, or a chunk at the PostgREST row cap, is returned as an error, never a partial pool.
+ */
+async function loadCamPool(db: Db, propertyId: string, year: number): Promise<
+  { pool: CAMPool; leases: PoolLeaseRow[]; error: null } | { pool: null; leases: null; error: PgErr | CAMTermsError }
+> {
+  const { data: units, error: unitsErr } = await fetchAllPages<{ id: string; sf: number; suite?: string | null }>((after) => {
+    let q = db.from('units').select('id, sf, suite').eq('property_id', propertyId)
+    if (after !== null) q = q.gt('id', after)
+    return q.order('id').limit(POSTGREST_MAX_ROWS)
+  }, (u) => u.id)
+  if (unitsErr) return { pool: null, leases: null, error: unitsErr }
+
+  const sfByUnit = new Map(units.map((u) => [u.id, Number(u.sf)]))
+  const unitLabel = new Map(units.map((u) => [u.id, u.suite ? `${u.suite} (${u.id})` : u.id]))
+  const { data: leases, error: leasesErr } = await fetchChunked<PoolLeaseRow>(
+    units.map((u) => u.id),
+    UNIT_ID_CHUNK,
+    (chunk) => db.from('leases')
+      .select('id, unit_id, status, start_date, end_date, rent_type')
+      .in('unit_id', chunk)
+      .in('status', POOL_LEASE_STATUSES)
+      .lte('start_date', `${year}-12-31`)
+      .gte('end_date', `${year}-01-01`),
+    { maxRows: POSTGREST_MAX_ROWS },
+  )
+  if (leasesErr) return { pool: null, leases: null, error: leasesErr }
+
+  try {
+    const pool = computeCamPool(
+      // unit_id: overlapping leases on one unit fail closed (REFUTE C4b) — see computeCamPool.
+      leases.map((l) => ({ id: l.id, unit_id: l.unit_id, unit_label: unitLabel.get(l.unit_id), sf: sfByUnit.get(l.unit_id) ?? NaN, start_date: l.start_date, end_date: l.end_date })),
+      year,
+    )
+    // REFUTE C4b': a terminated/expired pool lease whose end_date is still on/after today keeps its
+    // original end_date and would be weighted as occupying a possibly vacant unit — fail closed.
+    // Runs after computeCamPool so a same-unit overlap (C4b) reports its more specific message.
+    assertNoStaleClosedLeases(
+      leases.filter((l) => pool.byLease[l.id] !== undefined).map((l) => ({ id: l.id, unit_id: unitLabel.get(l.unit_id) ?? l.unit_id, status: l.status, end_date: l.end_date })),
+      new Date().toISOString().slice(0, 10),
+    )
+    return { pool, leases, error: null }
+  } catch (err) {
+    if (err instanceof CAMTermsError) return { pool: null, leases: null, error: err }
+    throw err
+  }
+}
+
 camRouter.get('/recoverable-expenses', async (c) => {
   const parsed = CamRecoverableQuerySchema.safeParse({
     property_id: c.req.query('property_id'),
@@ -33,42 +122,70 @@ camRouter.get('/recoverable-expenses', async (c) => {
   if (!parsed.success) return c.json({ error: parsed.error.flatten().fieldErrors }, 400)
   const { property_id, year } = parsed.data
 
-  const db = getDb(c.env)
-  const { data: rows, error } = await fetchAllPages<{ id: string; amount: number }>((after) => {
-    let q = db.from('expenses').select('id, amount')
-      .eq('property_id', property_id)
-      .eq('recoverable', true)
-      .gte('expense_date', `${year}-01-01`).lte('expense_date', `${year}-12-31`)
-    if (after !== null) q = q.gt('id', after)
-    return q.order('id').limit(POSTGREST_MAX_ROWS)
-  }, (e) => e.id)
+  const { total, count, error } = await loadRecoverableTotal(getDb(c.env), property_id, year)
   if (error) return dbError(c, error, 'Failed to load recoverable expenses')
-
-  // Summed in integer cents: thousands of float additions can drift before a final round.
-  const total = rows.reduce((cents, e) => cents + Math.round(Number(e.amount) * 100), 0) / 100
-  return c.json({ data: { total, count: rows.length } })
+  return c.json({ data: { total, count } })
 })
 
-// Calculate and save CAM reconciliation for a lease/year
-// Body: { lease_id, reconciliation_year, total_property_recoverable_expenses, total_leased_sf }
+// GET /cam/pool?property_id&year — the server-computed CAM pool the CAM page displays and whose
+// leases it reconciles. Display only: /calculate recomputes everything itself and never reads it back.
+camRouter.get('/pool', async (c) => {
+  const parsed = CamRecoverableQuerySchema.safeParse({
+    property_id: c.req.query('property_id'),
+    year: c.req.query('year'),
+  })
+  if (!parsed.success) return c.json({ error: parsed.error.flatten().fieldErrors }, 400)
+  const { property_id, year } = parsed.data
+  const db = getDb(c.env)
+
+  const recoverable = await loadRecoverableTotal(db, property_id, year)
+  if (recoverable.error) return dbError(c, recoverable.error, 'Failed to load recoverable expenses')
+  const loaded = await loadCamPool(db, property_id, year)
+  if (loaded.error instanceof CAMTermsError) return c.json(camTermsJson(loaded.error), 422)
+  if (loaded.error) return dbError(c, loaded.error, 'Failed to load CAM pool')
+
+  return c.json({
+    data: {
+      recoverable_total: recoverable.total,
+      recoverable_count: recoverable.count,
+      days_in_year: loaded.pool.daysInYear,
+      weighted_leased_sf: loaded.pool.weightedLeasedSF,
+      leases: loaded.leases
+        .filter((l) => loaded.pool.byLease[l.id])
+        .map((l) => ({
+          lease_id: l.id,
+          status: l.status,
+          rent_type: l.rent_type,
+          sf: loaded.pool.byLease[l.id].sf,
+          overlap_days: loaded.pool.byLease[l.id].overlapDays,
+          weighted_sf: loaded.pool.byLease[l.id].weightedSF,
+        })),
+    },
+  })
+})
+
+// Calculate and save CAM reconciliation for a lease/year.
+// Body: { lease_id, reconciliation_year }. total_property_recoverable_expenses / total_leased_sf
+// are still ACCEPTED (an already-loaded older page bundle sends them) but IGNORED: both are
+// recomputed from the DB here (audit finding cam-denominator-client-snapshot — the browser used to
+// compute the denominator from today's active rent roll, and this route trusted it).
 camRouter.post('/calculate', async (c) => {
   const db = getDb(c.env)
   const raw = await c.req.json()
   const parsed = CamCalculateSchema.safeParse(raw)
   if (!parsed.success) return c.json({ error: parsed.error.flatten().fieldErrors }, 422)
-  const { lease_id, reconciliation_year, total_property_recoverable_expenses, total_leased_sf } =
-    parsed.data
+  const { lease_id, reconciliation_year } = parsed.data
 
-  // Get tenant's SF from their unit. Both reads below FAIL CLOSED (PR #42 refute): they used to
-  // discard `error`, so a failed query read as SF 0 / estimated_cam_paid 0 and SAVED a draft with
-  // a wrong pro-rata or an overstated true_up_amount that /approve would then post. A genuinely
-  // missing lease is PGRST116 (no row) and is a 404-class input error, not a DB failure — returned
-  // as such (PR #42 review follow-up: this used to swallow PGRST116 and fall through with
-  // tenantSF defaulted to 0, computing a true-up against a nonexistent lease that only failed
-  // later, and generically, via the cam_reconciliations FK constraint on insert).
+  // Every read below FAILS CLOSED (PR #42 refute): they used to discard `error`, so a failed query
+  // read as SF 0 / estimated_cam_paid 0 and SAVED a draft with a wrong pro-rata or an overstated
+  // true_up_amount that /approve would then post. A genuinely missing lease is PGRST116 (no row) and
+  // is a 404-class input error, not a DB failure — returned as such (PR #42 review follow-up: this
+  // used to swallow PGRST116 and fall through with tenantSF defaulted to 0, computing a true-up
+  // against a nonexistent lease that only failed later, and generically, via the
+  // cam_reconciliations FK constraint on insert).
   const { data: lease, error: leaseErr } = await db
     .from('leases')
-    .select('units(sf)')
+    .select('id, rent_type, expense_stop_amount, units(property_id)')
     .eq('id', lease_id)
     .single()
   if (leaseErr) {
@@ -76,7 +193,34 @@ camRouter.post('/calculate', async (c) => {
     return dbError(c, leaseErr, 'Failed to load lease')
   }
 
-  const tenantSF: number = (lease as unknown as { units: { sf: number } } | null)?.units?.sf ?? 0
+  // rent_type + expense_stop_amount (audit finding cam-ignores-rent-type-expense-stop): the true-up
+  // used to bill every lease its full pro-rata share, so gross and modified-gross tenants were
+  // charged CAM their leases do not pass through. calculateCAMTrueUp applies the schema semantics.
+  const leaseRow = lease as unknown as {
+    units: { property_id: string } | null
+    rent_type: CAMRentType | null
+    expense_stop_amount: number | string | null
+  } | null
+  const propertyId = leaseRow?.units?.property_id
+  if (!propertyId) return c.json({ error: 'Lease has no unit/property — cannot build the CAM pool' }, 422)
+  const rentType: CAMRentType = leaseRow?.rent_type ?? 'nnn' // column is NOT NULL DEFAULT 'nnn'
+  // NUMERIC can arrive as a string from PostgREST; null stays null (no stop).
+  const expenseStopPerSF = leaseRow?.expense_stop_amount == null ? null : Number(leaseRow.expense_stop_amount)
+
+  // Server-side pool: recoverable total + occupancy-weighted denominator for the property/year.
+  const recoverable = await loadRecoverableTotal(db, propertyId, reconciliation_year)
+  if (recoverable.error) return dbError(c, recoverable.error, 'Failed to load recoverable expenses')
+  const total_property_recoverable_expenses = recoverable.total
+  const loaded = await loadCamPool(db, propertyId, reconciliation_year)
+  if (loaded.error instanceof CAMTermsError) return c.json(camTermsJson(loaded.error), 422)
+  if (loaded.error) return dbError(c, loaded.error, 'Failed to load CAM pool')
+  const tenantInPool = loaded.pool.byLease[lease_id]
+  if (!tenantInPool) {
+    return c.json({ error: `Lease was not in effect during ${reconciliation_year} (or is pending) — no CAM reconciliation for that year` }, 422)
+  }
+  // Occupancy-weighted: a tenant in place for part of the year bears that part of a full-year share
+  // (and an expense stop is prorated by the same factor — see calculateCAMTrueUp).
+  const tenantSF = tenantInPool.weightedSF
 
   // Sum all CAM estimate charges billed this year. OI-278 / migration 0016: a voided estimate was
   // never really billed, so it must not count as CAM paid (that would understate the true-up).
@@ -101,10 +245,15 @@ camRouter.post('/calculate', async (c) => {
     result = calculateCAMTrueUp({
       totalRecoverableExpenses: total_property_recoverable_expenses,
       tenantSF,
-      totalLeasedSF: total_leased_sf,
+      totalLeasedSF: loaded.pool.weightedLeasedSF,
       estimatedCamPaid,
+      rentType,
+      expenseStopPerSF,
     })
   } catch (err) {
+    // Lease-terms problems (e.g. modified_gross with no expense stop) are a 422 the user fixes on
+    // the lease; nothing is saved either way.
+    if (err instanceof CAMTermsError) return c.json(camTermsJson(err), 422)
     return c.json({ error: (err as Error).message }, 400)
   }
 

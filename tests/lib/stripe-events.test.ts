@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { handleStripeEvent } from '../../server/lib/stripe-events'
+import { handleStripeEvent, ALLOWED_FROM, IN_FLIGHT_STATUSES, TERMINAL_STATUSES } from '../../server/lib/stripe-events'
 import type Stripe from 'stripe'
 import type { getDb } from '../../server/db/client'
 
@@ -25,6 +25,7 @@ function makeDb(script: UpdateResult[] = [{ data: [{ id: 'p1' }], error: null }]
     const builder = {
       eq: vi.fn().mockImplementation((col: string, val: unknown) => { call.filters.push(['eq', col, val]); return builder }),
       is: vi.fn().mockImplementation((col: string, val: unknown) => { call.filters.push(['is', col, val]); return builder }),
+      in: vi.fn().mockImplementation((col: string, val: unknown) => { call.filters.push(['in', col, val]); return builder }),
       select: vi.fn().mockImplementation(async () => script[idx] ?? { data: [], error: null }),
     }
     return builder
@@ -48,7 +49,7 @@ describe('handleStripeEvent — payment_intent.succeeded', () => {
 
     expect(calls).toHaveLength(1)
     expect(calls[0].patch).toEqual({ stripe_status: 'succeeded' })
-    expect(calls[0].filters).toEqual([['eq', 'stripe_payment_intent_id', 'pi_abc']])
+    expect(calls[0].filters).toEqual([['eq', 'stripe_payment_intent_id', 'pi_abc'], ['in', 'stripe_status', ALLOWED_FROM.succeeded]])
   })
 
   // OI-233: the PI id was never written back (stripe.ts's post-Stripe UPDATE
@@ -69,6 +70,7 @@ describe('handleStripeEvent — payment_intent.succeeded', () => {
     expect(calls[1].filters).toEqual([
       ['eq', 'client_request_id', 'crid-1'],
       ['is', 'stripe_payment_intent_id', null],
+      ['in', 'stripe_status', ALLOWED_FROM.succeeded],
     ])
   })
 
@@ -111,7 +113,7 @@ describe('handleStripeEvent — payment_intent.processing (OI-233 write-back pat
     expect(calls[0].patch).toEqual({ stripe_status: 'processing' })
     expect(calls[0].filters).toEqual([
       ['eq', 'stripe_payment_intent_id', 'pi_proc'],
-      ['eq', 'stripe_status', 'pending'],
+      ['in', 'stripe_status', ['pending']],
     ])
   })
 
@@ -129,6 +131,7 @@ describe('handleStripeEvent — payment_intent.processing (OI-233 write-back pat
     expect(calls[1].filters).toEqual([
       ['eq', 'client_request_id', 'crid-p2'],
       ['is', 'stripe_payment_intent_id', null],
+      ['in', 'stripe_status', ['pending']],
     ])
   })
 })
@@ -144,7 +147,7 @@ describe('handleStripeEvent — payment_intent.payment_failed', () => {
     await handleStripeEvent(event, db)
 
     expect(calls[0].patch).toEqual(expect.objectContaining({ stripe_status: 'failed', notes: expect.stringContaining('Insufficient funds') }))
-    expect(calls[0].filters).toEqual([['eq', 'stripe_payment_intent_id', 'pi_fail']])
+    expect(calls[0].filters).toEqual([['eq', 'stripe_payment_intent_id', 'pi_fail'], ['in', 'stripe_status', ALLOWED_FROM.payment_failed]])
   })
 
   it('OI-233: falls back to the client_request_id row when no row carries the PI id', async () => {
@@ -161,6 +164,7 @@ describe('handleStripeEvent — payment_intent.payment_failed', () => {
     expect(calls[1].filters).toEqual([
       ['eq', 'client_request_id', 'crid-f'],
       ['is', 'stripe_payment_intent_id', null],
+      ['in', 'stripe_status', ALLOWED_FROM.payment_failed],
     ])
   })
 })
@@ -210,7 +214,7 @@ describe('handleStripeEvent — charge.failed', () => {
     await handleStripeEvent(event, db)
 
     expect(calls[0].patch).toEqual(expect.objectContaining({ stripe_status: 'returned', notes: expect.stringContaining('insufficient_funds') }))
-    expect(calls[0].filters).toEqual([['eq', 'stripe_payment_intent_id', 'pi_ach']])
+    expect(calls[0].filters).toEqual([['eq', 'stripe_payment_intent_id', 'pi_ach'], ['in', 'stripe_status', ALLOWED_FROM.returned]])
   })
 
   it('does nothing if charge has no payment_intent', async () => {
@@ -237,7 +241,7 @@ describe('handleStripeEvent — charge.dispute.created', () => {
     await handleStripeEvent(event, db)
 
     expect(calls[0].patch).toEqual(expect.objectContaining({ stripe_status: 'failed', notes: expect.stringContaining('fraudulent') }))
-    expect(calls[0].filters).toEqual([['eq', 'stripe_payment_intent_id', 'pi_dis']])
+    expect(calls[0].filters).toEqual([['eq', 'stripe_payment_intent_id', 'pi_dis'], ['in', 'stripe_status', ALLOWED_FROM.disputed]])
   })
 
   it('does nothing if dispute has no payment_intent', async () => {
@@ -295,6 +299,159 @@ describe('handleStripeEvent — expanded payment_intent object', () => {
 
     await handleStripeEvent(event, db)
 
-    expect(calls[0].filters).toEqual([['eq', 'stripe_payment_intent_id', 'pi_expanded']])
+    expect(calls[0].filters).toEqual([['eq', 'stripe_payment_intent_id', 'pi_expanded'], ['in', 'stripe_status', ALLOWED_FROM.returned]])
+  })
+})
+
+
+// ---------------------------------------------------------------------------
+// Audit finding webhook-succeeded-regresses-terminal-status: Stripe does not
+// guarantee event order and retries deliveries, and the handler used to apply
+// every event unconditionally, so a late payment_intent.succeeded could move a
+// returned / failed / canceled row back to 'succeeded' (ar_ledger then credits a
+// bounced ACH payment as collected). Every update is now gated by an explicit
+// allowed-transition table.
+// ---------------------------------------------------------------------------
+describe('allowed-transition table', () => {
+  it('no event moves a row OUT of a terminal state (failed / returned / canceled)', () => {
+    for (const [event, from] of Object.entries(ALLOWED_FROM)) {
+      for (const terminal of TERMINAL_STATUSES) {
+        expect({ event, allowsFrom: terminal, allowed: from.includes(terminal) }).toEqual({ event, allowsFrom: terminal, allowed: false })
+      }
+    }
+  })
+
+  it('only an ACH return or a dispute may override succeeded', () => {
+    const fromSucceeded = Object.entries(ALLOWED_FROM).filter(([, from]) => from.includes('succeeded')).map(([e]) => e).sort()
+    expect(fromSucceeded).toEqual(['disputed', 'returned'])
+  })
+
+  it('processing only advances a pending row; succeeded/failed/canceled advance any in-flight row', () => {
+    expect(ALLOWED_FROM.processing).toEqual(['pending'])
+    for (const e of ['succeeded', 'payment_failed', 'canceled'] as const) {
+      expect([...ALLOWED_FROM[e]].sort()).toEqual([...IN_FLIGHT_STATUSES].sort())
+    }
+  })
+})
+
+// A real (in-memory) payments table: every UPDATE applies its eq / is / in
+// filters to the stored rows and mutates only the matches, so a sequence of
+// events behaves the way it would against Postgres.
+type PayRow = { id: string; stripe_payment_intent_id: string | null; client_request_id?: string | null; stripe_status: string | null; notes?: string | null }
+function statefulDb(rows: PayRow[]) {
+  const from = vi.fn().mockImplementation(() => ({
+    update: (patch: Record<string, unknown>) => {
+      const preds: Array<(r: PayRow) => boolean> = []
+      const b = {
+        eq: (col: string, val: unknown) => { preds.push((r) => (r as Record<string, unknown>)[col] === val); return b },
+        is: (col: string, val: unknown) => { preds.push((r) => ((r as Record<string, unknown>)[col] ?? null) === val); return b },
+        in: (col: string, vals: readonly unknown[]) => { preds.push((r) => vals.includes((r as Record<string, unknown>)[col])); return b },
+        select: async () => {
+          const hit = rows.filter((r) => preds.every((p) => p(r)))
+          for (const r of hit) Object.assign(r, patch)
+          return { data: hit.map((r) => ({ id: r.id })), error: null }
+        },
+      }
+      return b
+    },
+  }))
+  return { from } as unknown as DB
+}
+
+const ev = {
+  processing: (pi: string) => ({ type: 'payment_intent.processing', data: { object: { id: pi, metadata: {} } } }),
+  succeeded: (pi: string, metadata: Record<string, string> = {}) => ({ type: 'payment_intent.succeeded', data: { object: { id: pi, metadata } } }),
+  failed: (pi: string) => ({ type: 'payment_intent.payment_failed', data: { object: { id: pi, metadata: {}, last_payment_error: { message: 'NSF' } } } }),
+  canceled: (pi: string) => ({ type: 'payment_intent.canceled', data: { object: { id: pi, metadata: {} } } }),
+  chargeFailed: (pi: string) => ({ type: 'charge.failed', data: { object: { id: 'ch_1', payment_intent: pi, failure_code: 'R01', failure_message: 'Insufficient funds' } } }),
+  dispute: (pi: string) => ({ type: 'charge.dispute.created', data: { object: { id: 'dp_1', payment_intent: pi, reason: 'fraudulent' } } }),
+}
+
+async function run(db: DB, ...events: object[]) {
+  for (const e of events) await handleStripeEvent(e as unknown as Stripe.Event, db)
+}
+
+describe('out-of-order / retried webhook sequences (stateful)', () => {
+  const row = (status: string): PayRow => ({ id: 'p1', stripe_payment_intent_id: 'pi_1', client_request_id: null, stripe_status: status, notes: null })
+
+  it('charge.failed (ACH return) then a late payment_intent.succeeded stays returned', async () => {
+    const r = row('processing'); const db = statefulDb([r])
+    await run(db, ev.chargeFailed('pi_1'), ev.succeeded('pi_1'))
+    expect(r.stripe_status).toBe('returned')
+  })
+
+  it('payment_failed then a late succeeded stays failed', async () => {
+    const r = row('processing'); const db = statefulDb([r])
+    await run(db, ev.failed('pi_1'), ev.succeeded('pi_1'))
+    expect(r.stripe_status).toBe('failed')
+  })
+
+  it('canceled then a late succeeded stays failed (canceled)', async () => {
+    const r = row('requires_action'); const db = statefulDb([r])
+    await run(db, ev.canceled('pi_1'), ev.succeeded('pi_1'))
+    expect(r.stripe_status).toBe('failed')
+    expect(r.notes).toMatch(/canceled/i)
+  })
+
+  it('succeeded then a stale payment_failed stays succeeded', async () => {
+    const r = row('processing'); const db = statefulDb([r])
+    await run(db, ev.succeeded('pi_1'), ev.failed('pi_1'))
+    expect(r.stripe_status).toBe('succeeded')
+  })
+
+  it('succeeded then a late processing stays succeeded', async () => {
+    const r = row('pending'); const db = statefulDb([r])
+    await run(db, ev.succeeded('pi_1'), ev.processing('pi_1'))
+    expect(r.stripe_status).toBe('succeeded')
+  })
+
+  it('succeeded then charge.failed: the ACH return overrides succeeded', async () => {
+    const r = row('processing'); const db = statefulDb([r])
+    await run(db, ev.succeeded('pi_1'), ev.chargeFailed('pi_1'))
+    expect(r.stripe_status).toBe('returned')
+    expect(r.notes).toMatch(/R01/)
+  })
+
+  it('succeeded then a dispute: the dispute overrides succeeded', async () => {
+    const r = row('processing'); const db = statefulDb([r])
+    await run(db, ev.succeeded('pi_1'), ev.dispute('pi_1'))
+    expect(r.stripe_status).toBe('failed')
+    expect(r.notes).toMatch(/Dispute/)
+  })
+
+  it('dispute delivered BEFORE succeeded: the late succeeded does not erase the dispute', async () => {
+    const r = row('processing'); const db = statefulDb([r])
+    await run(db, ev.dispute('pi_1'), ev.succeeded('pi_1'))
+    expect(r.stripe_status).toBe('failed')
+    expect(r.notes).toMatch(/Dispute/)
+  })
+
+  it('a returned row is not rewritten by a later payment_failed or dispute (terminal, notes kept)', async () => {
+    const r = row('processing'); const db = statefulDb([r])
+    await run(db, ev.chargeFailed('pi_1'), ev.failed('pi_1'), ev.dispute('pi_1'))
+    expect(r.stripe_status).toBe('returned')
+    expect(r.notes).toMatch(/ACH return/)
+  })
+
+  it('a retried (duplicate) succeeded delivery is idempotent', async () => {
+    const r = row('processing'); const db = statefulDb([r])
+    await run(db, ev.succeeded('pi_1'), ev.succeeded('pi_1'))
+    expect(r.stripe_status).toBe('succeeded')
+  })
+
+  it('OI-233 fallback path is gated too: a released (failed) reservation is not revived by a late succeeded', async () => {
+    const r: PayRow = { id: 'p1', stripe_payment_intent_id: null, client_request_id: 'crid-9', stripe_status: 'failed', notes: 'Stripe card_error' }
+    const db = statefulDb([r])
+    await run(db, ev.succeeded('pi_9', { client_request_id: 'crid-9' }))
+    expect(r.stripe_status).toBe('failed')
+    expect(r.stripe_payment_intent_id).toBeNull()
+  })
+
+  it('OI-233 fallback still completes a pending reservation on succeeded', async () => {
+    const r: PayRow = { id: 'p1', stripe_payment_intent_id: null, client_request_id: 'crid-8', stripe_status: 'pending' }
+    const db = statefulDb([r])
+    await run(db, ev.succeeded('pi_8', { client_request_id: 'crid-8' }))
+    expect(r.stripe_status).toBe('succeeded')
+    expect(r.stripe_payment_intent_id).toBe('pi_8')
   })
 })

@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import type { Env } from '../index'
 import { parseTerms, containsConfidentialTerm } from '../lib/confidentiality'
 import { extractLease } from '../lib/lease-extract'
-import { extractPdfText } from '../lib/pdf-extract'
+import { inspectPdf, pagesLackingTextLayer, MIN_PAGE_TEXT_CHARS, type PdfInspection } from '../lib/pdf-extract'
 import { checkRateLimit } from '../lib/rate-limit'
 import { ANTHROPIC_MODEL } from '../lib/models'
 import { getDb } from '../db/client'
@@ -96,12 +96,34 @@ intakeRouter.post('/lease', async (c) => {
   // Extract the text and run it through the same denylist. On a match, block with the same 422 the
   // filename check uses, and — this is the load-bearing property — WITHOUT ever calling extractLease
   // (no egress to api.anthropic.com happens for a blocked document).
-  const extractedText = await safeDecodeAndExtract(pdfBase64)
-  if (extractedText) {
-    if (containsConfidentialTerm(extractedText, terms)) {
-      return c.json({ error: 'Blocked: document appears to reference a confidential matter.' }, 422)
-    }
-  } else {
+  //
+  // Per-page gate (audit finding intake-partial-text-layer-egress): this used to accept any
+  // non-empty MERGED text, so a typed cover page in front of scanned, image-only pages cleared the
+  // scan on the cover alone while the whole PDF (image pages included) egressed. Every page must now
+  // carry a text layer of at least MIN_PAGE_TEXT_CHARS non-whitespace characters (rationale for the
+  // threshold: server/lib/pdf-extract.ts), or the request fails closed with no egress.
+  //
+  // REFUTE C1b (rounds 1-2): a PDF can paint content pdf.js never extracts: raster images (a
+  // scanned page behind a typed footer), AcroForm / annotation appearances (including a Link /AP
+  // stream), a lying ToUnicode map, outlined or Type3 glyphs, images inside patterns. Detecting
+  // every such construct is not tractable, so the fix changes WHAT LEAVES instead: extractLease
+  // receives the scanned per-page text (inspection.pages) and never the raw PDF bytes, so the
+  // outgoing request is exactly the text this scan cleared. Consequently:
+  //   1. the term scan covers page text AND every annotation/form-field string (inspectPdf) — the
+  //      latter is not in the outgoing text, but a term there still marks a confidential matter;
+  //   2. images, form fields and annotations no longer block (they are simply not sent); a warning
+  //      tells the user which pages carried content the extraction did not see;
+  //   3. the per-page MIN_PAGE_TEXT_CHARS rule stays: a scanned page has no text to send, and a
+  //      lease missing pages would extract wrong terms, so it still blocks.
+  const inspection = await safeDecodeAndInspect(pdfBase64)
+  const pages = inspection?.pages ?? null
+  // Pages joined with a newline: a term split across a page break still matches (whitespace runs
+  // are collapsed by containsConfidentialTerm's normalization). Annotation/field text included.
+  if (inspection && containsConfidentialTerm([...inspection.pages, inspection.annotationText].join('\n'), terms)) {
+    return c.json({ error: 'Blocked: document appears to reference a confidential matter.' }, 422)
+  }
+  const lacking = pages ? pagesLackingTextLayer(pages) : [0]
+  if (lacking.length > 0) {
     // REFUTE-pass correction (2026-08-03): an image-only/scanned PDF has no text
     // layer for pdf.js to find, so the content scan cannot run. This used to fail
     // OPEN (proceed with a warning attached to the response) — but extraction ran,
@@ -113,23 +135,33 @@ intakeRouter.post('/lease', async (c) => {
     // unit legitimately exist), and the upload-UI attestation is not enforced
     // server-side. Block instead, matching the manual-entry fallback this route
     // already uses for extraction failures below — never egress a document this
-    // scan couldn't clear.
+    // scan couldn't clear. The same now applies to a document where only SOME
+    // pages lack a text layer.
+    const where = !pages || lacking[0] === 0
+      ? 'no extractable text'
+      : `page(s) ${lacking.join(', ')} of ${pages.length} have no usable text layer (fewer than ${MIN_PAGE_TEXT_CHARS} characters)`
     return c.json({
-      error: 'Content scan unavailable for this document (image-based/scanned PDF, no extractable text). '
-        + 'Enter this lease manually, or convert it to a text-based PDF and re-upload.',
+      error: `Content scan unavailable for this document (image-based/scanned PDF: ${where}). `
+        + 'Enter this lease manually, or convert it to a fully text-based PDF and re-upload.',
     }, 422)
   }
+  const scanned = inspection!
 
   let result
   try {
     const model = resolveModel(c.env.INTAKE_MODEL)
-    result = await extractLease(pdfBase64, { apiKey: c.env.ANTHROPIC_API_KEY, model })
+    // Scanned text only — never pdfBase64 (see the REFUTE C1b comment above).
+    result = await extractLease(scanned.pages, { apiKey: c.env.ANTHROPIC_API_KEY, model })
   } catch {
     return c.json({ error: 'Lease extraction failed. Enter the lease manually.' }, 502)
   }
 
   // Post-egress defense: scrub any field whose text hits the denylist.
   const warnings = [...result.warnings]
+  const notSent = describeNotSent(scanned)
+  if (notSent) {
+    warnings.push(`Only the document's extracted text was sent for extraction; ${notSent} were not. Check the extracted fields against the document.`)
+  }
   const fields: Record<string, unknown> = {}
   for (const [k, v] of Object.entries(result.fields)) {
     if (typeof v === 'string' && containsConfidentialTerm(v, terms)) {
@@ -141,16 +173,25 @@ intakeRouter.post('/lease', async (c) => {
   return c.json({ fields, confidence: result.confidence, warnings })
 })
 
-/** Decodes the base64 payload and runs the PDF text extractor. Never throws —
- *  a decode failure (shouldn't happen once the magic-byte check above has
- *  passed, but is not impossible for a crafted payload) collapses to the
- *  same "no text available" signal as an image-only PDF; see the
- *  fail-open-with-warning handling at the call site. */
-async function safeDecodeAndExtract(pdfBase64: string): Promise<string> {
+/** Human-readable list of page content that was NOT sent for extraction (images, form fields,
+ *  annotations), or null if none. Informational only: nothing here blocks. */
+function describeNotSent(i: PdfInspection): string | null {
+  const parts: string[] = []
+  if (i.imagePages.length > 0) parts.push(`embedded images on page(s) ${i.imagePages.join(', ')}`)
+  if (i.annotationPages.length > 0) parts.push(`form fields or annotations on page(s) ${i.annotationPages.join(', ')}`)
+  else if (i.hasAcroForm) parts.push('form fields')
+  return parts.length > 0 ? parts.join(' and ') : null
+}
+
+/** Decodes the base64 payload and inspects the PDF (per-page text, images, annotations, form
+ *  fields). Never throws — a decode failure (shouldn't happen once the magic-byte check above has
+ *  passed, but is not impossible for a crafted payload) or an unparseable PDF returns null, which
+ *  the call site treats as "no text available" and blocks. */
+async function safeDecodeAndInspect(pdfBase64: string): Promise<PdfInspection | null> {
   try {
     const bytes = Uint8Array.from(atob(pdfBase64), (ch) => ch.charCodeAt(0))
-    return await extractPdfText(bytes)
+    return await inspectPdf(bytes)
   } catch {
-    return ''
+    return null
   }
 }
