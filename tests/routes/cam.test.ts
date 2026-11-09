@@ -856,3 +856,14 @@ describe('POST /api/cam/calculate: same-unit overlap (REFUTE C4b)', () => {
     expect(camInsertSpy).not.toHaveBeenCalled()
   })
 })
+
+describe('POST /api/cam/calculate: implausible expense stop (REFUTE C4d)', () => {
+  it('422 and nothing saved when stop x SF exceeds the share by more than 1x', async () => {
+    state.leaseRentType = 'modified_gross'
+    state.leaseExpenseStop = 42000 // a total typed into the $/SF/yr field; share is $200
+    const res = await calculate({ lease_id: TENANT_LEASE_ID, reconciliation_year: 2025 })
+    expect(res.status).toBe(422)
+    expect(((await res.json()) as { error: string }).error).toMatch(/\$\/SF\/yr/)
+    expect(camInsertSpy).not.toHaveBeenCalled()
+  })
+})

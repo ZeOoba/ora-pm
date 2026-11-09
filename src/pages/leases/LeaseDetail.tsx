@@ -222,7 +222,7 @@ export function LeaseDetail() {
                         <TermRow label="TI Allowance">{formatCurrency(data.ti_allowance)}</TermRow>
                       )}
                       {data.expense_stop_amount != null && (
-                        <TermRow label="Expense Stop">{formatCurrency(data.expense_stop_amount)}/SF</TermRow>
+                        <TermRow label="Expense Stop">{formatCurrency(data.expense_stop_amount)}/SF/yr</TermRow>
                       )}
                     </dl>
                   </SectionCard>

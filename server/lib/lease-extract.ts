@@ -37,7 +37,7 @@ const EXTRACT_TOOL = {
       security_deposit: { type: 'number' },
       rent_type: { type: 'string', enum: ['nnn', 'gross', 'modified_gross'] },
       ti_allowance: { type: 'number' },
-      expense_stop_amount: { type: 'number' },
+      expense_stop_amount: { type: 'number', description: 'expense stop in dollars per square foot per YEAR ($/SF/yr); if the lease states only a total or monthly figure, omit this field and mention it in notes' },
       notes: { type: 'string', description: 'any notable clauses (options, escalations, percentage rent)' },
       _confidence: { type: 'object', description: 'per-field confidence 0..1' },
     },

@@ -299,7 +299,7 @@ export function LeaseForm({
               />
             </Field>
             <Field
-              label="Expense Stop ($/SF)"
+              label="Expense Stop ($/SF/yr)"
               htmlFor="expense_stop_amount"
               hint="For gross / modified-gross leases"
             >

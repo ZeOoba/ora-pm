@@ -7,7 +7,7 @@ export interface CAMInput {
   estimatedCamPaid: number
   /** leases.rent_type. Omitted = 'nnn' (the pre-fix behaviour, kept for existing callers). */
   rentType?: CAMRentType
-  /** leases.expense_stop_amount: $/SF per year (LeaseForm "Expense Stop ($/SF)"). */
+  /** leases.expense_stop_amount: $/SF per year (LeaseForm "Expense Stop ($/SF/yr)"). */
   expenseStopPerSF?: number | null
 }
 
@@ -168,7 +168,22 @@ export function calculateCAMTrueUp(input: CAMInput): CAMOutput {
     owed = share
     recoveryBasis = 'full_pro_rata'
   } else if (stop !== null) {
-    owed = Math.max(0, share - stop * tenantSF)
+    // REFUTE C4d: expense_stop_amount is $/SF per YEAR. A stop whose dollar value exceeds the
+    // tenant's pro-rata share by more than 1x (stop$ > 2 x share) is almost certainly a unit error
+    // (a total, or an annual figure typed where a monthly one was meant) that would silently zero
+    // the recovery, so it is refused for a human to check. Up to 2x is allowed: expenses can
+    // legitimately fall well below the stop. Skipped when there is no share at all (nothing is
+    // recoverable either way).
+    const stopDollars = stop * tenantSF
+    if (share > 0 && stopDollars > 2 * share) {
+      const usd = (n: number) => `$${Math.round(n).toLocaleString('en-US')}`
+      throw new CAMTermsError(
+        `Expense stop $${stop}/SF/yr x ${Math.round(tenantSF).toLocaleString('en-US')} SF = ${usd(stopDollars)}, `
+        + `more than twice this tenant's pro-rata share (${usd(share)}). The stop must be entered in `
+        + '$/SF/yr; check whether a total or monthly amount was entered, correct the lease, then recalculate.'
+      )
+    }
+    owed = Math.max(0, share - stopDollars)
     recoveryBasis = 'above_expense_stop'
   } else if (rentType === 'modified_gross') {
     throw new CAMTermsError(

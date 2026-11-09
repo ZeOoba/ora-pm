@@ -230,3 +230,32 @@ describe('computeCamPool: same-unit overlap (REFUTE C4b)', () => {
     ], 2026)).not.toThrow()
   })
 })
+
+// REFUTE C4d (refute-orapm/cam-probe.mjs #3): a stop typed as a TOTAL dollar figure ($42,000) in a
+// $/SF/yr field silently zeroes recovery. stop x SF more than 2x the tenant's pro-rata share
+// (i.e. exceeding it by more than 1x) is treated as a likely unit error and refused.
+describe('calculateCAMTrueUp: implausible expense stop (REFUTE C4d)', () => {
+  const mg = { totalRecoverableExpenses: 80000, tenantSF: 10000, totalLeasedSF: 10000, estimatedCamPaid: 12000, rentType: 'modified_gross' as const }
+
+  it('refuses a stop entered as a total dollar amount (probe: $42,000 in a $/SF/yr field)', () => {
+    expect(() => calculateCAMTrueUp({ ...mg, expenseStopPerSF: 42000 })).toThrow(CAMTermsError)
+    expect(() => calculateCAMTrueUp({ ...mg, expenseStopPerSF: 42000 })).toThrow(/\$\/SF\/yr/)
+  })
+
+  it('accepts a plausible stop (probe: $5/SF on a $8/SF share)', () => {
+    expect(calculateCAMTrueUp({ ...mg, expenseStopPerSF: 5 }).actualCamOwed).toBe(30000)
+  })
+
+  it('accepts a stop up to exactly 2x the share (expenses fell well below the stop): owes 0', () => {
+    expect(calculateCAMTrueUp({ ...mg, expenseStopPerSF: 16 }).actualCamOwed).toBe(0)
+    expect(() => calculateCAMTrueUp({ ...mg, expenseStopPerSF: 16.01 })).toThrow(CAMTermsError)
+  })
+
+  it('does not trip when there are no recoverable expenses at all (share 0)', () => {
+    expect(calculateCAMTrueUp({ ...mg, totalRecoverableExpenses: 0, expenseStopPerSF: 5 }).actualCamOwed).toBe(0)
+  })
+
+  it('nnn ignores the stop entirely, so no plausibility check applies', () => {
+    expect(calculateCAMTrueUp({ ...mg, rentType: 'nnn', expenseStopPerSF: 42000 }).actualCamOwed).toBe(80000)
+  })
+})
