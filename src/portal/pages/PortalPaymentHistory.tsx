@@ -16,6 +16,9 @@ const STATUS_BADGE: Record<string, string> = {
   pending: 'bg-status-warning/10 text-status-warning',
   failed: 'bg-status-danger/10 text-status-danger',
   returned: 'bg-status-danger/10 text-status-danger',
+  // E9: an open dispute (stripe-events.ts). Uncredited until it closes; a won dispute restores
+  // the payment, so it reads as "not yet settled", like processing.
+  disputed: 'bg-status-warning/10 text-status-warning',
 }
 
 export function PortalPaymentHistory() {
