@@ -564,6 +564,45 @@ describe('POST /api/cron/monthly-billing', () => {
     })
   })
 
+  // M11 (2026-11-08 audit): the per-lease catch around paymentIntents.create and the non-23505
+  // payments-insert branch had no test. Both are per-lease failures, NOT whole-batch failures, so
+  // the run still answers 200; the error must be counted, attributed to the right lease, and must
+  // not stop the next lease's debit.
+  it('M11: a Stripe create rejection for lease A is counted and named, and lease B is still debited and recorded', async () => {
+    state.leases = [autopayLease('lease_A'), autopayLease('lease_B')]
+    mockStripe.paymentIntents.create.mockImplementation(async (params: { metadata: { lease_id: string } }) => {
+      if (params.metadata.lease_id === 'lease_A') throw new Error('Your card was declined (bank_account_unusable)')
+      return { id: 'pi_B', status: 'processing' }
+    })
+
+    const res = await postBilling()
+    expect(res.status).toBe(200)
+    const body = await res.json() as { autopayErrors: number; errors: number; errorMessages: string[] }
+    expect(body.autopayErrors).toBe(1)
+    expect(body.errors).toBe(1)
+    expect(body.errorMessages).toHaveLength(1)
+    expect(body.errorMessages[0]).toMatch(/autopay lease lease_A: .*bank_account_unusable/)
+    expect(mockStripe.paymentIntents.create).toHaveBeenCalledTimes(2)
+    const recorded = state.payments.filter(p => p.method === 'ach_stripe')
+    expect(recorded).toHaveLength(1)
+    expect(recorded[0]).toMatchObject({ lease_id: 'lease_B', amount: 5000, autopay_period: '2026-06-01' })
+  })
+
+  it('M11: a non-23505 payments insert error after a successful create is reported as "created but not recorded"', async () => {
+    mockStripe.paymentIntents.create.mockResolvedValue({ id: 'pi_orphan', status: 'processing' })
+    state.paymentsInsertError = { code: 'XX000', message: 'internal error' }
+
+    const res = await postBilling()
+    expect(res.status).toBe(200)
+    const body = await res.json() as { autopayErrors: number; errors: number; skipped: number; errorMessages: string[] }
+    expect(body.autopayErrors).toBe(1)
+    expect(body.errors).toBe(1)
+    expect(body.errorMessages).toHaveLength(1)
+    // Names the lease AND the PaymentIntent, so the orphaned debit can be reconciled by hand.
+    expect(body.errorMessages[0]).toMatch(/autopay lease lease_1: payment pi_orphan created but not recorded: internal error/)
+    expect(state.payments.filter(p => p.method === 'ach_stripe')).toHaveLength(0)
+  })
+
   // -------------------------------------------------------------------------
   // OI-162/#1 regression coverage — round 1: bulk charge posting
   // -------------------------------------------------------------------------

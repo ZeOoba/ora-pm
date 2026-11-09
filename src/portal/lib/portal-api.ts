@@ -77,7 +77,11 @@ export interface Payment {
   notes: string | null
 }
 
-export interface Lease extends DBLease {
+// Mirrors PORTAL_LEASE_SELECT in server/routes/portal.ts (M8): the tenant endpoint returns only
+// these lease columns, so the type does not promise internal fields the server never sends.
+export interface Lease extends Pick<DBLease,
+  | 'id' | 'start_date' | 'end_date' | 'status' | 'rent_type' | 'base_rent_monthly'
+  | 'cam_estimate_monthly' | 'autopay_enabled' | 'autopay_payment_method_id'> {
   units?: { suite: string; sf: number; properties?: { name: string; address: string; city: string; state: string } }
   lease_amendments?: Array<{ id: string; effective_date: string; description: string }>
 }
