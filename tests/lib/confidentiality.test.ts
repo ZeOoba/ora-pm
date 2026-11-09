@@ -61,3 +61,24 @@ describe('parseTerms: internal whitespace collapsed', () => {
     expect(parseTerms('ZZP   Partnership, Zeta')).toEqual(['zzp partnership', 'zeta'])
   })
 })
+
+// REFUTE C1c: the compact (space-stripped) form missed terms split by a line-break hyphen or
+// punctuation. The compact form now strips every non-letter/non-digit on both sides.
+describe('containsConfidentialTerm: punctuation-insensitive compact match (REFUTE C1c)', () => {
+  const terms = parseTerms('Blueridge Partners,ZZ Holdings')
+  it('matches a term split by a line-break hyphen', () => {
+    expect(containsConfidentialTerm('This lease is made between Blue-\nridge Partners and Tenant LLC.', terms)).toBe(true)
+  })
+  it('matches dotted / punctuated spellings', () => {
+    expect(containsConfidentialTerm('B.L.U.E.R.I.D.G.E', parseTerms('BLUERIDGE'))).toBe(true)
+    expect(containsConfidentialTerm('Blueridge-Partners', terms)).toBe(true)
+    expect(containsConfidentialTerm('Blue Ridge Partners', terms)).toBe(true)
+    expect(containsConfidentialTerm('Z.Z. Holdings', terms)).toBe(true)
+  })
+  it('a punctuation-only roster term never matches everything', () => {
+    expect(containsConfidentialTerm('anything at all', ['-.-'])).toBe(false)
+  })
+  it('still does not match unrelated text', () => {
+    expect(containsConfidentialTerm('Acme Logistics lease for Suite 4', terms)).toBe(false)
+  })
+})
