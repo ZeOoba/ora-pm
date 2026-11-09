@@ -58,6 +58,14 @@ describe('check-refute-required CLI (spawned against a fixture repo)', () => {
     expect(r.out).toMatch(/does-not-exist/)
   }, 30_000)
 
+  it('--strict exits 1 on an EMPTY --base (it used to diff HEAD...HEAD and pass)', () => {
+    git('checkout', '-q', '-B', 'empty-base', 'base')
+    write('server/lib/postgrest-paging.ts', 'export const X = 9\n')
+    git('commit', '-q', '-am', 'change paging')
+    const r = runGate('--strict', '--base=')
+    expect(r.code).toBe(1)
+  }, 30_000)
+
   it('without --strict the same unresolvable base only warns (exit 0)', () => {
     git('checkout', '-q', '-B', 'unknown-base', 'base')
     const r = runGate('--base=origin/does-not-exist')

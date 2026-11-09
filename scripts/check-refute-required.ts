@@ -171,6 +171,10 @@ export function runRefuteCheck(io: RefuteCheckIO): number {
   let changed: string[]
   let messageBlob: string
   try {
+    // REFUTE finding: an empty base made the range `...HEAD` (= HEAD...HEAD), an empty diff that
+    // reported "OK". Require a non-empty base that resolves to a commit before trusting the range.
+    if (base.trim() === '') throw new Error('base ref is empty')
+    io.git(['rev-parse', '--verify', '--quiet', `${base}^{commit}`])
     changed = io.git(['diff', '--name-only', `${base}...HEAD`]).split('\n').map((s) => s.trim()).filter(Boolean)
     messageBlob = io.git(['log', `${base}..HEAD`, '--format=%B'])
   } catch (err) {

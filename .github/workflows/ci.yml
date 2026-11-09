@@ -88,7 +88,8 @@ jobs:
       # PR-only: it diffs the PR against its base; a direct push to main has no diff base, so it is
       # skipped there. It sits in this job ahead of the deploy steps, so a failing gate fails the
       # job before anything ships — make this workflow a REQUIRED check via branch protection to
-      # hard-enforce it at merge. Fails OPEN on git/tooling gaps (scripts/check-refute-required.ts).
+      # hard-enforce it at merge. Under --strict it fails CLOSED when the base ref is empty or does
+      # not resolve (M12), so the fetch below is required (scripts/check-refute-required.ts).
       - name: REFUTE gate (financial-decision paths)
         if: github.event_name == 'pull_request'
         run: |

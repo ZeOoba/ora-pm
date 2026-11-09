@@ -103,27 +103,50 @@ describe('check-refute-required — financial-source classification', () => {
       'server/lib/rate-limit.ts', // abuse throttle
       'server/lib/list-query.ts', // list-endpoint sort/page params (display, not totals)
     ])
+    // Every relative import form: `from '...'` / `from "..."` (incl. `import type` and
+    // `export ... from`), bare side-effect `import '...'`, and dynamic `import('...')`. The scan
+    // follows the non-financial libs too, so a "plumbing" module cannot launder a money import.
+    const IMPORT_RE = /(?:\bfrom\s*|\bimport\s*\(?\s*)(['"])(\.{1,2}\/[^'"]+)\1/g
+    const resolve = (fromFile: string, spec: string): string => {
+      const out: string[] = []
+      for (const part of [...fromFile.split('/').slice(0, -1), ...spec.split('/')]) {
+        if (part === '..') out.pop()
+        else if (part !== '.') out.push(part)
+      }
+      return `${out.join('/').replace(/\.(ts|js)$/, '')}.ts`
+    }
     const unclassified: string[] = []
     let seen = 0
-    for (const gated of FINANCIAL_SOURCE_PATHS) {
-      const src = readFileSync(gated, 'utf8')
-      const dir = gated.slice(0, gated.lastIndexOf('/'))
-      for (const m of src.matchAll(/from '(\.{1,2}\/[^']+)'/g)) {
-        const out: string[] = []
-        for (const part of [...dir.split('/'), ...m[1].split('/')]) {
-          if (part === '..') out.pop()
-          else if (part !== '.') out.push(part)
-        }
-        const resolved = `${out.join('/')}.ts`
+    const queue = [...FINANCIAL_SOURCE_PATHS, ...NON_FINANCIAL_LIBS]
+    const scanned = new Set<string>()
+    while (queue.length > 0) {
+      const file = queue.shift() as string
+      if (scanned.has(file)) continue
+      scanned.add(file)
+      for (const m of readFileSync(file, 'utf8').matchAll(IMPORT_RE)) {
+        const resolved = resolve(file, m[2])
         if (!resolved.startsWith('server/lib/')) continue
         seen++
         if (!FINANCIAL_SOURCE_PATHS.has(resolved) && !NON_FINANCIAL_LIBS.has(resolved)) {
-          unclassified.push(`${gated} -> ${resolved}`)
+          unclassified.push(`${file} -> ${resolved}`)
         }
       }
     }
     expect(seen).toBeGreaterThan(0) // the import scan itself must be finding imports
     expect(unclassified).toEqual([])
+    // The scanner recognizes every import form it claims to (REFUTE finding: double quotes,
+    // side-effect and dynamic imports were missed).
+    const sample = [
+      `import { a } from '../lib/a'`,
+      `import type { B } from "../lib/b"`,
+      `export { c } from '../lib/c'`,
+      `import '../lib/d'`,
+      `const e = await import('../lib/e')`,
+      `import {\n  f,\n} from '../lib/f.js'`,
+    ].join('\n')
+    expect([...sample.matchAll(IMPORT_RE)].map((m) => resolve('server/routes/x.ts', m[2]))).toEqual(
+      ['a', 'b', 'c', 'd', 'e', 'f'].map((n) => `server/lib/${n}.ts`),
+    )
   })
 })
 
@@ -287,8 +310,25 @@ describe('check-refute-required — runRefuteCheck (exit logic)', () => {
 
   it('resolves the base from --base, then $REFUTE_BASE, then origin/main', () => {
     const ok = repo([], '')
-    expect(harness(ok, ['--base=feature/x']).calls[0]).toContain('feature/x...HEAD')
-    expect(harness(ok, [], { REFUTE_BASE: 'release' }).calls[0]).toContain('release...HEAD')
-    expect(harness(ok, []).calls[0]).toContain('origin/main...HEAD')
+    const diffArg = (calls: string[][]) => calls.find((c) => c[0] === 'diff')?.join(' ')
+    expect(diffArg(harness(ok, ['--base=feature/x']).calls)).toContain('feature/x...HEAD')
+    expect(diffArg(harness(ok, [], { REFUTE_BASE: 'release' }).calls)).toContain('release...HEAD')
+    expect(diffArg(harness(ok, []).calls)).toContain('origin/main...HEAD')
+  })
+
+  // REFUTE finding (M12): an EMPTY base turned the range into `...HEAD` (= HEAD...HEAD), an empty
+  // diff, so `--strict --base=` or REFUTE_BASE='' passed every money PR with "OK".
+  it('--strict fails closed on an empty --base or an empty $REFUTE_BASE', () => {
+    // Mimics git: `...HEAD` with an empty base is HEAD...HEAD, an empty range.
+    const financial = (args: string[]): string =>
+      args[0] === 'diff' && args.includes('...HEAD') ? '' : repo(['server/routes/cron.ts'], 'fix: x\n')(args)
+    expect(harness(financial, ['--strict', '--base=']).code).toBe(1)
+    expect(harness(financial, ['--strict'], { REFUTE_BASE: '' }).code).toBe(1)
+  })
+
+  it('verifies the base resolves to a commit (git rev-parse --verify) before diffing', () => {
+    const { calls } = harness(repo([], ''), ['--strict', '--base=origin/main'])
+    expect(calls[0]).toEqual(['rev-parse', '--verify', '--quiet', 'origin/main^{commit}'])
+    expect(calls[1][0]).toBe('diff')
   })
 })
