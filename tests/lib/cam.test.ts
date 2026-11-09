@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { calculateCAMTrueUp, yearOverlapDays, computeCamPool, CAMTermsError } from '../../server/lib/cam'
+import { calculateCAMTrueUp, yearOverlapDays, computeCamPool, CAMTermsError, assertNoStaleClosedLeases } from '../../server/lib/cam'
 
 describe('calculateCAMTrueUp', () => {
   it('calculates positive true-up when tenant owes more than estimated', () => {
@@ -257,5 +257,50 @@ describe('calculateCAMTrueUp: implausible expense stop (REFUTE C4d)', () => {
 
   it('nnn ignores the stop entirely, so no plausibility check applies', () => {
     expect(calculateCAMTrueUp({ ...mg, rentType: 'nnn', expenseStopPerSF: 42000 }).actualCamOwed).toBe(80000)
+  })
+})
+
+// REFUTE C4b' (refute-orapm/cam-probe2.mjs, "stale-term/vacant"): a lease marked terminated or
+// expired that still carries a FUTURE end_date is weighted for the whole year even when its unit
+// sits vacant, inflating the denominator (no replacement lease, so the overlap check cannot see it).
+describe("assertNoStaleClosedLeases (REFUTE C4b')", () => {
+  const AS_OF = '2026-11-08'
+  it('throws naming the lease when a terminated lease ends on/after the calculation date', () => {
+    const run = () => assertNoStaleClosedLeases([
+      { id: 'A_terminated_vacant', unit_id: 'U1', status: 'terminated', end_date: '2028-12-31' },
+      { id: 'C', unit_id: 'U2', status: 'active', end_date: '2030-12-31' },
+    ], AS_OF)
+    expect(run).toThrow(CAMTermsError)
+    expect(run).toThrow(/A_terminated_vacant/)
+    expect(run).toThrow(/end_date/)
+  })
+
+  it('also catches an expired lease with a future end_date, and the boundary end_date == calculation date', () => {
+    expect(() => assertNoStaleClosedLeases([{ id: 'E', status: 'expired', end_date: '2027-01-31' }], AS_OF)).toThrow(CAMTermsError)
+    expect(() => assertNoStaleClosedLeases([{ id: 'T', status: 'terminated', end_date: AS_OF }], AS_OF)).toThrow(CAMTermsError)
+  })
+
+  it('passes terminated/expired leases whose end_date is already past, and active leases with future dates', () => {
+    expect(() => assertNoStaleClosedLeases([
+      { id: 'T', status: 'terminated', end_date: '2026-06-30' },
+      { id: 'E', status: 'expired', end_date: '2026-11-07' },
+      { id: 'A', status: 'active', end_date: '2031-01-01' },
+    ], AS_OF)).not.toThrow()
+  })
+})
+
+// cam-probe2.mjs boundary repros for the same-unit overlap check (REFUTE C4b).
+describe('computeCamPool: same-unit boundary cases (cam-probe2)', () => {
+  it('a shared day (A ends 06-30, B starts 06-30) counts as an overlap and fails closed', () => {
+    expect(() => computeCamPool([
+      { id: 'A', unit_id: 'U', sf: 1, start_date: '2024-01-01', end_date: '2026-06-30' },
+      { id: 'B', unit_id: 'U', sf: 1, start_date: '2026-06-30', end_date: '2030-01-01' },
+    ], 2026)).toThrow(CAMTermsError)
+  })
+  it('adjacent terms (B starts 07-01) are fine and sum to the physical SF', () => {
+    expect(computeCamPool([
+      { id: 'A', unit_id: 'U', sf: 1, start_date: '2024-01-01', end_date: '2026-06-30' },
+      { id: 'B', unit_id: 'U', sf: 1, start_date: '2026-07-01', end_date: '2030-01-01' },
+    ], 2026).weightedLeasedSF).toBeCloseTo(1, 12)
   })
 })

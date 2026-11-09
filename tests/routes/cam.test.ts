@@ -867,3 +867,29 @@ describe('POST /api/cam/calculate: implausible expense stop (REFUTE C4d)', () =>
     expect(camInsertSpy).not.toHaveBeenCalled()
   })
 })
+
+describe("POST /api/cam/calculate: stale terminated lease on a vacant unit (REFUTE C4b')", () => {
+  it('422 telling the user to correct the end_date; nothing saved', async () => {
+    state.extraUnits = [{ id: 'u_vacant', property_id: PROPERTY_ID, sf: 10000 }]
+    state.extraLeases = [{
+      id: '77777777-7777-4777-8777-777777777777', unit_id: 'u_vacant', status: 'terminated',
+      start_date: '2019-01-01', end_date: '2099-12-31', rent_type: 'nnn', expense_stop_amount: null,
+    }]
+    const res = await calculate({ lease_id: TENANT_LEASE_ID, reconciliation_year: 2025 })
+    expect(res.status).toBe(422)
+    const { error } = await res.json() as { error: string }
+    expect(error).toMatch(/77777777-7777-4777-8777-777777777777/)
+    expect(error).toMatch(/correct.*end_date/i)
+    expect(camInsertSpy).not.toHaveBeenCalled()
+  })
+
+  it('a terminated lease whose end_date is already past is fine (weighted by its days in effect)', async () => {
+    state.extraUnits = [{ id: 'u_gone', property_id: PROPERTY_ID, sf: 36500 }]
+    state.extraLeases = [{
+      id: '88888888-8888-4888-8888-888888888888', unit_id: 'u_gone', status: 'terminated',
+      start_date: '2019-01-01', end_date: '2025-03-31', rent_type: 'nnn', expense_stop_amount: null,
+    }]
+    const res = await calculate({ lease_id: TENANT_LEASE_ID, reconciliation_year: 2025 })
+    expect(res.status).toBe(200)
+  })
+})

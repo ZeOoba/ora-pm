@@ -83,6 +83,28 @@ export interface CAMPoolLeaseInput {
   end_date: string
 }
 
+/**
+ * REFUTE C4b': a lease whose status says it is over ('terminated' or 'expired') but whose end_date
+ * is on or after the calculation date still carries its ORIGINAL end_date. computeCamPool would
+ * weight it as occupying its unit for the whole year even when the unit has sat vacant since the
+ * real move-out (no replacement lease, so the same-unit overlap check cannot see it), inflating the
+ * denominator and understating every other tenant's share. Fail closed for a human to correct the
+ * end_date; the schema has no terminated-on date to use instead (follow-up). `asOf` is an ISO date.
+ */
+export function assertNoStaleClosedLeases(
+  leases: ReadonlyArray<{ id: string; unit_id?: string; status: string; end_date: string }>,
+  asOf: string,
+): void {
+  const stale = leases.filter((l) => (l.status === 'terminated' || l.status === 'expired') && l.end_date >= asOf)
+  if (stale.length === 0) return
+  const list = stale.map((l) => `${l.id} (${l.status}, end_date ${l.end_date}${l.unit_id ? `, unit ${l.unit_id}` : ''})`).join('; ')
+  throw new CAMTermsError(
+    `Lease(s) marked terminated/expired still carry an end_date on or after ${asOf}: ${list}. `
+    + 'They would be counted as occupying their unit for the rest of the term. Correct the end_date '
+    + 'to the actual move-out date, then recalculate.'
+  )
+}
+
 export interface CAMPool {
   year: number
   daysInYear: number

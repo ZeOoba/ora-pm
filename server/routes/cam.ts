@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { getDb } from '../db/client'
-import { calculateCAMTrueUp, computeCamPool, CAMTermsError, type CAMPool, type CAMRentType } from '../lib/cam'
+import { assertNoStaleClosedLeases, calculateCAMTrueUp, computeCamPool, CAMTermsError, type CAMPool, type CAMRentType } from '../lib/cam'
 import { CamCalculateSchema, CamRecoverableQuerySchema } from '../lib/schemas'
 import { dbError } from '../lib/api-error'
 import { fetchAllPages, fetchChunked, POSTGREST_MAX_ROWS } from '../lib/postgrest-paging'
@@ -99,6 +99,13 @@ async function loadCamPool(db: Db, propertyId: string, year: number): Promise<
       // unit_id: overlapping leases on one unit fail closed (REFUTE C4b) — see computeCamPool.
       leases.map((l) => ({ id: l.id, unit_id: l.unit_id, unit_label: unitLabel.get(l.unit_id), sf: sfByUnit.get(l.unit_id) ?? NaN, start_date: l.start_date, end_date: l.end_date })),
       year,
+    )
+    // REFUTE C4b': a terminated/expired pool lease whose end_date is still on/after today keeps its
+    // original end_date and would be weighted as occupying a possibly vacant unit — fail closed.
+    // Runs after computeCamPool so a same-unit overlap (C4b) reports its more specific message.
+    assertNoStaleClosedLeases(
+      leases.filter((l) => pool.byLease[l.id] !== undefined).map((l) => ({ id: l.id, unit_id: unitLabel.get(l.unit_id) ?? l.unit_id, status: l.status, end_date: l.end_date })),
+      new Date().toISOString().slice(0, 10),
     )
     return { pool, leases, error: null }
   } catch (err) {
