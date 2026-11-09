@@ -27,3 +27,20 @@ describe('PortalPaymentHistory — STATUS_BADGE covers pending (OI-065/223/233 f
     expect(pending).toBe(processing)
   })
 })
+
+// E9 (2026-11-08): charge.dispute.created now writes stripe_status = 'disputed' (it used to write
+// 'failed'). The payment is uncredited while the dispute is open and may be restored if it is
+// won, so it gets the "not yet settled" treatment, not the generic gray fallback.
+describe('PortalPaymentHistory — STATUS_BADGE covers disputed (E9)', () => {
+  const source = readFileSync(
+    join(__dirname, '../../src/portal/pages/PortalPaymentHistory.tsx'),
+    'utf-8'
+  )
+
+  it('gives disputed the same treatment as processing', () => {
+    const processing = source.match(/processing:\s*'([^']+)'/)?.[1]
+    const disputed = source.match(/disputed:\s*'([^']+)'/)?.[1]
+    expect(processing).toBeTruthy()
+    expect(disputed).toBe(processing)
+  })
+})

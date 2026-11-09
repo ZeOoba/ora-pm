@@ -231,7 +231,7 @@ describe('handleStripeEvent — charge.failed', () => {
 })
 
 describe('handleStripeEvent — charge.dispute.created', () => {
-  it('updates stripe_status to failed with dispute reason', async () => {
+  it('updates stripe_status to disputed (E9: a distinct status, not failed) with dispute reason', async () => {
     const { db, calls } = makeDb([MATCHED])
     const event = {
       type: 'charge.dispute.created',
@@ -240,7 +240,7 @@ describe('handleStripeEvent — charge.dispute.created', () => {
 
     await handleStripeEvent(event, db)
 
-    expect(calls[0].patch).toEqual(expect.objectContaining({ stripe_status: 'failed', notes: expect.stringContaining('fraudulent') }))
+    expect(calls[0].patch).toEqual(expect.objectContaining({ stripe_status: 'disputed', notes: expect.stringContaining('fraudulent') }))
     expect(calls[0].filters).toEqual([['eq', 'stripe_payment_intent_id', 'pi_dis'], ['in', 'stripe_status', ALLOWED_FROM.disputed]])
   })
 
@@ -326,6 +326,18 @@ describe('allowed-transition table', () => {
     expect(fromSucceeded).toEqual(['disputed', 'returned'])
   })
 
+  // E9/E10: 'disputed' is NOT terminal (a closed dispute resolves it) but no PaymentIntent
+  // lifecycle event may move a row out of it; only the dispute's own outcome, or an ACH return
+  // (money gone either way), can.
+  it('a disputed row leaves only via dispute_won / dispute_lost, or an ACH return', () => {
+    const fromDisputed = Object.entries(ALLOWED_FROM).filter(([, from]) => from.includes('disputed')).map(([e]) => e).sort()
+    expect(fromDisputed).toEqual(['dispute_lost', 'dispute_won', 'returned'])
+    expect(ALLOWED_FROM.dispute_won).toEqual(['disputed'])
+    expect(ALLOWED_FROM.dispute_lost).toEqual(['disputed'])
+    expect(IN_FLIGHT_STATUSES as readonly string[]).not.toContain('disputed')
+    expect(TERMINAL_STATUSES as readonly string[]).not.toContain('disputed')
+  })
+
   it('processing only advances a pending row; succeeded/failed/canceled advance any in-flight row', () => {
     expect(ALLOWED_FROM.processing).toEqual(['pending'])
     for (const e of ['succeeded', 'payment_failed', 'canceled'] as const) {
@@ -365,6 +377,7 @@ const ev = {
   canceled: (pi: string) => ({ type: 'payment_intent.canceled', data: { object: { id: pi, metadata: {} } } }),
   chargeFailed: (pi: string) => ({ type: 'charge.failed', data: { object: { id: 'ch_1', payment_intent: pi, failure_code: 'R01', failure_message: 'Insufficient funds' } } }),
   dispute: (pi: string) => ({ type: 'charge.dispute.created', data: { object: { id: 'dp_1', payment_intent: pi, reason: 'fraudulent' } } }),
+  disputeClosed: (pi: string, status: string) => ({ type: 'charge.dispute.closed', data: { object: { id: 'dp_1', payment_intent: pi, reason: 'fraudulent', status } } }),
 }
 
 async function run(db: DB, ...events: object[]) {
@@ -415,14 +428,14 @@ describe('out-of-order / retried webhook sequences (stateful)', () => {
   it('succeeded then a dispute: the dispute overrides succeeded', async () => {
     const r = row('processing'); const db = statefulDb([r])
     await run(db, ev.succeeded('pi_1'), ev.dispute('pi_1'))
-    expect(r.stripe_status).toBe('failed')
+    expect(r.stripe_status).toBe('disputed')
     expect(r.notes).toMatch(/Dispute/)
   })
 
   it('dispute delivered BEFORE succeeded: the late succeeded does not erase the dispute', async () => {
     const r = row('processing'); const db = statefulDb([r])
     await run(db, ev.dispute('pi_1'), ev.succeeded('pi_1'))
-    expect(r.stripe_status).toBe('failed')
+    expect(r.stripe_status).toBe('disputed')
     expect(r.notes).toMatch(/Dispute/)
   })
 
@@ -453,5 +466,93 @@ describe('out-of-order / retried webhook sequences (stateful)', () => {
     await run(db, ev.succeeded('pi_8', { client_request_id: 'crid-8' }))
     expect(r.stripe_status).toBe('succeeded')
     expect(r.stripe_payment_intent_id).toBe('pi_8')
+  })
+})
+
+// E10 (PR #53 REFUTE follow-up): charge.dispute.closed was unhandled, so a dispute the landlord
+// WON left the payment uncredited and the tenant showing a balance they had paid. A closed
+// dispute now resolves the 'disputed' row: won / warning_closed (an inquiry that never pulled the
+// funds) -> succeeded; lost -> failed. Both are compare-and-swaps from 'disputed' only.
+describe('charge.dispute.closed (stateful)', () => {
+  const row = (status: string): PayRow => ({ id: 'p1', stripe_payment_intent_id: 'pi_1', client_request_id: null, stripe_status: status, notes: null })
+
+  it('won: disputed -> succeeded (the payment counts again)', async () => {
+    const r = row('processing'); const db = statefulDb([r])
+    await run(db, ev.succeeded('pi_1'), ev.dispute('pi_1'), ev.disputeClosed('pi_1', 'won'))
+    expect(r.stripe_status).toBe('succeeded')
+    expect(r.notes).toMatch(/won/i)
+  })
+
+  it('warning_closed (inquiry closed, funds never withdrawn): disputed -> succeeded', async () => {
+    const r = row('succeeded'); const db = statefulDb([r])
+    await run(db, ev.dispute('pi_1'), ev.disputeClosed('pi_1', 'warning_closed'))
+    expect(r.stripe_status).toBe('succeeded')
+  })
+
+  it('lost: disputed -> failed (terminal)', async () => {
+    const r = row('succeeded'); const db = statefulDb([r])
+    await run(db, ev.dispute('pi_1'), ev.disputeClosed('pi_1', 'lost'))
+    expect(r.stripe_status).toBe('failed')
+    expect(r.notes).toMatch(/lost/i)
+  })
+
+  it('lost is terminal: a later (bogus or reordered) won does not revive it', async () => {
+    const r = row('succeeded'); const db = statefulDb([r])
+    await run(db, ev.dispute('pi_1'), ev.disputeClosed('pi_1', 'lost'), ev.disputeClosed('pi_1', 'won'))
+    expect(r.stripe_status).toBe('failed')
+  })
+
+  it('a replayed won is idempotent, and PI lifecycle replays do not move the resolved row', async () => {
+    const r = row('succeeded'); const db = statefulDb([r])
+    await run(db, ev.dispute('pi_1'), ev.disputeClosed('pi_1', 'won'), ev.disputeClosed('pi_1', 'won'), ev.succeeded('pi_1'), ev.failed('pi_1'))
+    expect(r.stripe_status).toBe('succeeded')
+  })
+
+  it('a closed dispute never touches a row that was not disputed (failed / returned / in-flight / succeeded)', async () => {
+    for (const status of ['failed', 'returned', 'canceled', 'processing', 'pending', 'succeeded']) {
+      const r = row(status); const db = statefulDb([r])
+      await run(db, ev.disputeClosed('pi_1', 'won'), ev.disputeClosed('pi_1', 'lost'))
+      expect({ status, now: r.stripe_status }).toEqual({ status, now: status })
+    }
+  })
+
+  it('an ACH return while disputed is terminal: a later won does not credit it', async () => {
+    const r = row('succeeded'); const db = statefulDb([r])
+    await run(db, ev.dispute('pi_1'), ev.chargeFailed('pi_1'), ev.disputeClosed('pi_1', 'won'))
+    expect(r.stripe_status).toBe('returned')
+  })
+
+  it('PaymentIntent lifecycle events do not move a disputed row', async () => {
+    const r = row('succeeded'); const db = statefulDb([r])
+    await run(db, ev.dispute('pi_1'), ev.succeeded('pi_1'), ev.processing('pi_1'), ev.failed('pi_1'), ev.canceled('pi_1'))
+    expect(r.stripe_status).toBe('disputed')
+  })
+
+  it('an unrecognized closed status changes nothing and warns (no throw, so Stripe does not retry forever)', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const r = row('succeeded'); const db = statefulDb([r])
+    await run(db, ev.dispute('pi_1'), ev.disputeClosed('pi_1', 'under_review'))
+    expect(r.stripe_status).toBe('disputed')
+    expect(warn.mock.calls.flat().join(' ')).toMatch(/under_review/)
+    warn.mockRestore()
+  })
+
+  it('a closed dispute with no payment_intent does nothing', async () => {
+    const { db, update } = makeDb()
+    await handleStripeEvent({ type: 'charge.dispute.closed', data: { object: { id: 'dp_x', payment_intent: null, status: 'won' } } } as unknown as Stripe.Event, db)
+    expect(update).not.toHaveBeenCalled()
+  })
+
+  it('issues one guarded UPDATE: by PI id, allowed only from disputed', async () => {
+    const { db, calls } = makeDb([MATCHED])
+    await handleStripeEvent(ev.disputeClosed('pi_w', 'won') as unknown as Stripe.Event, db)
+    expect(calls).toHaveLength(1)
+    expect(calls[0].patch).toEqual(expect.objectContaining({ stripe_status: 'succeeded' }))
+    expect(calls[0].filters).toEqual([['eq', 'stripe_payment_intent_id', 'pi_w'], ['in', 'stripe_status', ['disputed']]])
+  })
+
+  it('a DB error on the closed-dispute UPDATE throws so Stripe retries', async () => {
+    const { db } = makeDb([{ data: null, error: { message: 'connection refused' } }])
+    await expect(handleStripeEvent(ev.disputeClosed('pi_e', 'lost') as unknown as Stripe.Event, db)).rejects.toThrow('DB update failed')
   })
 })

@@ -14,15 +14,25 @@ type PaymentPatch = Record<string, string | null>
 // moved on matches zero rows and is a no-op.
 //
 // Rules:
-//   - Terminal states never regress: failed (payment_failed / canceled / dispute), returned (ACH
-//     return), and canceled (a raw PI status cron.ts's autopay insert can store) are in NO
+//   - Terminal states never regress: failed (payment_failed / canceled / lost dispute), returned
+//     (ACH return), and canceled (a raw PI status cron.ts's autopay insert can store) are in NO
 //     allowed-from set.
 //   - succeeded is final for the PaymentIntent lifecycle events (a stale payment_failed, canceled or
 //     processing cannot undo it). ONLY an ACH return (charge.failed) or a dispute may override it,
 //     because both mean the money did not stay collected.
 //   - processing only advances a 'pending' reservation row (unchanged from OI-233).
-// Stored values are unchanged: canceled and dispute still write 'failed' (distinguished by notes),
-// so ar_ledger, reserve_payment_intent (0014) and stripe.ts's terminal check are unaffected.
+//   - disputed (E9, 2026-11-08) is a holding state, not terminal: charge.dispute.created writes it
+//     and only the dispute's own outcome moves the row on (charge.dispute.closed, E10): won /
+//     warning_closed -> succeeded, lost -> failed. An ACH return may also take it to returned (the
+//     money is gone either way, and returned is terminal so a later "won" cannot credit it). No
+//     PaymentIntent lifecycle event touches a disputed row.
+// What 'disputed' changes downstream: nothing in the money math. ar_ledger (0016) credits only
+// stripe_status = 'succeeded', reserve_payment_intent (0014) counts only pending/processing as in
+// flight, and cron.ts counts only succeeded ACH as paid, so a disputed payment is treated exactly
+// as the 'failed' it used to be written as. There is no CHECK constraint on payments.stripe_status
+// (0002), so no migration is needed. stripe.ts's same-client_request_id retry answers a disputed
+// reservation with its recorded PI (deduped) instead of the 409 a 'failed' row gets; no Stripe call
+// is made either way.
 // ---------------------------------------------------------------------------
 
 /** Non-terminal statuses a payments row can hold: the reservation/webhook values plus the raw
@@ -39,15 +49,30 @@ export const IN_FLIGHT_STATUSES = [
 /** Statuses no webhook event may move a row out of. */
 export const TERMINAL_STATUSES = ['failed', 'returned', 'canceled'] as const
 
-export type StripeTransition = 'processing' | 'succeeded' | 'payment_failed' | 'canceled' | 'returned' | 'disputed'
+/** Written by charge.dispute.created; resolved by charge.dispute.closed (see header). */
+export const DISPUTED_STATUS = 'disputed'
+
+export type StripeTransition =
+  | 'processing' | 'succeeded' | 'payment_failed' | 'canceled' | 'returned' | 'disputed'
+  | 'dispute_won' | 'dispute_lost'
 
 export const ALLOWED_FROM: Readonly<Record<StripeTransition, readonly string[]>> = {
   processing: ['pending'],
   succeeded: IN_FLIGHT_STATUSES,
   payment_failed: IN_FLIGHT_STATUSES,
   canceled: IN_FLIGHT_STATUSES,
-  returned: [...IN_FLIGHT_STATUSES, 'succeeded'],
+  returned: [...IN_FLIGHT_STATUSES, 'succeeded', DISPUTED_STATUS],
   disputed: [...IN_FLIGHT_STATUSES, 'succeeded'],
+  dispute_won: [DISPUTED_STATUS],
+  dispute_lost: [DISPUTED_STATUS],
+}
+
+// charge.dispute.closed outcomes (Stripe Dispute.status once closed). warning_closed is an inquiry
+// that closed without escalating: the funds were never withdrawn, so the payment stands.
+const DISPUTE_CLOSED_OUTCOME: Readonly<Record<string, { transition: 'dispute_won' | 'dispute_lost'; stripe_status: string }>> = {
+  won: { transition: 'dispute_won', stripe_status: 'succeeded' },
+  warning_closed: { transition: 'dispute_won', stripe_status: 'succeeded' },
+  lost: { transition: 'dispute_lost', stripe_status: 'failed' },
 }
 
 function piId(ref: string | Stripe.PaymentIntent | null): string | null {
@@ -114,13 +139,15 @@ async function updatePaymentByIntent(
 
 // Guarded UPDATE by PI id for the charge-level events (ACH return, dispute). No client_request_id
 // fallback: a Charge/Dispute carries no PI metadata, and both only arrive after a PI exists.
-async function updatePaymentByPiIdGuarded(db: Db, id: string, patch: PaymentPatch, transition: StripeTransition): Promise<void> {
-  const { error } = await db.from('payments')
+// Returns how many rows the compare-and-swap matched.
+async function updatePaymentByPiIdGuarded(db: Db, id: string, patch: PaymentPatch, transition: StripeTransition): Promise<number> {
+  const { data, error } = await db.from('payments')
     .update(patch)
     .eq('stripe_payment_intent_id', id)
     .in('stripe_status', ALLOWED_FROM[transition])
     .select('id')
   if (error) throw new Error(`DB update failed: ${error.message}`)
+  return Array.isArray(data) ? data.length : 0
 }
 
 export async function handleStripeEvent(
@@ -177,7 +204,33 @@ export async function handleStripeEvent(
       const dispute = event.data.object as Stripe.Dispute
       const id = piId(dispute.payment_intent)
       if (!id) break
-      await updatePaymentByPiIdGuarded(db, id, { stripe_status: 'failed', notes: `Dispute created: ${dispute.reason ?? 'unknown'}` }, 'disputed')
+      await updatePaymentByPiIdGuarded(db, id, { stripe_status: DISPUTED_STATUS, notes: `Dispute created: ${dispute.reason ?? 'unknown'}` }, 'disputed')
+      break
+    }
+
+    // E10: resolve a disputed payment. Only a row currently 'disputed' moves (ALLOWED_FROM), so a
+    // replay is a no-op and a row that never saw dispute.created, or already resolved, is untouched.
+    case 'charge.dispute.closed': {
+      const dispute = event.data.object as Stripe.Dispute
+      const id = piId(dispute.payment_intent)
+      if (!id) break
+      const outcome = DISPUTE_CLOSED_OUTCOME[dispute.status]
+      if (!outcome) {
+        // Not a documented closed status. Log and acknowledge: throwing would only make Stripe
+        // redeliver the same payload for days. The row stays 'disputed' (uncredited, the safe side).
+        console.warn(`[ORA PM] charge.dispute.closed ${dispute.id} for ${id}: unrecognized status '${dispute.status}'; payment left disputed`)
+        break
+      }
+      const matched = await updatePaymentByPiIdGuarded(db, id, {
+        stripe_status: outcome.stripe_status,
+        notes: `Dispute ${dispute.status === 'lost' ? 'lost' : 'closed in our favor'} (${dispute.status}): ${dispute.reason ?? 'unknown'}`,
+      }, outcome.transition)
+      if (matched === 0) {
+        // Expected on a replay. Otherwise the row was not 'disputed': dispute.created never arrived
+        // (or arrives late, after this event — it would then re-open the row and need a manual
+        // fix), or it predates E9 and still holds 'failed' with "Dispute created" notes.
+        console.warn(`[ORA PM] charge.dispute.closed ${dispute.id} (${dispute.status}) for ${id} matched no payments row in status '${DISPUTED_STATUS}'`)
+      }
       break
     }
 

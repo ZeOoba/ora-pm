@@ -41,7 +41,7 @@ export const FINANCIAL_SOURCE_PATHS: ReadonlySet<string> = new Set([
   // Stripe client config — maxNetworkRetries bounds the retry budget every debit relies on.
   'server/lib/stripe.ts',
   // Webhook handler: payment_intent.succeeded / failed / canceled, charge.failed (ACH return),
-  // charge.dispute.created → payments.stripe_status transitions.
+  // charge.dispute.created / charge.dispute.closed → payments.stripe_status transitions.
   'server/lib/stripe-events.ts',
   // Webhook route: signature verification + the idempotency read that decides whether a
   // side-effecting handler re-runs (OI-222) — a double-apply gate, not just plumbing.
