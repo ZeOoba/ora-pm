@@ -82,6 +82,12 @@ while ($remaining -gt 0 -and $invocation -lt $MAX_INVOCATIONS) {
     if ($response.errors -gt 0) {
       Write-Warning "Errors: $($response.errorMessages -join ', ')"
     }
+    # Lease-term exceptions (past end_date / invalid dates) are not errors - those leases were
+    # deliberately NOT billed and need a human holdover/date decision - but they must be visible.
+    if ($response.leaseExceptions -and $response.leaseExceptions.Count -gt 0 -and $invocation -eq 1) {
+      $list = ($response.leaseExceptions | ForEach-Object { "$($_.lease_id) [$($_.reason), end $($_.end_date)]" }) -join '; '
+      Write-Warning "Lease-term exceptions NOT billed this period ($($response.leaseExceptions.Count)): $list"
+    }
 
     if ($null -ne $previousRemaining -and $remaining -gt 0 -and $remaining -ge $previousRemaining) {
       # No progress since the last call - draining further would just repeat the same doomed

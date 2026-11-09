@@ -10,13 +10,24 @@ import { StatusBadge } from '../../components/StatusBadge'
 import { Field } from '../../components/form/Field'
 import { NumberInput, Select } from '../../components/form/inputs'
 import { formatCurrency } from '../../lib/format'
-import type { CAMReconciliation, Property, RentRollRow } from '../../types'
+import type { CAMReconciliation, Property } from '../../types'
 
 type CAMRow = CAMReconciliation & {
   leases: {
     tenants: { name: string } | null
     units: { suite: string; properties: { name: string } | null } | null
   } | null
+}
+
+// GET /cam/pool: the server-computed CAM pool for a property/year (audit finding
+// cam-denominator-client-snapshot). Display + which leases to reconcile only: /cam/calculate
+// recomputes the denominator and recoverable total itself and ignores anything the page sends.
+type CamPool = {
+  recoverable_total: number
+  recoverable_count: number
+  days_in_year: number
+  weighted_leased_sf: number
+  leases: { lease_id: string; status: string; rent_type: string; sf: number; overlap_days: number; weighted_sf: number }[]
 }
 
 const currentYear = new Date().getFullYear()
@@ -42,14 +53,6 @@ export function CAMList() {
     queryFn: () => api.listAll<Property>('/properties'),
   })
 
-  // ── Rent roll for selected property (active leases) ────────────────────────
-  const { data: rentRoll } = useQuery({
-    queryKey: ['rent-roll', propertyId],
-    queryFn: () =>
-      api.get<{ data: RentRollRow[] }>(`/reports/rent-roll?property_id=${propertyId}`).then(r => r.data),
-    enabled: !!propertyId,
-  })
-
   // ── Recoverable expense total for selected property/year ───────────────────
   // Computed server-side over EVERY matching expense: GET /expenses returns one 50-row page, so a
   // browser-side sum silently under-stated this figure for every tenant's true-up. Keyed under
@@ -64,6 +67,17 @@ export function CAMList() {
     enabled: !!propertyId && yearValid,
   })
 
+  // ── Server-computed CAM pool (denominator + leases in effect during the year) ──
+  // Keyed under 'expenses' like the recoverable total so an expense edit refreshes it too.
+  const pool = useQuery({
+    queryKey: ['expenses', 'cam-pool', propertyId, year],
+    queryFn: () =>
+      api.get<{ data: CamPool }>(
+        `/cam/pool?property_id=${encodeURIComponent(propertyId)}&year=${year}`
+      ).then(r => r.data),
+    enabled: !!propertyId && yearValid,
+  })
+
   // ── All CAM reconciliations ────────────────────────────────────────────────
   const { data: camRows } = useQuery({
     queryKey: ['cam'],
@@ -71,8 +85,9 @@ export function CAMList() {
   })
 
   // ── Derived values ─────────────────────────────────────────────────────────
-  const activeLeases = (rentRoll ?? []).filter(r => r.lease_status === 'active')
-  const totalLeasedSF = activeLeases.reduce((s, r) => s + (r.sf ?? 0), 0)
+  const poolReady = pool.isSuccess && !pool.isFetching
+  const poolLeases = pool.data?.leases ?? []
+  const weightedLeasedSF = pool.data?.weighted_leased_sf ?? 0
 
   // Only a loaded, current total may be sent to /cam/calculate — never a loading/failed/stale one.
   const recoverableReady = recoverable.isSuccess && !recoverable.isFetching
@@ -90,23 +105,27 @@ export function CAMList() {
 
   // ── Calculate reconciliation ───────────────────────────────────────────────
   async function handleCalculate() {
-    if (!propertyId || !recoverableReady || activeLeases.length === 0 || totalLeasedSF === 0) return
+    if (!propertyId || !recoverableReady || !poolReady || poolLeases.length === 0 || weightedLeasedSF === 0) return
     setCalcError(null)
     setCalculating(true)
     try {
-      await Promise.all(
-        activeLeases
-          .filter(r => !!r.lease_id)
-          .map(r =>
-            api.post<{ data: CAMReconciliation }>('/cam/calculate', {
-              lease_id: r.lease_id!,
-              reconciliation_year: year,
-              total_property_recoverable_expenses: recoverableTotal,
-              total_leased_sf: totalLeasedSF,
-            })
-          )
+      // One request per lease in the server's pool; the server computes the denominator and the
+      // recoverable total. allSettled: a lease the server refuses (e.g. modified-gross with no
+      // expense stop) must not hide the results of the others.
+      const results = await Promise.allSettled(
+        poolLeases.map(l =>
+          api.post<{ data: CAMReconciliation }>('/cam/calculate', {
+            lease_id: l.lease_id,
+            reconciliation_year: year,
+          })
+        )
       )
       await qc.invalidateQueries({ queryKey: ['cam'] })
+      const failed = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected')
+      if (failed.length > 0) {
+        const reasons = [...new Set(failed.map(f => (f.reason instanceof Error ? f.reason.message : 'Calculation failed.')))]
+        setCalcError(`${failed.length} of ${results.length} lease(s) not calculated: ${reasons.join(' | ')}`)
+      }
     } catch (err) {
       setCalcError(err instanceof Error ? err.message : 'Calculation failed.')
     } finally {
@@ -139,7 +158,7 @@ export function CAMList() {
   }
 
   // ── Render ─────────────────────────────────────────────────────────────────
-  const canCalculate = !!propertyId && recoverableReady && totalLeasedSF > 0 && !calculating
+  const canCalculate = !!propertyId && recoverableReady && poolReady && weightedLeasedSF > 0 && !calculating
 
   return (
     <div>
@@ -182,10 +201,11 @@ export function CAMList() {
               <span className="font-mono">{recoverableReady ? formatCurrency(recoverableTotal) : '…'}</span>
               {' · '}
               <span className="font-medium">Total leased SF:</span>{' '}
-              <span className="font-mono">{totalLeasedSF.toLocaleString()}</span>
+              <span className="font-mono">{poolReady ? Math.round(weightedLeasedSF).toLocaleString() : '…'}</span>
+              <span className="text-xs text-muted-foreground"> (occupancy-weighted for {year})</span>
               {' · '}
-              <span className="font-medium">Active tenants:</span>{' '}
-              <span className="font-mono">{activeLeases.length}</span>
+              <span className="font-medium">Leases in pool:</span>{' '}
+              <span className="font-mono">{poolReady ? poolLeases.length : '…'}</span>
             </p>
 
             {recoverable.isError && (
@@ -200,15 +220,21 @@ export function CAMList() {
               </p>
             )}
 
-            {totalLeasedSF === 0 && activeLeases.length > 0 && (
+            {pool.isError && (
               <p className="text-xs text-status-danger mt-1">
-                Active leases found but total leased SF is 0 — check unit SF values.
+                Could not load the CAM pool — calculation is disabled until it loads.
               </p>
             )}
 
-            {activeLeases.length === 0 && (
+            {poolReady && weightedLeasedSF === 0 && poolLeases.length > 0 && (
+              <p className="text-xs text-status-danger mt-1">
+                Leases found but total leased SF is 0 — check unit SF values.
+              </p>
+            )}
+
+            {poolReady && poolLeases.length === 0 && (
               <p className="text-xs text-muted-foreground mt-1">
-                No active leases on this property — cannot calculate.
+                No leases in effect on this property during {year} — cannot calculate.
               </p>
             )}
           </div>

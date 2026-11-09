@@ -289,6 +289,7 @@ const AUTOPAY_LEASE = {
   base_rent_monthly: 5000,
   cam_estimate_monthly: 0,
   start_date: '2025-01-01',
+  end_date: '2030-12-31',
   autopay_enabled: true,
   autopay_payment_method_id: 'pm_bank_1',
   tenants: { id: 't1', stripe_customer_id: 'cus_1' },
@@ -301,6 +302,7 @@ function autopayLease(id: string, rent = 5000) {
     base_rent_monthly: rent,
     cam_estimate_monthly: 0,
     start_date: '2025-01-01',
+    end_date: '2030-12-31',
     autopay_enabled: true,
     autopay_payment_method_id: 'pm_bank_1',
     tenants: { id: `t_${id}`, stripe_customer_id: `cus_${id}` },
@@ -314,6 +316,7 @@ function nonAutopayLease(id: string, rent = 4000) {
     base_rent_monthly: rent,
     cam_estimate_monthly: 0,
     start_date: '2025-01-01',
+    end_date: '2030-12-31',
     autopay_enabled: false,
     autopay_payment_method_id: null,
     tenants: { id: `t_${id}`, stripe_customer_id: null },
@@ -1047,5 +1050,100 @@ describe('POST /api/cron/monthly-billing', () => {
       expect(body.remaining).toBe(1)
       expect(body.errorMessages.join(' ')).toMatch(/ar_ledger/)
     })
+  })
+})
+
+
+// ---------------------------------------------------------------------------
+// Audit finding billing-ignores-lease-term: monthly billing used to charge every
+// status='active' lease regardless of start_date/end_date. A lease past its
+// end_date is now EXCLUDED from auto-billing and autopay and surfaced for review
+// (holdover terms are a business decision; no holdover rate is invented here).
+// ---------------------------------------------------------------------------
+describe('monthly-billing: lease term enforcement', () => {
+  type TermBody = {
+    posted: number; skipped: number; errors: number; errorMessages: string[]
+    notStarted: number; expiredUnbilled: number
+    leaseExceptions: { lease_id: string; reason: string; start_date: string | null; end_date: string | null }[]
+  }
+
+  it('selects end_date for the lease query', async () => {
+    await postBilling()
+    const calls = leasesPageSpy.mock.calls[0][0] as { method: string; args: unknown[] }[]
+    const select = calls.find(c => c.method === 'select')!
+    expect(String(select.args[0])).toMatch(/\bend_date\b/)
+  })
+
+  it('past-end lease: no charges, no autopay debit, reported as an exception (200, not an error)', async () => {
+    state.leases = [{ ...AUTOPAY_LEASE, end_date: '2026-05-31' }]
+
+    const res = await postBilling()
+    expect(res.status).toBe(200)
+    const body = await res.json() as TermBody
+
+    expect(state.charges).toHaveLength(0)
+    expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
+    expect(body.posted).toBe(0)
+    expect(body.errors).toBe(0)
+    expect(body.expiredUnbilled).toBe(1)
+    expect(body.leaseExceptions).toEqual([
+      { lease_id: 'lease_1', reason: 'past_end_date', start_date: '2025-01-01', end_date: '2026-05-31' },
+    ])
+    expect(body.errorMessages.join(' ')).toMatch(/past its end_date/i)
+  })
+
+  it('future-start lease: no charges, no autopay debit, counted as not started (not an exception)', async () => {
+    state.leases = [{ ...AUTOPAY_LEASE, start_date: '2026-07-01' }]
+
+    const res = await postBilling()
+    expect(res.status).toBe(200)
+    const body = await res.json() as TermBody
+
+    expect(state.charges).toHaveLength(0)
+    expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
+    expect(body.notStarted).toBe(1)
+    expect(body.leaseExceptions).toEqual([])
+    expect(body.errorMessages).toEqual([])
+  })
+
+  it('mid-month end: the final month is prorated and autopay debits only the prorated amount', async () => {
+    state.leases = [{ ...AUTOPAY_LEASE, end_date: '2026-06-15' }] // 15 of 30 days of $5,000
+
+    const res = await postBilling()
+    expect(res.status).toBe(200)
+
+    const rent = state.charges.find(c => c.type === 'rent')!
+    expect(rent.amount).toBe(2500)
+    expect(mockStripe.paymentIntents.create).toHaveBeenCalledWith(
+      expect.objectContaining({ amount: 250000 }),
+      expect.anything(),
+    )
+  })
+
+  it('a lease with an unusable end_date is excluded and surfaced, never billed blind', async () => {
+    state.leases = [{ ...AUTOPAY_LEASE, end_date: null }]
+
+    const res = await postBilling()
+    const body = await res.json() as TermBody
+    expect(state.charges).toHaveLength(0)
+    expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
+    expect(body.leaseExceptions).toEqual([
+      { lease_id: 'lease_1', reason: 'invalid_term_dates', start_date: '2025-01-01', end_date: null },
+    ])
+  })
+
+  it('in-term leases in the same run are billed normally alongside an excluded one', async () => {
+    state.leases = [
+      { ...autopayLease('lease_a'), end_date: '2030-12-31' },
+      { ...nonAutopayLease('lease_b'), end_date: '2026-04-30' },
+    ]
+
+    const res = await postBilling()
+    expect(res.status).toBe(200)
+    const body = await res.json() as TermBody
+    expect(state.charges.map(c => c.lease_id)).toEqual(['lease_a'])
+    expect(body.expiredUnbilled).toBe(1)
+    expect(body.leaseExceptions.map(e => e.lease_id)).toEqual(['lease_b'])
+    expect(mockStripe.paymentIntents.create).toHaveBeenCalledTimes(1)
   })
 })
