@@ -34,6 +34,8 @@ const CAMList = lazy(() => import('./pages/cam/CAMList').then((m) => ({ default:
 const ExpensesList = lazy(() => import('./pages/expenses/ExpensesList').then((m) => ({ default: m.ExpensesList })))
 const BudgetsList = lazy(() => import('./pages/budgets/BudgetsList').then((m) => ({ default: m.BudgetsList })))
 const InsuranceList = lazy(() => import('./pages/insurance/InsuranceList').then((m) => ({ default: m.InsuranceList })))
+const StatementsBatch = lazy(() => import('./pages/statements/StatementsBatch').then((m) => ({ default: m.StatementsBatch })))
+const StatementPage = lazy(() => import('./pages/statements/StatementPage').then((m) => ({ default: m.StatementPage })))
 const StyleGuide = lazy(() => import('./pages/StyleGuide').then((m) => ({ default: m.StyleGuide })))
 
 // Layout is route glue local to this file; `router` (a non-component export) is the real export,
@@ -80,6 +82,8 @@ export const router = createBrowserRouter([
   { path: '/insurance', errorElement: <RouteError />, element: <Layout><InsuranceList /></Layout> },
   { path: '/insurance/new', errorElement: <RouteError />, element: <Layout><InsuranceForm /></Layout> },
   { path: '/units', errorElement: <RouteError />, element: <Layout><UnitsPage /></Layout> },
+  { path: '/statements', errorElement: <RouteError />, element: <Layout><StatementsBatch /></Layout> },
+  { path: '/statements/lease/:leaseId', errorElement: <RouteError />, element: <Layout><StatementPage /></Layout> },
   { path: '/rent-roll', errorElement: <RouteError />, element: <Layout><RentRoll /></Layout> },
   { path: '/portal/*', errorElement: <RouteError />, element: <Suspense fallback={<PageSkeleton />}><PortalApp /></Suspense> },
   { path: '/portal', errorElement: <RouteError />, element: <Suspense fallback={<PageSkeleton />}><PortalApp /></Suspense> },

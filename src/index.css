@@ -69,6 +69,25 @@
   }
 }
 
+/* Tenant statement print (src/pages/statements/StatementDocument.tsx): while a statement is on the
+   page, printing shows only the statement — no app shell (which carries the firm's branding; the
+   statement is issued by the property LLC) and no page controls. */
+@media print {
+  body:has([data-statement-print]) aside,
+  body:has([data-statement-print]) header,
+  body:has([data-statement-print]) [data-print-hide] {
+    display: none !important;
+  }
+  body:has([data-statement-print]) .h-screen {
+    height: auto !important;
+  }
+  body:has([data-statement-print]) main,
+  body:has([data-statement-print]) .overflow-auto,
+  body:has([data-statement-print]) .overflow-y-auto {
+    overflow: visible !important;
+  }
+}
+
 /* Respect reduced motion: disable shadcn enter/exit animations and transitions globally. */
 @media (prefers-reduced-motion: reduce) {
   *,
