@@ -25,13 +25,23 @@ type PaymentPatch = Record<string, string | null>
 //     and only the dispute's own outcome moves the row on (charge.dispute.closed, E10): won /
 //     warning_closed -> succeeded (from disputed only), lost -> failed (from disputed, succeeded or
 //     in flight: a lost dispute means the money is gone whether or not dispute.created was ever
-//     applied). An ACH return may also take it to returned (the money is gone either way, and
+//     applied). LIMIT: like every charge-level event, a closed dispute is matched ONLY by
+//     stripe_payment_intent_id. An OI-233 reservation row whose PI id was never written back
+//     (NULL) is out of reach and a lost close leaves it as it is (logged as a zero match); a
+//     client_request_id fallback or a reconciliation flag is a tracked follow-up.
+//     An ACH return may also take it to returned (the money is gone either way, and
 //     returned is terminal so a later "won" cannot credit it). No PaymentIntent lifecycle event
 //     touches a disputed row.
 //   - A dispute.created delivery is NOT replay-safe by compare-and-swap alone: after a won close
 //     the row is 'succeeded' again, which dispute.created may move from. So dispute.created first
 //     re-reads the dispute's LIVE status from Stripe and, if it has already closed, applies that
 //     outcome instead of re-opening the row. This also covers closed-delivered-before-created.
+//     KNOWN RACE (REFUTE N2, not closed by this): if a redelivered dispute.created reads the live
+//     dispute while it is still open and a concurrent charge.dispute.closed (won/warning_closed)
+//     then moves the row disputed -> succeeded before created writes, created's CAS (disputed is
+//     allowed from succeeded) re-opens the won dispute. Fails safe (nothing wrongly credited) but
+//     paid rent shows unpaid until fixed by hand, since the closed event is already 'processed'.
+//     A lost close is immune (failed is not in disputed's allowed-from).
 // What 'disputed' changes downstream: nothing in the money math. ar_ledger (0016) credits only
 // stripe_status = 'succeeded', reserve_payment_intent (0014) counts only pending/processing as in
 // flight, and cron.ts counts only succeeded ACH as paid, so a disputed payment is treated exactly
