@@ -1,0 +1,28 @@
+#!/bin/sh
+# ORA-PREPUSH-CONFIDENTIAL-SCAN -- git pre-push shim (Hard Invariant 3, fail-closed).
+# Tracked source: scripts/git-hooks/pre-push. Installed by: python scripts/install_prepush_hook.py
+# Runs the tracked confidentiality scan from the tree being pushed; if that tree predates
+# the scan, falls back to the copy the installer placed beside this hook. No scan script or no usable
+# Python 3 => the push is BLOCKED. git's ref lines reach the scan on stdin unchanged.
+# Emergency bypass (only after verifying the push is clean): git push --no-verify
+HOOK_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+SCAN="$ROOT/scripts/prepush_confidential_scan.py"
+[ -n "$ROOT" ] && [ -f "$SCAN" ] || SCAN="$HOOK_DIR/ora_prepush_confidential_scan.py"
+if [ ! -f "$SCAN" ]; then
+  echo "pre-push BLOCKED (fail-closed): confidentiality scan script not found." >&2
+  exit 1
+fi
+PY=
+for c in python python3 py; do
+  if command -v "$c" >/dev/null 2>&1 &&
+     "$c" -c "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)" </dev/null >/dev/null 2>&1; then
+    PY=$c
+    break
+  fi
+done
+if [ -z "$PY" ]; then
+  echo "pre-push BLOCKED (fail-closed): no Python 3.8+ found to run the confidentiality scan." >&2
+  exit 1
+fi
+exec "$PY" "$SCAN" "$@"
