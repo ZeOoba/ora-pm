@@ -15,6 +15,9 @@ vi.mock('@supabase/supabase-js', () => ({
   })),
 }))
 
+// M2: the middleware requires a confirmed email, so every "real admin" fixture carries one.
+const CONFIRMED = '2026-01-01T00:00:00Z'
+
 const env = {
   SUPABASE_URL: 'http://localhost',
   SUPABASE_SERVICE_ROLE_KEY: 'test-service-role',
@@ -82,7 +85,7 @@ describe('adminAuthMiddleware', () => {
     // random@oxfordra.net is a valid domain but not on the allowlist — the old
     // suffix check would have passed this; the allowlist must reject it.
     mockGetUser.mockResolvedValue({
-      data: { user: { id: 'u1', email: 'random@oxfordra.net' } },
+      data: { user: { id: 'u1', email: 'random@oxfordra.net', email_confirmed_at: CONFIRMED } },
       error: null,
     })
     const app = makeApp()
@@ -96,7 +99,7 @@ describe('adminAuthMiddleware', () => {
 
   it('returns 403 when the email is allowlisted but a tenants row shares the auth_user_id (RED 2)', async () => {
     mockGetUser.mockResolvedValue({
-      data: { user: { id: 'u1', email: 'ggoldberg@oxfordra.net' } },
+      data: { user: { id: 'u1', email: 'ggoldberg@oxfordra.net', email_confirmed_at: CONFIRMED } },
       error: null,
     })
     mockMaybeSingle.mockResolvedValue({ data: { id: 'tenant_1' }, error: null })
@@ -112,7 +115,7 @@ describe('adminAuthMiddleware', () => {
 
   it('returns 503 when ADMIN_EMAILS is unset (RED 3)', async () => {
     mockGetUser.mockResolvedValue({
-      data: { user: { id: 'u1', email: 'ggoldberg@oxfordra.net' } },
+      data: { user: { id: 'u1', email: 'ggoldberg@oxfordra.net', email_confirmed_at: CONFIRMED } },
       error: null,
     })
     const app = makeApp()
@@ -125,7 +128,7 @@ describe('adminAuthMiddleware', () => {
 
   it('returns 503 when ADMIN_EMAILS is an empty string (RED 3)', async () => {
     mockGetUser.mockResolvedValue({
-      data: { user: { id: 'u1', email: 'ggoldberg@oxfordra.net' } },
+      data: { user: { id: 'u1', email: 'ggoldberg@oxfordra.net', email_confirmed_at: CONFIRMED } },
       error: null,
     })
     const app = makeApp()
@@ -136,9 +139,32 @@ describe('adminAuthMiddleware', () => {
     expect(res.status).toBe(503)
   })
 
+  // M2 (2026-11-08 audit): one Supabase auth project serves admins and tenants, and the committed
+  // config allows sign-up without email confirmation. Anyone who can register an allowlisted
+  // address without proving they own it must not get an admin session.
+  it.each([
+    ['null', null],
+    ['missing', undefined],
+    ['empty string', ''],
+    ['not a date', 'not-a-date'],
+  ])('returns 403 for an allowlisted email whose email_confirmed_at is %s (M2)', async (_label, confirmedAt) => {
+    const user: Record<string, unknown> = { id: 'u1', email: 'ggoldberg@oxfordra.net' }
+    if (confirmedAt !== undefined) user.email_confirmed_at = confirmedAt
+    mockGetUser.mockResolvedValue({ data: { user }, error: null })
+    const app = makeApp()
+    const res = await app.request('/ping', {
+      headers: { Authorization: 'Bearer some-token' },
+    }, env)
+    expect(res.status).toBe(403)
+    const body = await res.json() as { error: string }
+    expect(body.error).toMatch(/confirmed/i)
+    // Rejected before any table is read: no tenants lookup, no admin_users lookup.
+    expect(mockFrom).not.toHaveBeenCalled()
+  })
+
   it('allows through an allowlisted admin who is not a tenant (RED 4)', async () => {
     mockGetUser.mockResolvedValue({
-      data: { user: { id: 'u1', email: 'ggoldberg@oxfordra.net' } },
+      data: { user: { id: 'u1', email: 'ggoldberg@oxfordra.net', email_confirmed_at: CONFIRMED } },
       error: null,
     })
     const app = makeApp()
@@ -150,7 +176,7 @@ describe('adminAuthMiddleware', () => {
 
   it('allowlist match is case-insensitive', async () => {
     mockGetUser.mockResolvedValue({
-      data: { user: { id: 'u1', email: 'GGoldberg@OxfordRA.net' } },
+      data: { user: { id: 'u1', email: 'GGoldberg@OxfordRA.net', email_confirmed_at: CONFIRMED } },
       error: null,
     })
     const app = makeApp()
@@ -165,7 +191,7 @@ describe('adminAuthMiddleware', () => {
     // lookup must never silently degrade to "not a tenant, let them through" —
     // the request must be rejected, not passed to next().
     mockGetUser.mockResolvedValue({
-      data: { user: { id: 'u1', email: 'ggoldberg@oxfordra.net' } },
+      data: { user: { id: 'u1', email: 'ggoldberg@oxfordra.net', email_confirmed_at: CONFIRMED } },
       error: null,
     })
     mockMaybeSingle.mockResolvedValue({
@@ -246,7 +272,7 @@ describe('adminAuthMiddleware — admin_users role lookup (T12, recorded not enf
   }
 
   function asUser(email: string) {
-    mockGetUser.mockResolvedValue({ data: { user: { id: USER_ID, email } }, error: null })
+    mockGetUser.mockResolvedValue({ data: { user: { id: USER_ID, email, email_confirmed_at: CONFIRMED } }, error: null })
   }
 
   // What the downstream handler saw; stays null when the middleware rejected the request.

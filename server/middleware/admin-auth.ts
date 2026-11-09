@@ -57,6 +57,17 @@ export async function adminAuthMiddleware(
     return c.json({ error: 'Forbidden: admin access requires an allowlisted email' }, 403)
   }
 
+  // M2 (2026-11-08 audit): the allowlist is only as strong as proof that the caller owns the
+  // address. One Supabase auth project serves admins and tenants, and the committed
+  // supabase/config.toml permits sign-up without email confirmation; whether production does is a
+  // dashboard setting this code cannot see. Fail CLOSED on any unconfirmed, missing or unparseable
+  // email_confirmed_at, before any table is read. (Admins sign in with an email OTP / magic link
+  // (AdminLogin.tsx), and verifying one sets email_confirmed_at, so a signed-in admin carries it.)
+  const confirmedAt: unknown = (user as { email_confirmed_at?: unknown }).email_confirmed_at
+  if (typeof confirmedAt !== 'string' || confirmedAt === '' || Number.isNaN(Date.parse(confirmedAt))) {
+    return c.json({ error: 'Forbidden: admin access requires a confirmed email address' }, 403)
+  }
+
   // Closes the case where an allowlisted admin email is also, somehow, a tenant's
   // contact — and more importantly closes the case where a non-allowlisted tenant
   // address would otherwise have passed a looser check.
