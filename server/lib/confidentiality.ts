@@ -39,21 +39,30 @@ export function parseTerms(raw: string | undefined): string[] {
 // E1 (PR #53 REFUTE follow-up): Latin-lookalike letters from Cyrillic and Greek, folded to the
 // Latin letter they imitate. Keyed on the ORIGINAL case because the two cases of one letter can
 // imitate different Latin letters (Greek "Η" looks like H, "η" like n; Cyrillic "В" like B). This
-// is a deliberately small, hand-checked subset of Unicode confusables.txt covering the scripts a
-// spoofed party name realistically uses; it can only ADD matches (the fail-closed direction).
+// is a hand-checked SUBSET of Unicode confusables.txt (Cyrillic, Greek, Armenian, Cherokee, Latin
+// small capitals and Latin variants), not a full UTS #39 skeleton: a lookalike from a script not
+// listed here still passes. It can only ADD matches (the fail-closed direction).
 const CONFUSABLES: Readonly<Record<string, string>> = {
   // Cyrillic, upper
   А: 'a', В: 'b', Е: 'e', К: 'k', М: 'm', Н: 'h', О: 'o', Р: 'p', С: 'c', Т: 't', У: 'y',
   Х: 'x', Ѕ: 's', І: 'i', Ј: 'j', Ү: 'y', Һ: 'h', Ӏ: 'l', Ԛ: 'q', Ԝ: 'w',
   // Cyrillic, lower
   а: 'a', в: 'b', е: 'e', к: 'k', м: 'm', н: 'h', о: 'o', р: 'p', с: 'c', т: 't', у: 'y', х: 'x',
-  ь: 'b', ѕ: 's', і: 'i', ј: 'j', ү: 'y', һ: 'h', ӏ: 'l', ԁ: 'd', ԛ: 'q', ԝ: 'w',
+  ь: 'b', ѕ: 's', і: 'i', ј: 'j', ү: 'y', һ: 'h', ӏ: 'l', ԁ: 'd', ԛ: 'q', ԝ: 'w', г: 'r',
   // Greek, upper
   Α: 'a', Β: 'b', Ε: 'e', Ζ: 'z', Η: 'h', Ι: 'i', Κ: 'k', Μ: 'm', Ν: 'n', Ο: 'o', Ρ: 'p', Τ: 't',
   Υ: 'y', Χ: 'x',
   // Greek, lower
   α: 'a', β: 'b', γ: 'y', ε: 'e', η: 'n', ι: 'i', κ: 'k', ν: 'v', ο: 'o', ρ: 'p', τ: 't', υ: 'u',
-  χ: 'x', ω: 'w',
+  χ: 'x', ω: 'w', σ: 'o',
+  // Armenian, lower
+  օ: 'o', ս: 'u', հ: 'h', ո: 'n', ց: 'g', զ: 'q',
+  // Cherokee, upper (rendered like Latin capitals)
+  Ꭺ: 'a', Ᏼ: 'b', Ꮯ: 'c', Ꭰ: 'd', Ꭼ: 'e', Ꮐ: 'g', Ꮋ: 'h', Ꭻ: 'j', Ꮶ: 'k', Ꮮ: 'l', Ꮇ: 'm',
+  Ꮲ: 'p', Ꮪ: 's', Ꭲ: 't', Ꮩ: 'v', Ꮃ: 'w', Ꮓ: 'z',
+  // Latin small capitals
+  ᴀ: 'a', ʙ: 'b', ᴄ: 'c', ᴅ: 'd', ᴇ: 'e', ɢ: 'g', ʜ: 'h', ɪ: 'i', ᴊ: 'j', ᴋ: 'k', ʟ: 'l',
+  ᴍ: 'm', ɴ: 'n', ᴏ: 'o', ᴘ: 'p', ʀ: 'r', ꜱ: 's', ᴛ: 't', ᴜ: 'u', ᴠ: 'v', ᴡ: 'w', ʏ: 'y', ᴢ: 'z',
   // Latin variants NFKD leaves alone
   ı: 'i', ȷ: 'j', ɡ: 'g',
 }
@@ -67,7 +76,7 @@ const COMBINING_MARK_RE = /\p{M}/gu
  *  and CONFUSABLES folds Cyrillic/Greek lookalikes. Takes the RAW text (so the case-aware fold sees
  *  the original case) and is applied to BOTH sides; it can only add matches, the safe direction
  *  for a pre-egress gate. */
-function compact(raw: string): string {
+function foldedCompact(raw: string): string {
   return raw
     .normalize('NFKC')
     .replace(INVISIBLE_RE, '')
@@ -78,14 +87,26 @@ function compact(raw: string): string {
     .replace(/[^\p{L}\p{N}]/gu, '')
 }
 
+/** The pre-E1 compact form: letters and digits only of the NFKC-normalized text. Kept as its own
+ *  comparison because the case-aware fold above is not case-symmetric (Greek "Η"->h, "η"->n), so
+ *  an upper-case Greek/Cyrillic name split by a hyphen matched here but not in the folded form
+ *  (REFUTE finding). OR-ing both keeps E1 strictly additive. */
+function plainCompact(normalized: string): string {
+  return normalized.replace(/[^\p{L}\p{N}]/gu, '')
+}
+
 /** True if `text` contains any denylist term (normalized substring match; see header). */
 export function containsConfidentialTerm(text: string, terms: string[]): boolean {
   const hay = normalizeForMatch(text)
-  const hayCompact = compact(text)
+  const hayPlain = plainCompact(hay)
+  const hayFolded = foldedCompact(text)
   return terms.some((raw) => {
     const term = normalizeForMatch(raw)
     if (!term) return false
-    const termCompact = compact(raw)
-    return hay.includes(term) || (termCompact.length > 0 && hayCompact.includes(termCompact))
+    if (hay.includes(term)) return true
+    const termPlain = plainCompact(term)
+    if (termPlain.length > 0 && hayPlain.includes(termPlain)) return true
+    const termFolded = foldedCompact(raw)
+    return termFolded.length > 0 && hayFolded.includes(termFolded)
   })
 }

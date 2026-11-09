@@ -129,3 +129,28 @@ describe('containsConfidentialTerm: combining marks and homoglyphs (E1)', () => 
     expect(containsConfidentialTerm('Москва warehouse, Αθήνα annex, Acme Logistics', terms)).toBe(false)
   })
 })
+
+// REFUTE (E1) finding: the case-aware fold maps the two cases of some letters differently (Greek
+// "Η"->h but "η"->n), and parseTerms lower-cases the roster term while the text keeps its case.
+// An upper-case Greek/Cyrillic party name broken by a hyphen or line break was blocked before E1
+// and slipped through after it. The pre-E1 compact comparison is kept as an extra OR, so E1 can
+// only ADD matches.
+describe('containsConfidentialTerm: E1 never loses a match the pre-E1 matcher caught', () => {
+  it.each([
+    ['ηρακλης', 'ΗΡΑ-ΚΛΗΣ'],
+    ['сибирь', 'СИБИ-РЬ'],
+    ['νικη', 'ΝΙ-\nΚΗ'],
+  ])('term %s is still blocked in hyphen/line-split upper-case text %s', (term, text) => {
+    expect(containsConfidentialTerm(text, parseTerms(term))).toBe(true)
+  })
+
+  it('blocks further lookalike scripts: Armenian, Latin small capitals, Cherokee, Cyrillic ge, Greek sigma', () => {
+    const terms = parseTerms('Zephyr Corp')
+    expect(containsConfidentialTerm('Zephyr C\u0585rp', terms)).toBe(true) // Armenian oh
+    expect(containsConfidentialTerm('Zep\u0570yr Corp', terms)).toBe(true) // Armenian ho
+    expect(containsConfidentialTerm('Zephy\u0280 C\u1D0F\u0280p', terms)).toBe(true) // small capital R, O
+    expect(containsConfidentialTerm('\u13C3ephyr Corp', terms)).toBe(true) // Cherokee letter that renders as Z
+    expect(containsConfidentialTerm('Zephy\u0433 Co\u0433p', terms)).toBe(true) // Cyrillic ge used as r
+    expect(containsConfidentialTerm('Zephyr C\u03C3rp', terms)).toBe(true) // Greek sigma used as o
+  })
+})
