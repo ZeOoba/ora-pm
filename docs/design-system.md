@@ -23,7 +23,9 @@ Common mappings: secondary text `text-muted-foreground`; body text `text-foregro
 | Need | Use |
 |---|---|
 | Button / card / badge | `ui/Button` (`navy`, `gold`, `ghost`, `danger`), `ui/Card` (`flat`, `default`, `raised`), `ui/Badge` + `StatusBadge` |
-| Headline number | `ui/KpiStat` (`warn` for problems) |
+| Headline number | `ui/KpiStat` (`warn` for problems; `accent` = AppFolio-style colored left rule for money tiles: `positive` cash in, `negative` cash out, `navy` net, `warning` AR) |
+| Ratio against a target | `charts/Gauge` (half-circle; rent collected, % occupied) |
+| Property + date filter | `ReportFilters` + `useReportFilters()` (`lib/report-filters.ts`): state in the URL (`?property=&range=&from=&to=`), presets in `lib/date-range.ts` (local calendar day) |
 | Nothing to show | `ui/EmptyState` (title, message, optional action) |
 | File upload | `ui/FileDropZone` |
 | Forms | `form/Field` + `form/inputs`, `form/FormActions` |
@@ -78,6 +80,10 @@ Recharts via `ui/chart` (`ChartContainer`, `ChartTooltip`, `ChartLegend`). Rules
 2. **Accessible name:** wrap the chart in `role="img"` with an `aria-label` that states the total and the series values; set `aria-hidden="true"` on the SVG container.
 3. **Data table alternative:** include an `sr-only` `<table>` (caption, `scope` headers) carrying the same numbers.
 4. Disable animation (`isAnimationActive={false}`); format values with `lib/format`. Charts render server-computed figures as-is and never re-derive buckets or money.
+
+## Financial reports (AppFolio-style)
+
+Dashboard (`/`), Transactions (`/transactions`) and the report library (`/reports`, `/reports/:kind` for `cash-flow`, `income-statement`, `income-statement-12-month`) read three read-only endpoints: `GET /api/reports/cash-activity`, `/financials`, `/income-statement-12mo`. All math is in `server/lib/financial-report.ts`, in integer cents, fail-closed. Basis until the GL exists (roadmap P3): income statement = non-voided charges by charge date (security deposits excluded, capital below NOI); cash = payments the `ar_ledger` view credits as received (in-flight ACH excluded and reported separately) and recorded expenses. Every report states its basis and "Not a general ledger." Statements render with `ui/table` (a fixed financial layout, not list data, so not `DataTable`); rows come from `pages/reports/statement-rows.ts`.
 
 ## Money-adjacent actions
 
