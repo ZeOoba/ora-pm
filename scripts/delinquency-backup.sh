@@ -7,10 +7,10 @@
 # month (existing-fee guard + unique idempotency_key late_fee_<lease>_<YYYY>_<MM>),
 # so after the laptop's ping-crons.ps1 run this posts 0.
 #
-# Deliberately does NOT call /api/cron/critical-dates-alerts: that endpoint
-# writes sent_notifications dedup rows BEFORE returning its digest, and only
-# ping-crons.ps1 (Outlook COM, the sole send path) can deliver it. A backup
-# call there would mark alerts sent that nobody ever receives.
+# Deliberately does NOT call /api/cron/critical-dates-alerts (or its /ack):
+# only ping-crons.ps1 (Outlook COM, the sole send path) can deliver that
+# digest, and only a confirmed send may ack it (OI-321). This job has no send
+# path, so an ack from here would mark alerts sent that nobody ever received.
 #
 # The response `email` field (tenant names + balances) is never printed — the
 # job log is readable by every repo collaborator. Only the two counters are.

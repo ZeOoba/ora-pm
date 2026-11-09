@@ -10,11 +10,12 @@ export type Call = { method: string; args: unknown[] }
 // server that ignores the cursor) so the handler's non-advancing-page guard is exercised. A
 // filter on a column the row doesn't carry throws, so a wrong column name can't pass silently.
 // `error` makes every select resolve with that error instead of data.
-export function pgTable(rows: Row[], opts: { insert?: ReturnType<typeof vi.fn>; ignoreGt?: string; error?: { message: string } } = {}) {
+export function pgTable(rows: Row[], opts: { insert?: ReturnType<typeof vi.fn>; upsert?: ReturnType<typeof vi.fn>; ignoreGt?: string; error?: { message: string } } = {}) {
   const pages: Call[][] = []
   const table = {
     pages,
     insert: opts.insert ?? vi.fn().mockResolvedValue({ error: null }),
+    upsert: opts.upsert ?? vi.fn().mockResolvedValue({ error: null }),
     select() {
       const calls: Call[] = []
       pages.push(calls)

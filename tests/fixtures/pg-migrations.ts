@@ -55,6 +55,22 @@ export const PG_MEM_SKIP: RegExp[] = [
   /^CREATE (OR REPLACE )?FUNCTION\b/i,
   /^(GRANT|REVOKE)\b/i,
   /^DO\s+\$\$/i,
+  // 0019's backfill reads the critical_dates VIEW, which pg-mem never creates (views are skipped
+  // above); tests/db/sent-notifications-tier-migration-0019.test.ts runs it standalone.
+  /^UPDATE sent_notifications\s+SET alert_tier = CASE\b[\s\S]*\bFROM critical_dates cd\b/i,
+]
+
+// pg-mem gives an unnamed table constraint NO name, while Postgres names it
+// <table>_<cols>_key (truncated only past 63 chars). A later migration that drops
+// such a constraint by its Postgres name (0019 drops 0003's sent_notifications
+// UNIQUE) would fail here though it is correct on Supabase. These rewrites give the
+// constraint, in pg-mem only, exactly the name Postgres assigns. Each must match once.
+export const PG_MEM_NAME_CONSTRAINTS: { file: string; from: string; to: string }[] = [
+  {
+    file: '0003_operations_tables.sql',
+    from: '  UNIQUE(notification_type, reference_id, recipient)\n',
+    to: '  CONSTRAINT sent_notifications_notification_type_reference_id_recipient_key UNIQUE(notification_type, reference_id, recipient)\n',
+  },
 ]
 
 // Splits SQL into statements on ";" while respecting single-quoted strings
@@ -178,7 +194,11 @@ export function freshMigratedDb() {
   })
   pub.none('CREATE SCHEMA auth; CREATE TABLE auth.users (id UUID PRIMARY KEY);')
   for (const file of migrationFiles()) {
-    const sql = readFileSync(join(MIGRATIONS_DIR, file), 'utf8')
+    let sql = readFileSync(join(MIGRATIONS_DIR, file), 'utf8').replace(/\r\n/g, '\n')
+    for (const r of PG_MEM_NAME_CONSTRAINTS.filter((x) => x.file === file)) {
+      if (sql.split(r.from).length !== 2) throw new Error(`PG_MEM_NAME_CONSTRAINTS: expected exactly one match in ${file} for ${JSON.stringify(r.from)}`)
+      sql = sql.replace(r.from, r.to)
+    }
     for (const stmt of splitSqlStatements(sql)) {
       const body = statementBody(stmt)
       if (PG_MEM_SKIP.some((re) => re.test(body))) continue
