@@ -346,7 +346,11 @@ export function LeaseForm({
               label="Proportionate Share (%)"
               htmlFor="proportionate_share_percent"
               error={errors.proportionate_share_percent}
-              hint={lowConf('proportionate_share_percent') ? '⚠ Verify — auto-extracted' : 'As stated in the lease, e.g. 12.5. Blank = premises SF / property CAM denominator.'}
+              hint={
+                form.proportionate_share_percent !== '' && Number(form.proportionate_share_percent) > 0 && Number(form.proportionate_share_percent) < 1
+                  ? '⚠ Under 1% — enter a percent (12.5 for 12.5%), not a fraction (0.125)'
+                  : lowConf('proportionate_share_percent') ? '⚠ Verify — auto-extracted' : 'As stated in the lease, e.g. 12.5. Blank = premises SF / property CAM denominator.'
+              }
             >
               <NumberInput
                 id="proportionate_share_percent"

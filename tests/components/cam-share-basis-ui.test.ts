@@ -86,3 +86,16 @@ describe('CAMList shows the share basis', () => {
     expect(src).toMatch(/setCalcWarnings/)
   })
 })
+
+// REFUTE D2: the extractor is told PERCENT; a value under 1 is most likely a fraction (0.125 for
+// 12.5%) and is dropped rather than stored 100x too small. LeaseForm flags a typed value under 1.
+describe('fraction-for-percent guard (REFUTE D2)', () => {
+  it('lease-extract drops a proportionate_share_percent under 1', () => {
+    const r = (input: Record<string, unknown>) => parseExtractionResponse({ content: [{ type: 'tool_use', name: 'extract_lease', input }] }).fields
+    expect(r({ proportionate_share_percent: 0.125 })).toEqual({})
+    expect(r({ proportionate_share_percent: 1 })).toEqual({ proportionate_share_percent: 1 })
+  })
+  it('LeaseForm warns when the typed percent is under 1', () => {
+    expect(read('src/pages/leases/LeaseForm.tsx')).toMatch(/Under 1%/)
+  })
+})

@@ -229,6 +229,12 @@ export function assertDenominatorCoversPool(pool: CAMPool, denominatorRSF: numbe
 /** Stated and computed annual shares further apart than this (0.5 percentage points) -> warning. */
 export const SHARE_MISMATCH_TOLERANCE = 0.005
 
+/** REFUTE D2: a stated share below this (1%) is most often a fraction typed as a percent. Warning. */
+export const LOW_STATED_SHARE = 0.01
+
+/** REFUTE D1: base-year amount more than this many times away from the year's total -> 422. */
+export const BASE_YEAR_RATIO_LIMIT = 3
+
 export interface ShareInput {
   leaseId: string
   /** leases.proportionate_share_pct: the share the lease states, a fraction in (0, 1], or null. */
@@ -286,6 +292,12 @@ export function resolveTenantShare(input: ShareInput): ResolvedShare {
   if (statedPct !== null) {
     basis = 'lease_stated_pct'
     annualPct = statedPct
+    if (statedPct < LOW_STATED_SHARE) {
+      warnings.push(
+        `Lease ${leaseId}: the stated Proportionate Share is ${fmtPct(statedPct)}, under 1%. Confirm it `
+        + 'was entered as a percent (12.5 for 12.5%), not a fraction (0.125).'
+      )
+    }
     if (computedPct !== null && Math.abs(statedPct - computedPct) > SHARE_MISMATCH_TOLERANCE + 1e-12) {
       warnings.push(
         `Lease ${leaseId}: the stated Proportionate Share ${fmtPct(statedPct)} differs from premises `
@@ -386,6 +398,22 @@ export function calculateCAMTrueUp(input: CAMInput): CAMOutput {
       throw new CAMTermsError(
         'Lease has both a base year and an expense stop; only one recovery term can apply. Clear the '
         + 'one the lease does not contain, then recalculate.'
+      )
+    }
+    // REFUTE D1: the amount is a TOTAL in dollars for the whole pool. A $/SF figure typed into it
+    // ($5.25 against ~$120,000) bills nearly the full share; an extra digit zeroes recovery. Same
+    // class as the 2x expense-stop guard: more than BASE_YEAR_RATIO_LIMIT x away from this year's
+    // recoverable total, either way (or 0), is refused for a human to check. Skipped when the year
+    // has no recoverable expenses (nothing is owed either way).
+    if (totalRecoverableExpenses > 0
+      && (baseAmount * BASE_YEAR_RATIO_LIMIT < totalRecoverableExpenses
+        || baseAmount > BASE_YEAR_RATIO_LIMIT * totalRecoverableExpenses)) {
+      const usd = (n: number) => `$${n.toLocaleString('en-US', { maximumFractionDigits: 2 })}`
+      throw new CAMTermsError(
+        `Base-year expense amount ${usd(baseAmount)} is more than ${BASE_YEAR_RATIO_LIMIT}x away from the `
+        + `${input.reconciliationYear} recoverable total (${usd(totalRecoverableExpenses)}). It must be the base `
+        + `year's recoverable Operating Costs and Taxes in total dollars for the whole pool (not $/SF); check `
+        + 'the lease and correct it, then recalculate.'
       )
     }
     owed = tenantProRataSharePct * Math.max(0, totalRecoverableExpenses - baseAmount)

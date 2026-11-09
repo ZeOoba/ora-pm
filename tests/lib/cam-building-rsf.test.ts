@@ -223,3 +223,50 @@ describe('overRecoveryWarning', () => {
     expect(w).toMatch(/2025-01-01/)
   })
 })
+
+// REFUTE D1 (2026-11-08): base_year_expense_amount is a TOTAL in dollars; a $/SF figure typed into
+// it ($5.25) billed 10% of ~$120,000 instead of $0. Same class as the 2x expense-stop guard (C4d):
+// a base amount more than 3x away from the reconciliation year's recoverable total, either way, is
+// refused for a human to check.
+describe('calculateCAMTrueUp: implausible base-year amount (REFUTE D1)', () => {
+  const by = { totalRecoverableExpenses: 120000, tenantSF: 5000, tenantSharePct: 0.1, estimatedCamPaid: 0, reconciliationYear: 2025, baseYear: 2024 }
+
+  it('refuses a $/SF figure typed as the base-year total (probe: $5.25 vs $120,000)', () => {
+    const run = () => calculateCAMTrueUp({ ...by, rentType: 'gross', baseYearExpenseAmount: 5.25 })
+    expect(run).toThrow(CAMTermsError)
+    expect(run).toThrow(/total dollars/i)
+  })
+
+  it('refuses a base amount of 0 when there are recoverable expenses', () => {
+    expect(() => calculateCAMTrueUp({ ...by, baseYearExpenseAmount: 0 })).toThrow(CAMTermsError)
+  })
+
+  it('refuses a base amount more than 3x the current total (e.g. an extra digit)', () => {
+    expect(() => calculateCAMTrueUp({ ...by, baseYearExpenseAmount: 360001 })).toThrow(CAMTermsError)
+  })
+
+  it('accepts amounts within 3x either way (exact boundaries)', () => {
+    expect(calculateCAMTrueUp({ ...by, baseYearExpenseAmount: 40000 }).actualCamOwed).toBe(8000)
+    expect(calculateCAMTrueUp({ ...by, baseYearExpenseAmount: 360000 }).actualCamOwed).toBe(0)
+    expect(() => calculateCAMTrueUp({ ...by, baseYearExpenseAmount: 39999 })).toThrow(CAMTermsError)
+  })
+
+  it('does not trip when the year has no recoverable expenses (owes 0 either way)', () => {
+    expect(calculateCAMTrueUp({ ...by, totalRecoverableExpenses: 0, baseYearExpenseAmount: 5.25 }).actualCamOwed).toBe(0)
+  })
+})
+
+// REFUTE D2 (2026-11-08): a FRACTION typed where a PERCENT is expected (0.125 for 12.5%) is stored
+// as 0.00125 and, with no RSF to cross-check, silently under-recovers 100x. A stated share under 1%
+// now always carries a warning (returned and saved with the draft).
+describe('resolveTenantShare: stated share under 1% warns (REFUTE D2)', () => {
+  const full = { leaseId: 'L1', premisesSF: 5000, overlapDays: 365, daysInYear: 365 }
+  it('warns for 0.00125 (0.125% stored) with no RSF', () => {
+    const r = resolveTenantShare({ ...full, statedPct: 0.00125, denominatorRSF: null })
+    expect(r.annualPct).toBe(0.00125)
+    expect(r.warnings.some((w) => /under 1%/.test(w))).toBe(true)
+  })
+  it('does not warn at exactly 1%', () => {
+    expect(resolveTenantShare({ ...full, statedPct: 0.01, denominatorRSF: null }).warnings).toEqual([])
+  })
+})

@@ -26,7 +26,9 @@ const FieldsSchema = z.object({
   expense_stop_amount: z.number().optional().catch(undefined),
   // Percent as printed in the lease (12.5 = 12.5%), (0, 100]; LeaseForm converts it to the
   // fraction stored in leases.proportionate_share_pct. Out-of-range values are dropped.
-  proportionate_share_percent: z.number().gt(0).max(100).optional().catch(undefined),
+  // REFUTE D2: under 1 is dropped (most likely a fraction, 0.125 for 12.5%); a genuine sub-1% share
+  // is entered by hand.
+  proportionate_share_percent: z.number().min(1).max(100).optional().catch(undefined),
   base_year: z.number().int().min(1900).max(2200).optional().catch(undefined),
   base_year_expense_amount: z.number().min(0).optional().catch(undefined),
   notes: z.string().optional().catch(undefined),
