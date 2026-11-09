@@ -258,6 +258,78 @@ describe('GET /api/portal/lease', () => {
   })
 })
 
+// M8 (2026-11-08 audit): the tenant lease endpoint selected leases.* and lease_amendments(*),
+// handing a tenant the landlord's internal `notes`, `options`, TI and expense-stop terms, the raw
+// amendment `changes` JSON and its storage path. The select is now an explicit tenant-safe list.
+describe('GET /api/portal/lease: tenant-safe column list (M8)', () => {
+  function captureLeaseSelect() {
+    const selectSpy = vi.fn().mockReturnValue({
+      eq: vi.fn().mockReturnValue({
+        eq: vi.fn().mockResolvedValue({ data: [], error: null }),
+      }),
+    })
+    mockFrom.mockImplementation((table: string) => {
+      if (table === 'tenants') return {
+        select: vi.fn().mockReturnValue({
+          eq: vi.fn().mockReturnValue({
+            single: vi.fn().mockResolvedValue({ data: { id: 'tenant_1' }, error: null }),
+          }),
+        }),
+      }
+      if (table === 'leases') return { select: selectSpy }
+      return { select: vi.fn() }
+    })
+    return selectSpy
+  }
+
+  // Splits "a, b, rel(c, d)" into top-level columns and embedded relations.
+  function parseSelect(sel: string): { cols: string[]; embeds: Record<string, string> } {
+    const cols: string[] = []
+    const embeds: Record<string, string> = {}
+    let depth = 0
+    let cur = ''
+    for (const ch of `${sel},`) {
+      if (ch === '(') depth++
+      if (ch === ')') depth--
+      if (ch === ',' && depth === 0) {
+        const tok = cur.trim()
+        cur = ''
+        const m = tok.match(/^([a-z_]+)\((.*)\)$/s)
+        if (m) embeds[m[1]] = m[2]
+        else if (tok) cols.push(tok)
+        continue
+      }
+      cur += ch
+    }
+    return { cols, embeds }
+  }
+
+  it('selects an explicit column list: no wildcard anywhere, no internal lease fields', async () => {
+    const selectSpy = captureLeaseSelect()
+    const res = await app.request('/api/portal/lease', { headers: { Authorization: 'Bearer valid' } }, env)
+    expect(res.status).toBe(200)
+    const sel = selectSpy.mock.calls[0][0] as string
+    expect(sel).not.toContain('*')
+    const { cols, embeds } = parseSelect(sel)
+    expect(cols.sort()).toEqual([
+      'autopay_enabled',
+      'autopay_payment_method_id', // the portal only tests it for presence ("Bank account on file")
+      'base_rent_monthly',
+      'cam_estimate_monthly',
+      'end_date',
+      'id',
+      'rent_type',
+      'start_date',
+      'status',
+    ])
+    for (const internal of ['notes', 'options', 'ti_allowance', 'ti_reimbursement_schedule', 'percentage_rent_terms', 'expense_stop_amount']) {
+      expect(cols).not.toContain(internal)
+    }
+    expect(parseSelect(embeds.lease_amendments).cols.sort()).toEqual(['description', 'effective_date', 'id'])
+    expect(embeds.units).toBeDefined()
+  })
+})
+
 // RED 5 (OI-042 portal slice, site portal.ts:117) — same error-hygiene
 // requirement as GET /charges above.
 describe('GET /api/portal/documents', () => {

@@ -86,6 +86,26 @@ portalRouter.get('/payments', async (c) => {
   return c.json({ data })
 })
 
+// M8 (2026-11-08 audit): an explicit tenant-safe projection, never `*`. leases.* carried the
+// landlord's internal `notes`, renewal `options`, TI and expense-stop terms (and any column a
+// future migration adds); lease_amendments(*) carried the raw `changes` JSON and storage path.
+// These are exactly the fields the portal renders (src/portal/pages/PortalMyLease.tsx,
+// PortalAccount.tsx); autopay_payment_method_id is the tenant's own saved method, tested only
+// for presence. Add a column here deliberately, with the page that needs it.
+const PORTAL_LEASE_SELECT = [
+  'id',
+  'start_date',
+  'end_date',
+  'status',
+  'rent_type',
+  'base_rent_monthly',
+  'cam_estimate_monthly',
+  'autopay_enabled',
+  'autopay_payment_method_id',
+  'units(suite, sf, properties(name, address, city, state))',
+  'lease_amendments(id, effective_date, description)',
+].join(', ')
+
 // GET /api/portal/lease — active lease terms
 portalRouter.get('/lease', async (c) => {
   const userId = c.get('tenantUserId')
@@ -97,7 +117,7 @@ portalRouter.get('/lease', async (c) => {
 
   const { data, error } = await db
     .from('leases')
-    .select('*, units(suite, sf, properties(name, address, city, state)), lease_amendments(*)')
+    .select(PORTAL_LEASE_SELECT)
     .eq('tenant_id', tenant.id)
     .eq('status', 'active')
 
