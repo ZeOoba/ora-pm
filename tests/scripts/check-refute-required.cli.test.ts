@@ -100,4 +100,24 @@ describe('check-refute-required CLI (spawned against a fixture repo)', () => {
     expect(r.code).toBe(0)
     expect(r.out).toMatch(/no financial-decision files/)
   }, 30_000)
+
+  // Round-2 REFUTE finding: a bare `origin/main` resolves to refs/tags/origin/main FIRST when such
+  // a tag exists, so a tag at HEAD shadows the real base and empties the range ("OK"). CI now passes
+  // the full refs/remotes/... name, which no tag can shadow.
+  it('tag shadowing: a tag named like the base empties a bare-name range; the full refs/remotes name is immune', () => {
+    git('checkout', '-q', '-B', 'shadowed', 'base')
+    git('update-ref', 'refs/remotes/origin/main', 'base')
+    write('server/lib/postgrest-paging.ts', 'export const X = 42\n')
+    git('commit', '-q', '-am', 'change paging')
+    git('tag', '-f', 'origin/main', 'HEAD')
+    try {
+      const bare = runGate('--strict', '--base=origin/main')
+      expect(bare.code).toBe(0) // the repro: the tag wins and the financial change is invisible
+      const full = runGate('--strict', '--base=refs/remotes/origin/main')
+      expect(full.code).toBe(1)
+      expect(full.out).toMatch(/server\/lib\/postgrest-paging\.ts/)
+    } finally {
+      git('tag', '-d', 'origin/main')
+    }
+  }, 60_000)
 })

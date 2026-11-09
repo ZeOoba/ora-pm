@@ -95,7 +95,9 @@ jobs:
         run: |
           set -euo pipefail
           git fetch --no-tags origin "${{ github.base_ref }}"
-          npm run check:refute -- --strict --base="origin/${{ github.base_ref }}"
+          # Full ref name: a bare `origin/<base>` is resolved by git as refs/tags/origin/<base> FIRST
+          # if such a tag exists, which would let a tag shadow the real base and empty the range.
+          npm run check:refute -- --strict --base="refs/remotes/origin/${{ github.base_ref }}"
 
       - name: Check commit is still the tip of main
         id: tip
