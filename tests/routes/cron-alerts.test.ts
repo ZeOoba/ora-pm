@@ -32,10 +32,11 @@ describe('POST /api/cron/critical-dates-alerts', () => {
     date_type: 'lease_expiration', reference_id, tenant_name: 'Acme', property_name: '9050 Red Branch', suite: '101',
     critical_date: '2026-07-01', days_until: 26, urgency: 'urgent', ...over,
   })
-  // OI-321: dedup is per (reference_id, urgency tier) — alert_tier (0019) — so an alert fires
-  // again as it escalates notice -> warning -> urgent -> overdue.
-  const sentRow = (reference_id: string, recipient = RECIPIENT, notification_type = 'critical_date_alert', alert_tier: string | null = 'urgent'): Row =>
-    ({ notification_type, reference_id, recipient, alert_tier })
+  // OI-321: dedup is per (reference_id, urgency tier, critical date) — alert_tier + alert_date
+  // (0019) — so an alert fires again as it escalates notice -> warning -> urgent -> overdue, and
+  // again for a date edited in place (a lease extended by changing end_date).
+  const sentRow = (reference_id: string, recipient = RECIPIENT, notification_type = 'critical_date_alert', alert_tier: string | null = 'urgent', alert_date: string | null = '2026-07-01'): Row =>
+    ({ notification_type, reference_id, recipient, alert_tier, alert_date })
   function install(crit: ReturnType<typeof pgTable>, sent: ReturnType<typeof pgTable>) {
     mockFrom.mockImplementation((table: string) => {
       if (table === 'critical_dates') return crit
@@ -47,7 +48,7 @@ describe('POST /api/cron/critical-dates-alerts', () => {
     return app.request('/api/cron/critical-dates-alerts', { method: 'POST', headers: { Authorization: 'Bearer test' } }, env)
   }
   type Body = { new_alerts: number; skipped: number; email: { subject: string; body: string } | null; ack_token?: string | null; error?: string }
-  const tokenAlerts = (b: Body) => (JSON.parse(b.ack_token!) as { v: number; alerts: [string, string][] }).alerts
+  const tokenAlerts = (b: Body) => (JSON.parse(b.ack_token!) as { v: number; alerts: [string, string, string][] }).alerts
 
   it('returns 401 without cron secret', async () => {
     const res = await app.request('/api/cron/critical-dates-alerts', { method: 'POST' }, env)
@@ -80,7 +81,7 @@ describe('POST /api/cron/critical-dates-alerts', () => {
     expect(body.email!.subject).toContain('1 Critical Date')
     expect(body.email!.body).toContain('Acme')
     expect(body.email!.body).toContain('9050 Red Branch')
-    expect(JSON.parse(body.ack_token!)).toEqual({ v: 1, alerts: [['lease_1', 'urgent']] })
+    expect(JSON.parse(body.ack_token!)).toEqual({ v: 1, alerts: [['lease_1', 'urgent', '2026-07-01']] })
     // The token carries ids and tiers only, never tenant data.
     expect(body.ack_token).not.toContain('Acme')
     expect(fetch).not.toHaveBeenCalled()
@@ -109,7 +110,16 @@ describe('POST /api/cron/critical-dates-alerts', () => {
     install(pgTable([critRow('lease_1', { urgency: 'urgent' })]), pgTable([sentRow('lease_1', RECIPIENT, 'critical_date_alert', 'notice')]))
     const body = await (await post()).json() as Body
     expect(body.new_alerts).toBe(1)
-    expect(tokenAlerts(body)).toEqual([['lease_1', 'urgent']])
+    expect(tokenAlerts(body)).toEqual([['lease_1', 'urgent', '2026-07-01']])
+  })
+
+  it('alerts again when the date moves (lease extended in place), even at an already-acked tier (OI-321)', async () => {
+    // Acked at urgent for 2026-07-01; end_date then edited to 2026-08-01, still urgent. The dates
+    // are deliberately in the past so they always pass the handler's real-clock 90-day horizon.
+    install(pgTable([critRow('lease_1', { critical_date: '2026-08-01' })]), pgTable([sentRow('lease_1')]))
+    const body = await (await post()).json() as Body
+    expect(body.new_alerts).toBe(1)
+    expect(tokenAlerts(body)).toEqual([['lease_1', 'urgent', '2026-08-01']])
   })
 
   it('a legacy row with no tier (pre-0019, not backfilled) does not suppress the alert', async () => {
@@ -240,7 +250,7 @@ describe('POST /api/cron/critical-dates-alerts/ack (OI-321)', () => {
   it('returns 401 without cron secret, and writes nothing', async () => {
     const sent = pgTable([])
     installSent(sent)
-    const res = await ack({ ack_token: token([[U1, 'urgent']]) }, false)
+    const res = await ack({ ack_token: token([[U1, 'urgent', '2026-07-01']]) }, false)
     expect(res.status).toBe(401)
     expect(sent.upsert).not.toHaveBeenCalled()
   })
@@ -248,16 +258,16 @@ describe('POST /api/cron/critical-dates-alerts/ack (OI-321)', () => {
   it('records one dedup row per acked (reference_id, tier), idempotently', async () => {
     const sent = pgTable([])
     installSent(sent)
-    const res = await ack({ ack_token: token([[U1, 'urgent'], [U2, 'notice']]) })
+    const res = await ack({ ack_token: token([[U1, 'urgent', '2026-07-01'], [U2, 'notice', '2026-08-15']]) })
     expect(res.status).toBe(200)
     expect(await res.json()).toEqual({ recorded: 2 })
     expect(sent.upsert).toHaveBeenCalledTimes(1)
     expect(sent.upsert).toHaveBeenCalledWith(
       [
-        { notification_type: 'critical_date_alert', reference_id: U1, recipient: RECIPIENT, alert_tier: 'urgent' },
-        { notification_type: 'critical_date_alert', reference_id: U2, recipient: RECIPIENT, alert_tier: 'notice' },
+        { notification_type: 'critical_date_alert', reference_id: U1, recipient: RECIPIENT, alert_tier: 'urgent', alert_date: '2026-07-01' },
+        { notification_type: 'critical_date_alert', reference_id: U2, recipient: RECIPIENT, alert_tier: 'notice', alert_date: '2026-08-15' },
       ],
-      { onConflict: 'notification_type,reference_id,recipient,alert_tier', ignoreDuplicates: true },
+      { onConflict: 'notification_type,reference_id,recipient,alert_tier,alert_date', ignoreDuplicates: true },
     )
   })
 
@@ -265,7 +275,7 @@ describe('POST /api/cron/critical-dates-alerts/ack (OI-321)', () => {
     const sent = pgTable([])
     installSent(sent)
     const ids = Array.from({ length: 1201 }, (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`)
-    const res = await ack({ ack_token: token(ids.map(id => [id, 'notice'])) })
+    const res = await ack({ ack_token: token(ids.map(id => [id, 'notice', '2026-07-01'])) })
     expect(res.status).toBe(200)
     expect(await res.json()).toEqual({ recorded: 1201 })
     const sizes = sent.upsert.mock.calls.map(c => (c[0] as unknown[]).length)
@@ -278,12 +288,15 @@ describe('POST /api/cron/critical-dates-alerts/ack (OI-321)', () => {
     ['no ack_token', {}],
     ['a non-string ack_token', { ack_token: 5 }],
     ['an ack_token that is not JSON', { ack_token: 'nope' }],
-    ['an unknown token version', { ack_token: token([[U1, 'urgent']], 2) }],
+    ['an unknown token version', { ack_token: token([[U1, 'urgent', '2026-07-01']], 2) }],
     ['an empty alert list', { ack_token: token([]) }],
-    ['a non-uuid reference_id', { ack_token: token([['lease_1', 'urgent']]) }],
-    ['an unknown tier', { ack_token: token([[U1, 'someday']]) }],
+    ['a non-uuid reference_id', { ack_token: token([['lease_1', 'urgent', '2026-07-01']]) }],
+    ['an unknown tier', { ack_token: token([[U1, 'someday', '2026-07-01']]) }],
+    ['a pair without a date (pre-date token shape)', { ack_token: token([[U1, 'urgent']]) }],
+    ['a malformed date', { ack_token: token([[U1, 'urgent', '2026-7-1']]) }],
+    ['an impossible date', { ack_token: token([[U1, 'urgent', '2026-02-30']]) }],
     ['a malformed pair', { ack_token: token([[U1]]) }],
-    ['more than 5000 alerts', { ack_token: token(Array.from({ length: 5001 }, () => [U1, 'urgent'])) }],
+    ['more than 5000 alerts', { ack_token: token(Array.from({ length: 5001 }, () => [U1, 'urgent', '2026-07-01'])) }],
   ])('rejects %s with 400 and writes nothing', async (_name, body) => {
     const sent = pgTable([])
     installSent(sent)
@@ -294,7 +307,7 @@ describe('POST /api/cron/critical-dates-alerts/ack (OI-321)', () => {
 
   it('returns 500 when the dedup write fails, so the caller reports the ack as failed', async () => {
     installSent(pgTable([], { upsert: vi.fn().mockResolvedValue({ error: { message: 'boom' } }) }))
-    const res = await ack({ ack_token: token([[U1, 'urgent']]) })
+    const res = await ack({ ack_token: token([[U1, 'urgent', '2026-07-01']]) })
     expect(res.status).toBe(500)
     expect((await res.json() as { error: string }).error).toContain('boom')
   })
@@ -312,7 +325,7 @@ describe('POST /api/cron/critical-dates-alerts/ack (OI-321)', () => {
     const first = await (await app.request('/api/cron/critical-dates-alerts', { method: 'POST', headers: { Authorization: 'Bearer test' } }, env)).json() as { ack_token: string }
     const res = await ack({ ack_token: first.ack_token })
     expect(res.status).toBe(200)
-    expect(sent.upsert.mock.calls[0][0]).toEqual([{ notification_type: 'critical_date_alert', reference_id: U1, recipient: RECIPIENT, alert_tier: 'warning' }])
+    expect(sent.upsert.mock.calls[0][0]).toEqual([{ notification_type: 'critical_date_alert', reference_id: U1, recipient: RECIPIENT, alert_tier: 'warning', alert_date: '2026-07-01' }])
   })
 })
 
