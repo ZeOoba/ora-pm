@@ -16,7 +16,7 @@ describe('LeaseForm: Proportionate Share and base year', () => {
   it('labels each new field with its unit', () => {
     expect(src).toContain('label="Proportionate Share (%)"')
     expect(src).toContain('label="Base Year (calendar year)"')
-    expect(src).toContain('label="Base-Year Expenses ($ total, whole pool)"')
+    expect(src).toContain('label="Base-year TOTAL recoverable expenses for the whole building/project pool ($/yr) — not the tenant\'s share"')
   })
   it('sends the typed percent as a fraction (divided by 100)', () => {
     expect(src).toMatch(/proportionate_share_pct:\s*form\.proportionate_share_percent === '' \? null : Number\(form\.proportionate_share_percent\) \/ 100/)
@@ -37,7 +37,8 @@ describe('lease-extract: share and base-year fields', () => {
   it('asks for the share as a PERCENT and the base amount as total dollars (never $/SF)', () => {
     expect(props.proportionate_share_percent.description).toMatch(/PERCENT/)
     expect(props.base_year.description).toMatch(/calendar year/)
-    expect(props.base_year_expense_amount.description).toMatch(/TOTAL in dollars/)
+    expect(props.base_year_expense_amount.description).toMatch(/TOTAL recoverable expenses for the whole building\/project pool \(\$\/yr\)/)
+    expect(props.base_year_expense_amount.description).toMatch(/not the tenant's share/)
     expect(props.base_year_expense_amount.description).toMatch(/Never a \$\/SF/)
   })
   it('keeps in-range values and drops out-of-range ones', () => {
@@ -90,12 +91,20 @@ describe('CAMList shows the share basis', () => {
 // REFUTE D2: the extractor is told PERCENT; a value under 1 is most likely a fraction (0.125 for
 // 12.5%) and is dropped rather than stored 100x too small. LeaseForm flags a typed value under 1.
 describe('fraction-for-percent guard (REFUTE D2)', () => {
-  it('lease-extract drops a proportionate_share_percent under 1', () => {
+  it('lease-extract drops a proportionate_share_percent of 1 or less (REFUTE D2a: inclusive)', () => {
     const r = (input: Record<string, unknown>) => parseExtractionResponse({ content: [{ type: 'tool_use', name: 'extract_lease', input }] }).fields
     expect(r({ proportionate_share_percent: 0.125 })).toEqual({})
-    expect(r({ proportionate_share_percent: 1 })).toEqual({ proportionate_share_percent: 1 })
+    // Single-tenant repro: the model returns 1.0 meaning 100% as a fraction; stored as 1% it would
+    // under-recover 100x. Dropped instead.
+    expect(r({ proportionate_share_percent: 1 })).toEqual({})
+    expect(r({ proportionate_share_percent: 1.01 })).toEqual({ proportionate_share_percent: 1.01 })
   })
-  it('LeaseForm warns when the typed percent is under 1', () => {
-    expect(read('src/pages/leases/LeaseForm.tsx')).toMatch(/Under 1%/)
+  it('LeaseForm warns when the typed percent is 1 or less (inclusive)', () => {
+    const src = read('src/pages/leases/LeaseForm.tsx')
+    expect(src).toMatch(/1% or less/)
+    expect(src).toMatch(/Number\(form\.proportionate_share_percent\) <= 1/)
+  })
+  it('the schema-level description labels the base-year amount the same way', () => {
+    expect(read('server/lib/schemas.ts')).toMatch(/Base-year TOTAL recoverable expenses for the whole building\/project pool \(\$\/yr\)/)
   })
 })

@@ -264,9 +264,13 @@ describe('resolveTenantShare: stated share under 1% warns (REFUTE D2)', () => {
   it('warns for 0.00125 (0.125% stored) with no RSF', () => {
     const r = resolveTenantShare({ ...full, statedPct: 0.00125, denominatorRSF: null })
     expect(r.annualPct).toBe(0.00125)
-    expect(r.warnings.some((w) => /under 1%/.test(w))).toBe(true)
+    expect(r.warnings.some((w) => /1% or less/.test(w))).toBe(true)
   })
-  it('does not warn at exactly 1%', () => {
-    expect(resolveTenantShare({ ...full, statedPct: 0.01, denominatorRSF: null }).warnings).toEqual([])
+  it('warns at exactly 1% (REFUTE D2a: inclusive) — single-tenant repro: "1" typed for 100%', () => {
+    const r = resolveTenantShare({ ...full, statedPct: 0.01, denominatorRSF: null })
+    expect(r.warnings.some((w) => /1% or less/.test(w))).toBe(true)
+  })
+  it('does not warn just above 1%', () => {
+    expect(resolveTenantShare({ ...full, statedPct: 0.0101, denominatorRSF: null }).warnings).toEqual([])
   })
 })

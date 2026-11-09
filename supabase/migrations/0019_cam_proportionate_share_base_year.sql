@@ -60,7 +60,7 @@ ALTER TABLE leases ADD COLUMN IF NOT EXISTS base_year_expense_amount NUMERIC;
 ALTER TABLE leases DROP CONSTRAINT IF EXISTS leases_base_year_expense_amount_check;
 ALTER TABLE leases ADD CONSTRAINT leases_base_year_expense_amount_check
   CHECK (base_year_expense_amount IS NULL OR base_year_expense_amount >= 0);
-COMMENT ON COLUMN leases.base_year_expense_amount IS 'Base year''s total recoverable Operating Costs + Taxes for the lease''s CAM pool, in dollars (not $/SF).';
+COMMENT ON COLUMN leases.base_year_expense_amount IS 'Base-year TOTAL recoverable expenses for the whole building/project pool ($/yr) - not the tenant''s share. Dollars, not $/SF.';
 
 -- ---------------------------------------------------------------------------
 -- 3) cam_reconciliations: persisted basis of each draft

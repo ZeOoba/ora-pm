@@ -55,6 +55,7 @@ export const LeaseInsertSchema = z.object({
   // matching the DB CHECK; LeaseForm converts the percent the user types.
   proportionate_share_pct: z.number().gt(0, 'Must be above 0').max(1, 'Must be a fraction of at most 1 (100%)').nullish(),
   base_year: z.number().int().min(1900).max(2200).nullish(),
+  // Base-year TOTAL recoverable expenses for the whole building/project pool ($/yr) — not the tenant's share.
   base_year_expense_amount: nonNegativeAmount.nullish(),
   ti_allowance: nonNegativeAmount.nullish(),
   notes: z.string().nullish(),

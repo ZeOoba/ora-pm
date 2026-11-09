@@ -26,9 +26,9 @@ const FieldsSchema = z.object({
   expense_stop_amount: z.number().optional().catch(undefined),
   // Percent as printed in the lease (12.5 = 12.5%), (0, 100]; LeaseForm converts it to the
   // fraction stored in leases.proportionate_share_pct. Out-of-range values are dropped.
-  // REFUTE D2: under 1 is dropped (most likely a fraction, 0.125 for 12.5%); a genuine sub-1% share
-  // is entered by hand.
-  proportionate_share_percent: z.number().min(1).max(100).optional().catch(undefined),
+  // REFUTE D2/D2a: 1 or less is dropped — most likely a fraction (0.125 for 12.5%, or 1.0 for a
+  // single tenant's 100%). A genuine share of 1% or less is entered by hand.
+  proportionate_share_percent: z.number().gt(1).max(100).optional().catch(undefined),
   base_year: z.number().int().min(1900).max(2200).optional().catch(undefined),
   base_year_expense_amount: z.number().min(0).optional().catch(undefined),
   notes: z.string().optional().catch(undefined),
@@ -55,7 +55,7 @@ const EXTRACT_TOOL = {
       expense_stop_amount: { type: 'number', description: 'expense stop in dollars per square foot per YEAR ($/SF/yr); if the lease states only a total or monthly figure, omit this field and mention it in notes' },
       proportionate_share_percent: { type: 'number', description: "Tenant's Proportionate Share as a PERCENT exactly as the lease states it (12.5 for 12.5%). Omit if the lease states only the square-foot formula without a percentage." },
       base_year: { type: 'integer', description: 'Base Year for Operating Costs and Taxes, a calendar year (e.g. 2026). Omit for a full NNN lease with no base year.' },
-      base_year_expense_amount: { type: 'number', description: 'Base-year Operating Costs and Taxes TOTAL in dollars for the whole Building or Project, only if the lease states that dollar figure. Never a $/SF figure; otherwise omit.' },
+      base_year_expense_amount: { type: 'number', description: "Base-year TOTAL recoverable expenses for the whole building/project pool ($/yr) — not the tenant's share. The base year's Operating Costs and Taxes in total dollars, only if the lease states that figure. Never a $/SF figure and never the tenant's portion; otherwise omit." },
       notes: { type: 'string', description: 'any notable clauses (options, escalations, percentage rent)' },
       _confidence: { type: 'object', description: 'per-field confidence 0..1' },
     },

@@ -14,7 +14,8 @@ export interface CAMInput {
   expenseStopPerSF?: number | null
   /** leases.base_year (calendar year). Set = recover only the increase over the base year. */
   baseYear?: number | null
-  /** leases.base_year_expense_amount: the base year's recoverable total ($, whole pool). */
+  /** leases.base_year_expense_amount: Base-year TOTAL recoverable expenses for the whole
+   *  building/project pool ($/yr) — not the tenant's share. */
   baseYearExpenseAmount?: number | null
   /** The calendar year being reconciled. Required when baseYear is set. */
   reconciliationYear?: number
@@ -229,7 +230,8 @@ export function assertDenominatorCoversPool(pool: CAMPool, denominatorRSF: numbe
 /** Stated and computed annual shares further apart than this (0.5 percentage points) -> warning. */
 export const SHARE_MISMATCH_TOLERANCE = 0.005
 
-/** REFUTE D2: a stated share below this (1%) is most often a fraction typed as a percent. Warning. */
+/** REFUTE D2/D2a: a stated share at or below this (1%) is most often a fraction typed as a percent
+ *  (0.125 for 12.5%, or 1 for a single tenant's 100%). Warning (inclusive). */
 export const LOW_STATED_SHARE = 0.01
 
 /** REFUTE D1: base-year amount more than this many times away from the year's total -> 422. */
@@ -292,10 +294,10 @@ export function resolveTenantShare(input: ShareInput): ResolvedShare {
   if (statedPct !== null) {
     basis = 'lease_stated_pct'
     annualPct = statedPct
-    if (statedPct < LOW_STATED_SHARE) {
+    if (statedPct <= LOW_STATED_SHARE) {
       warnings.push(
-        `Lease ${leaseId}: the stated Proportionate Share is ${fmtPct(statedPct)}, under 1%. Confirm it `
-        + 'was entered as a percent (12.5 for 12.5%), not a fraction (0.125).'
+        `Lease ${leaseId}: the stated Proportionate Share is ${fmtPct(statedPct)}, 1% or less. Confirm it `
+        + 'was entered as a percent (12.5 for 12.5%; 100 for a single tenant), not a fraction (0.125 or 1).'
       )
     }
     if (computedPct !== null && Math.abs(statedPct - computedPct) > SHARE_MISMATCH_TOLERANCE + 1e-12) {

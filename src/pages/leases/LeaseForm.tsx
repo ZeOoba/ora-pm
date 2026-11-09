@@ -347,8 +347,8 @@ export function LeaseForm({
               htmlFor="proportionate_share_percent"
               error={errors.proportionate_share_percent}
               hint={
-                form.proportionate_share_percent !== '' && Number(form.proportionate_share_percent) > 0 && Number(form.proportionate_share_percent) < 1
-                  ? '⚠ Under 1% — enter a percent (12.5 for 12.5%), not a fraction (0.125)'
+                form.proportionate_share_percent !== '' && Number(form.proportionate_share_percent) > 0 && Number(form.proportionate_share_percent) <= 1
+                  ? '⚠ 1% or less — enter a percent (12.5 for 12.5%; 100 for a single tenant), not a fraction (0.125 or 1)'
                   : lowConf('proportionate_share_percent') ? '⚠ Verify — auto-extracted' : 'As stated in the lease, e.g. 12.5. Blank = premises SF / property CAM denominator.'
               }
             >
@@ -381,10 +381,10 @@ export function LeaseForm({
 
           <div className="grid grid-cols-2 gap-4">
             <Field
-              label="Base-Year Expenses ($ total, whole pool)"
+              label="Base-year TOTAL recoverable expenses for the whole building/project pool ($/yr) — not the tenant's share"
               htmlFor="base_year_expense_amount"
               error={errors.base_year_expense_amount}
-              hint={lowConf('base_year_expense_amount') ? '⚠ Verify — auto-extracted' : 'Base year recoverable Operating Costs + Taxes, total dollars (not $/SF)'}
+              hint={lowConf('base_year_expense_amount') ? '⚠ Verify — auto-extracted' : 'Operating Costs + Taxes for the base year, total dollars for the whole pool — not $/SF and not the tenant\'s portion'}
             >
               <NumberInput
                 id="base_year_expense_amount"
