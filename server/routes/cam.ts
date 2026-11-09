@@ -72,14 +72,15 @@ type PoolLeaseRow = {
 async function loadCamPool(db: Db, propertyId: string, year: number): Promise<
   { pool: CAMPool; leases: PoolLeaseRow[]; error: null } | { pool: null; leases: null; error: PgErr | CAMTermsError }
 > {
-  const { data: units, error: unitsErr } = await fetchAllPages<{ id: string; sf: number }>((after) => {
-    let q = db.from('units').select('id, sf').eq('property_id', propertyId)
+  const { data: units, error: unitsErr } = await fetchAllPages<{ id: string; sf: number; suite?: string | null }>((after) => {
+    let q = db.from('units').select('id, sf, suite').eq('property_id', propertyId)
     if (after !== null) q = q.gt('id', after)
     return q.order('id').limit(POSTGREST_MAX_ROWS)
   }, (u) => u.id)
   if (unitsErr) return { pool: null, leases: null, error: unitsErr }
 
   const sfByUnit = new Map(units.map((u) => [u.id, Number(u.sf)]))
+  const unitLabel = new Map(units.map((u) => [u.id, u.suite ? `${u.suite} (${u.id})` : u.id]))
   const { data: leases, error: leasesErr } = await fetchChunked<PoolLeaseRow>(
     units.map((u) => u.id),
     UNIT_ID_CHUNK,
@@ -95,7 +96,8 @@ async function loadCamPool(db: Db, propertyId: string, year: number): Promise<
 
   try {
     const pool = computeCamPool(
-      leases.map((l) => ({ id: l.id, sf: sfByUnit.get(l.unit_id) ?? NaN, start_date: l.start_date, end_date: l.end_date })),
+      // unit_id: overlapping leases on one unit fail closed (REFUTE C4b) — see computeCamPool.
+      leases.map((l) => ({ id: l.id, unit_id: l.unit_id, unit_label: unitLabel.get(l.unit_id), sf: sfByUnit.get(l.unit_id) ?? NaN, start_date: l.start_date, end_date: l.end_date })),
       year,
     )
     return { pool, leases, error: null }

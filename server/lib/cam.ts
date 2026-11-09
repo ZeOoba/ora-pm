@@ -56,18 +56,28 @@ function isoDay(iso: string | null | undefined, field: string): number {
 
 /** Inclusive days of [startDate, endDate] that fall in calendar `year` (0 if none). */
 export function yearOverlapDays(startDate: string, endDate: string, year: number): number {
+  const iv = yearInterval(startDate, endDate, year)
+  return iv ? iv.last - iv.first + 1 : 0
+}
+
+/** The in-year part of a lease term as inclusive UTC day numbers, or null if none. */
+function yearInterval(startDate: string, endDate: string, year: number): { first: number; last: number } | null {
   const start = isoDay(startDate, 'start_date')
   const end = isoDay(endDate, 'end_date')
   if (end < start) throw new CAMTermsError('Lease end_date is before its start_date')
-  const yearFirst = Math.round(Date.UTC(year, 0, 1) / DAY_MS)
-  const yearLast = Math.round(Date.UTC(year, 11, 31) / DAY_MS)
-  const first = Math.max(start, yearFirst)
-  const last = Math.min(end, yearLast)
-  return last >= first ? last - first + 1 : 0
+  const first = Math.max(start, Math.round(Date.UTC(year, 0, 1) / DAY_MS))
+  const last = Math.min(end, Math.round(Date.UTC(year, 11, 31) / DAY_MS))
+  return last >= first ? { first, last } : null
 }
+
+const isoOfDay = (day: number) => new Date(day * DAY_MS).toISOString().slice(0, 10)
 
 export interface CAMPoolLeaseInput {
   id: string
+  /** Leases sharing a unit_id must not overlap within the year (REFUTE C4b). Omitted = no check. */
+  unit_id?: string
+  /** Human label for the unit in error messages (e.g. the suite); defaults to unit_id. */
+  unit_label?: string
   sf: number
   start_date: string
   end_date: string
@@ -86,9 +96,31 @@ export function computeCamPool(leases: readonly CAMPoolLeaseInput[], year: numbe
   const daysInYear = Math.round((Date.UTC(year + 1, 0, 1) - Date.UTC(year, 0, 1)) / DAY_MS)
   const byLease: CAMPool['byLease'] = {}
   let weightedLeasedSF = 0
+  // REFUTE C4b: one unit's SF may be counted by only one lease on any given day. An early
+  // termination recorded only as status='terminated' keeps the ORIGINAL end_date (the schema has no
+  // terminated-on date), so it and its replacement both "occupy" the unit and the denominator
+  // exceeds the physical SF. Detect that and fail closed for a human to correct the end_date,
+  // rather than guess which lease really held the space.
+  const seenByUnit = new Map<string, Array<{ id: string; first: number; last: number }>>()
   for (const l of leases) {
-    const overlapDays = yearOverlapDays(l.start_date, l.end_date, year)
-    if (overlapDays === 0) continue
+    const iv = yearInterval(l.start_date, l.end_date, year)
+    if (!iv) continue
+    const overlapDays = iv.last - iv.first + 1
+    if (l.unit_id !== undefined) {
+      const prior = seenByUnit.get(l.unit_id) ?? []
+      const clash = prior.find((p) => p.first <= iv.last && iv.first <= p.last)
+      if (clash) {
+        const from = isoOfDay(Math.max(clash.first, iv.first))
+        const to = isoOfDay(Math.min(clash.last, iv.last))
+        throw new CAMTermsError(
+          `Unit ${l.unit_label ?? l.unit_id} has overlapping leases ${clash.id} and ${l.id} during ${year} `
+          + `(${from} to ${to}), which would count its SF twice in the CAM denominator. If one was `
+          + 'terminated early, correct its end_date to the actual move-out date, then recalculate.'
+        )
+      }
+      prior.push({ id: l.id, ...iv })
+      seenByUnit.set(l.unit_id, prior)
+    }
     const sf = Number(l.sf)
     if (!Number.isFinite(sf) || sf < 0) throw new CAMTermsError(`Unit SF for lease ${l.id} is not a valid number`)
     const weightedSF = overlapDays === daysInYear ? sf : (sf * overlapDays) / daysInYear

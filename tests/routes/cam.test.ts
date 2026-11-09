@@ -839,3 +839,20 @@ describe('GET /api/cam/pool', () => {
     expect((await pool('property_id=nope&year=2025')).status).toBe(400)
   })
 })
+
+describe('POST /api/cam/calculate: same-unit overlap (REFUTE C4b)', () => {
+  it('422 naming the unit and leases when a terminated lease and its replacement overlap on one unit; nothing saved', async () => {
+    state.extraLeases = [{
+      id: '66666666-6666-4666-8666-666666666666', unit_id: 'u_other', status: 'terminated',
+      start_date: '2019-01-01', end_date: '2028-12-31', rent_type: 'nnn', expense_stop_amount: null,
+    }]
+    const res = await calculate({ lease_id: TENANT_LEASE_ID, reconciliation_year: 2025 })
+    expect(res.status).toBe(422)
+    const { error } = await res.json() as { error: string }
+    expect(error).toMatch(/u_other/)
+    expect(error).toMatch(/66666666-6666-4666-8666-666666666666/)
+    expect(error).toMatch(new RegExp(OTHER_LEASE_ID))
+    expect(camUpdateSpy).not.toHaveBeenCalled()
+    expect(camInsertSpy).not.toHaveBeenCalled()
+  })
+})

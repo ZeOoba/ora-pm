@@ -198,3 +198,35 @@ describe('computeCamPool', () => {
     expect(owed.reduce((x, y) => x + y, 0)).toBeCloseTo(100000, 1)
   })
 })
+
+// REFUTE C4b (refute-orapm/cam-probe.mjs #1): an early-terminated lease that keeps its original
+// end_date plus its replacement on the SAME unit double-counted SF (35,041 weighted vs 30,000
+// physical). Overlapping in-year terms on one unit now fail closed, naming the unit and leases.
+describe('computeCamPool: same-unit overlap (REFUTE C4b)', () => {
+  it('throws CAMTermsError naming the unit and both leases when their in-year terms overlap', () => {
+    const run = () => computeCamPool([
+      { id: 'A_terminated', unit_id: 'unit-7', unit_label: 'Suite 7', sf: 10000, start_date: '2024-01-01', end_date: '2028-12-31' },
+      { id: 'B_replacement', unit_id: 'unit-7', unit_label: 'Suite 7', sf: 10000, start_date: '2026-07-01', end_date: '2031-06-30' },
+      { id: 'C_other', unit_id: 'unit-9', sf: 20000, start_date: '2020-01-01', end_date: '2030-12-31' },
+    ], 2026)
+    expect(run).toThrow(CAMTermsError)
+    expect(run).toThrow(/Suite 7/)
+    expect(run).toThrow(/A_terminated/)
+    expect(run).toThrow(/B_replacement/)
+  })
+
+  it('back-to-back leases on one unit (no shared day) are fine and sum to the physical SF', () => {
+    const pool = computeCamPool([
+      { id: 'A', unit_id: 'u', sf: 10000, start_date: '2024-01-01', end_date: '2026-06-30' },
+      { id: 'B', unit_id: 'u', sf: 10000, start_date: '2026-07-01', end_date: '2031-06-30' },
+    ], 2026)
+    expect(pool.weightedLeasedSF).toBeCloseTo(10000, 9)
+  })
+
+  it('a same-unit overlap OUTSIDE the reconciliation year does not block that year', () => {
+    expect(() => computeCamPool([
+      { id: 'A', unit_id: 'u', sf: 10000, start_date: '2020-01-01', end_date: '2025-03-31' },
+      { id: 'B', unit_id: 'u', sf: 10000, start_date: '2025-01-01', end_date: '2031-06-30' },
+    ], 2026)).not.toThrow()
+  })
+})
