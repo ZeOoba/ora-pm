@@ -27,8 +27,10 @@ type PaymentPatch = Record<string, string | null>
 //     in flight: a lost dispute means the money is gone whether or not dispute.created was ever
 //     applied). LIMIT: like every charge-level event, a closed dispute is matched ONLY by
 //     stripe_payment_intent_id. An OI-233 reservation row whose PI id was never written back
-//     (NULL) is out of reach and a lost close leaves it as it is (logged as a zero match); a
-//     client_request_id fallback or a reconciliation flag is a tracked follow-up.
+//     (NULL) is out of reach and a lost close leaves it as it is (logged as a zero match). A
+//     later payment_intent.succeeded then credits that row via the client_request_id fallback,
+//     so the lost payment is counted as paid until reconciled. A client_request_id fallback for
+//     closed(lost), or a reconciliation flag, is a tracked follow-up.
 //     An ACH return may also take it to returned (the money is gone either way, and
 //     returned is terminal so a later "won" cannot credit it). No PaymentIntent lifecycle event
 //     touches a disputed row.
