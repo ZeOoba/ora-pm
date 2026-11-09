@@ -88,13 +88,16 @@ jobs:
       # PR-only: it diffs the PR against its base; a direct push to main has no diff base, so it is
       # skipped there. It sits in this job ahead of the deploy steps, so a failing gate fails the
       # job before anything ships — make this workflow a REQUIRED check via branch protection to
-      # hard-enforce it at merge. Fails OPEN on git/tooling gaps (scripts/check-refute-required.ts).
+      # hard-enforce it at merge. Under --strict it fails CLOSED when the base ref is empty or does
+      # not resolve (M12), so the fetch below is required (scripts/check-refute-required.ts).
       - name: REFUTE gate (financial-decision paths)
         if: github.event_name == 'pull_request'
         run: |
           set -euo pipefail
           git fetch --no-tags origin "${{ github.base_ref }}"
-          npm run check:refute -- --strict --base="origin/${{ github.base_ref }}"
+          # Full ref name: a bare `origin/<base>` is resolved by git as refs/tags/origin/<base> FIRST
+          # if such a tag exists, which would let a tag shadow the real base and empty the range.
+          npm run check:refute -- --strict --base="refs/remotes/origin/${{ github.base_ref }}"
 
       - name: Check commit is still the tip of main
         id: tip

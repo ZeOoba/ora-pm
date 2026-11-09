@@ -73,7 +73,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   // Default to a valid ORA admin; auth-gate tests override this.
   mockGetUser.mockResolvedValue({
-    data: { user: { id: 'admin_1', email: 'ggoldberg@oxfordra.net' } },
+    data: { user: { id: 'admin_1', email: 'ggoldberg@oxfordra.net', email_confirmed_at: '2026-01-01T00:00:00Z' } },
     error: null,
   })
 })
