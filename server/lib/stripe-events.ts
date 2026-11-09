@@ -23,9 +23,15 @@ type PaymentPatch = Record<string, string | null>
 //   - processing only advances a 'pending' reservation row (unchanged from OI-233).
 //   - disputed (E9, 2026-11-08) is a holding state, not terminal: charge.dispute.created writes it
 //     and only the dispute's own outcome moves the row on (charge.dispute.closed, E10): won /
-//     warning_closed -> succeeded, lost -> failed. An ACH return may also take it to returned (the
-//     money is gone either way, and returned is terminal so a later "won" cannot credit it). No
-//     PaymentIntent lifecycle event touches a disputed row.
+//     warning_closed -> succeeded (from disputed only), lost -> failed (from disputed, succeeded or
+//     in flight: a lost dispute means the money is gone whether or not dispute.created was ever
+//     applied). An ACH return may also take it to returned (the money is gone either way, and
+//     returned is terminal so a later "won" cannot credit it). No PaymentIntent lifecycle event
+//     touches a disputed row.
+//   - A dispute.created delivery is NOT replay-safe by compare-and-swap alone: after a won close
+//     the row is 'succeeded' again, which dispute.created may move from. So dispute.created first
+//     re-reads the dispute's LIVE status from Stripe and, if it has already closed, applies that
+//     outcome instead of re-opening the row. This also covers closed-delivered-before-created.
 // What 'disputed' changes downstream: nothing in the money math. ar_ledger (0016) credits only
 // stripe_status = 'succeeded', reserve_payment_intent (0014) counts only pending/processing as in
 // flight, and cron.ts counts only succeeded ACH as paid, so a disputed payment is treated exactly
@@ -64,7 +70,12 @@ export const ALLOWED_FROM: Readonly<Record<StripeTransition, readonly string[]>>
   returned: [...IN_FLIGHT_STATUSES, 'succeeded', DISPUTED_STATUS],
   disputed: [...IN_FLIGHT_STATUSES, 'succeeded'],
   dispute_won: [DISPUTED_STATUS],
-  dispute_lost: [DISPUTED_STATUS],
+  dispute_lost: [DISPUTED_STATUS, 'succeeded', ...IN_FLIGHT_STATUSES],
+}
+
+/** The one Stripe read the handler needs: a dispute's live status (see header). */
+export interface DisputeReader {
+  disputes: { retrieve(id: string): Promise<{ status: string }> }
 }
 
 // charge.dispute.closed outcomes (Stripe Dispute.status once closed). warning_closed is an inquiry
@@ -150,9 +161,27 @@ async function updatePaymentByPiIdGuarded(db: Db, id: string, patch: PaymentPatc
   return Array.isArray(data) ? data.length : 0
 }
 
+// Applies a CLOSED dispute's outcome. Returns false when `status` is not a closed outcome.
+async function applyDisputeOutcome(db: Db, piIdValue: string, dispute: { id: string; status: string; reason?: string | null }, source: string): Promise<boolean> {
+  const outcome = DISPUTE_CLOSED_OUTCOME[dispute.status]
+  if (!outcome) return false
+  const matched = await updatePaymentByPiIdGuarded(db, piIdValue, {
+    stripe_status: outcome.stripe_status,
+    notes: `Dispute ${dispute.status === 'lost' ? 'lost' : 'closed in our favor'} (${dispute.status}): ${dispute.reason ?? 'unknown'}`,
+  }, outcome.transition)
+  if (matched === 0) {
+    // Normal on a replay, or for a won close of a row that is no longer 'disputed'. Otherwise the
+    // row is not in an allowed-from state: e.g. it predates E9 and still holds 'failed' with
+    // "Dispute created" notes, or it was already returned / failed.
+    console.warn(`[ORA PM] ${source} ${dispute.id} (${dispute.status}) for ${piIdValue} matched no payments row in an allowed-from status (${ALLOWED_FROM[outcome.transition].join(',')})`)
+  }
+  return true
+}
+
 export async function handleStripeEvent(
   event: Stripe.Event,
-  db: Db
+  db: Db,
+  stripe: DisputeReader,
 ): Promise<void> {
   // Every case is ordering-guarded by ALLOWED_FROM (top of file).
   switch (event.type) {
@@ -204,6 +233,12 @@ export async function handleStripeEvent(
       const dispute = event.data.object as Stripe.Dispute
       const id = piId(dispute.payment_intent)
       if (!id) break
+      // REFUTE (E10): re-read the live status first. A redelivered dispute.created (E8's 500 on a
+      // failed processed-write, Stripe's ~3-day retries, a dashboard "Resend") arriving after the
+      // dispute was won would otherwise move the restored 'succeeded' row back to 'disputed'. A
+      // retrieve failure throws -> 500 -> Stripe retries.
+      const live = await stripe.disputes.retrieve(dispute.id)
+      if (await applyDisputeOutcome(db, id, { id: dispute.id, status: live.status, reason: dispute.reason }, 'charge.dispute.created (already closed)')) break
       await updatePaymentByPiIdGuarded(db, id, { stripe_status: DISPUTED_STATUS, notes: `Dispute created: ${dispute.reason ?? 'unknown'}` }, 'disputed')
       break
     }
@@ -214,22 +249,11 @@ export async function handleStripeEvent(
       const dispute = event.data.object as Stripe.Dispute
       const id = piId(dispute.payment_intent)
       if (!id) break
-      const outcome = DISPUTE_CLOSED_OUTCOME[dispute.status]
-      if (!outcome) {
+      if (!(await applyDisputeOutcome(db, id, dispute, 'charge.dispute.closed'))) {
         // Not a documented closed status. Log and acknowledge: throwing would only make Stripe
-        // redeliver the same payload for days. The row stays 'disputed' (uncredited, the safe side).
-        console.warn(`[ORA PM] charge.dispute.closed ${dispute.id} for ${id}: unrecognized status '${dispute.status}'; payment left disputed`)
-        break
-      }
-      const matched = await updatePaymentByPiIdGuarded(db, id, {
-        stripe_status: outcome.stripe_status,
-        notes: `Dispute ${dispute.status === 'lost' ? 'lost' : 'closed in our favor'} (${dispute.status}): ${dispute.reason ?? 'unknown'}`,
-      }, outcome.transition)
-      if (matched === 0) {
-        // Expected on a replay. Otherwise the row was not 'disputed': dispute.created never arrived
-        // (or arrives late, after this event — it would then re-open the row and need a manual
-        // fix), or it predates E9 and still holds 'failed' with "Dispute created" notes.
-        console.warn(`[ORA PM] charge.dispute.closed ${dispute.id} (${dispute.status}) for ${id} matched no payments row in status '${DISPUTED_STATUS}'`)
+        // redeliver the same payload for days. The row stays as it is (a disputed row stays
+        // uncredited, the safe side).
+        console.warn(`[ORA PM] charge.dispute.closed ${dispute.id} for ${id}: unrecognized status '${dispute.status}'; payment left unchanged`)
       }
       break
     }

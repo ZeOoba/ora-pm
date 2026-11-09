@@ -51,7 +51,7 @@ webhookRouter.post('/stripe', async (c) => {
   }
 
   try {
-    await handleStripeEvent(event, db)
+    await handleStripeEvent(event, db, stripe)
   } catch (err) {
     const { error: markFailedError } = await db.from('stripe_webhook_events').update({ status: 'failed' }).eq('id', event.id)
     if (markFailedError) {
@@ -64,8 +64,10 @@ webhookRouter.post('/stripe', async (c) => {
 
   // E8: an unchecked write here returned 200 with the row still 'pending', so Stripe stopped
   // retrying and the idempotency ledger silently disagreed with what was applied. Report it
-  // instead: a 500 makes Stripe redeliver, and re-running the handler is safe because every
-  // payments transition in stripe-events.ts is a compare-and-swap (a replay matches no row).
+  // instead: a 500 makes Stripe redeliver. Re-running the handler is safe: every payments
+  // transition in stripe-events.ts is an ALLOWED_FROM compare-and-swap, and the one event a CAS
+  // alone cannot make replay-safe (charge.dispute.created after a won dispute restored
+  // 'succeeded') re-reads the dispute's live status before writing.
   const { error: markProcessedError } = await db.from('stripe_webhook_events').update({ status: 'processed' }).eq('id', event.id)
   if (markProcessedError) {
     console.error(`[ORA PM] webhook ${event.id} (${event.type}): handled, but could not mark processed; returning 500 so Stripe retries`)

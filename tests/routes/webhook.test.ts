@@ -135,7 +135,7 @@ describe('POST /api/webhooks/stripe', () => {
     expect(select).toHaveBeenCalledWith('status')
     expect(selectEq).toHaveBeenCalledWith('id', 'evt_retry')
     expect(mockHandleStripeEvent).toHaveBeenCalledTimes(1)
-    expect(mockHandleStripeEvent).toHaveBeenCalledWith(fakeEvent, expect.anything())
+    expect(mockHandleStripeEvent).toHaveBeenCalledWith(fakeEvent, expect.anything(), expect.anything())
     expect(update).toHaveBeenCalledWith({ status: 'processed' })
     expect(updateEq).toHaveBeenCalledWith('id', 'evt_retry')
   })
@@ -199,7 +199,7 @@ describe('POST /api/webhooks/stripe', () => {
     const json = await res.json() as { received: boolean; skipped?: boolean }
     expect(json.received).toBe(true)
     expect(json.skipped).toBeUndefined()
-    expect(mockHandleStripeEvent).toHaveBeenCalledWith(fakeEvent, expect.anything())
+    expect(mockHandleStripeEvent).toHaveBeenCalledWith(fakeEvent, expect.anything(), expect.anything())
     expect(update).toHaveBeenCalledWith({ status: 'processed' })
     expect(eq).toHaveBeenCalledWith('id', 'evt_new')
   })
