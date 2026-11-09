@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { createApp } from '../../server/index'
+import { buildStatement } from '../../server/lib/statement'
+import { buildErrorKind } from '../../server/routes/statements'
 import { pgTable, type Row } from '../fixtures/pg-table'
 
 // /api/statements — per-lease statement, batch and Outlook draft packet. Admin auth is bypassed
@@ -23,7 +25,10 @@ beforeEach(() => {
 
 type Tables = Record<string, ReturnType<typeof pgTable>>
 let seq = 0
-const id = (p: string) => `${p}_${String(seq++).padStart(7, '0')}`
+// UUID-shaped ids (the route rejects a non-uuid lease id with 422); the prefix only aids reading.
+const PREFIX: Record<string, string> = { t: '1', l: '2', u: '3', c: '4', p: '5' }
+const id = (p: string) => `${PREFIX[p] ?? '9'}0000000-0000-4000-8000-${String(seq++).padStart(12, '0')}`
+const MISSING_LEASE = '2fffffff-0000-4000-8000-000000000000'
 
 const PROP = { id: 'prop_1', name: 'Test Park', address: '100 Main St', city: 'Columbus', state: 'OH', zip: '43215', entity_llc: 'Test Park Holdings LLC' }
 const tenant = (over: Row = {}): Row => ({ id: id('t'), name: 'Acme Widgets Inc', contact_name: 'Pat Doe', contact_email: 'pat@acme.example', ...over })
@@ -101,13 +106,19 @@ describe('GET /api/statements/lease/:leaseId', () => {
 
   it('404 for an unknown lease', async () => {
     world({ ledger: [], tenants: [], charges: [], payments: [] })
-    expect((await get('/lease/nope?start=2026-10-01&end=2026-10-31')).status).toBe(404)
+    expect((await get(`/lease/${MISSING_LEASE}?start=2026-10-01&end=2026-10-31`)).status).toBe(404)
+  })
+
+  it('422 for a non-uuid lease id, without touching the database', async () => {
+    world({ ledger: [], tenants: [], charges: [], payments: [] })
+    expect((await get('/lease/nope?start=2026-10-01&end=2026-10-31')).status).toBe(422)
+    expect(mockFrom).not.toHaveBeenCalled()
   })
 
   it('422 for missing, malformed or inverted dates', async () => {
     world({ ledger: [], tenants: [], charges: [], payments: [] })
     for (const qs of ['', '?start=2026-10-01', '?start=2026-10-01&end=2026-13-01', '?start=2026-11-01&end=2026-10-01', '?start=10/01/2026&end=2026-10-31']) {
-      expect((await get(`/lease/x${qs}`)).status).toBe(422)
+      expect((await get(`/lease/${MISSING_LEASE}${qs}`)).status).toBe(422)
     }
   })
 
@@ -134,15 +145,27 @@ describe('GET /api/statements/lease/:leaseId', () => {
     expect((await get(`/lease/${l.lease_id}?start=2026-10-01&end=2026-10-31`)).status).toBe(500)
   })
 
-  it('never logs tenant PII on failure', async () => {
+  it('never logs tenant PII or amounts on failure', async () => {
     const t = tenant()
-    const l = ledger(t, { total_charged: 999 })
-    world({ ledger: [l], tenants: [t], charges: [charge(l.lease_id, '2026-10-01', 1000)], payments: [], raw: true })
-    await get(`/lease/${l.lease_id}?start=2026-10-01&end=2026-10-31`)
+    const l = ledger(t, { total_charged: 987.65, total_paid: 123.45 })
+    world({ ledger: [l], tenants: [t], charges: [charge(l.lease_id, '2026-10-01', 4321.09)], payments: [payment(l.lease_id, '2026-10-02', 555.55)], raw: true })
+    expect((await get(`/lease/${l.lease_id}?start=2026-10-01&end=2026-10-31`)).status).toBe(500)
     const logged = JSON.stringify(errSpy.mock.calls)
-    expect(logged).not.toContain('pat@acme.example')
-    expect(logged).not.toContain('Acme Widgets')
-    expect(logged).not.toContain('Pat Doe')
+    expect(logged).toContain(String(l.lease_id))
+    for (const s of ['pat@acme.example', 'Acme Widgets', 'Pat Doe', '98765', '987.65', '12345', '432109', '4321.09', '55555', '555.55']) {
+      expect(logged).not.toContain(s)
+    }
+  })
+})
+
+describe('buildErrorKind — amount-free log classification', () => {
+  const kindOf = (fn: () => unknown) => { try { fn(); return 'no throw' } catch (e) { return buildErrorKind((e as Error).message) } }
+  it('classifies each buildStatement throw without echoing it', () => {
+    expect(kindOf(() => buildStatement({ charges: [], payments: [], start: 'x', end: '2026-10-01' }))).toBe('malformed date')
+    expect(kindOf(() => buildStatement({ charges: [], payments: [], start: '2026-10-31', end: '2026-10-01' }))).toBe('invalid range')
+    expect(kindOf(() => buildStatement({ charges: [{ id: 'c', charge_date: '2026-10-01', due_date: '2026-10-01', type: 'rent', description: null, amountCents: 1.5 }], payments: [], start: '2026-10-01', end: '2026-10-31' }))).toBe('invalid amount')
+    expect(buildErrorKind('statement does not foot: running 1 != closing 2')).toBe('does not foot')
+    expect(buildErrorKind('something else 12345')).toBe('other')
   })
 })
 
@@ -196,7 +219,8 @@ describe('GET /api/statements/packet', () => {
     expect(body.items[0]).toMatchObject({ lease_id: lGood.lease_id, to: 'pat@acme.example' })
     expect(body.items[0].subject).toContain('Statement of Account')
     expect(body.items[0].html).toContain('Test Park Holdings LLC')
-    expect(body.skipped).toEqual([{ lease_id: lNo.lease_id, reasons: ['missing_contact_email'] }])
+    expect(body.items[0]).toMatchObject({ closing_cents: 50000 })
+    expect(body.skipped).toEqual([{ lease_id: lNo.lease_id, closing_cents: 50000, reasons: ['missing_contact_email'] }])
   })
 
   it('trims the recipient address', async () => {

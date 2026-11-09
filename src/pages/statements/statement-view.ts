@@ -84,6 +84,31 @@ export function statementQuery(range: { start: string; end: string }): string {
   return `start=${encodeURIComponent(range.start)}&end=${encodeURIComponent(range.end)}`
 }
 
+/**
+ * The packet is a second server read, so a ledger write between "Run statements" and the download
+ * can change it. Compare its draft count with the reviewed list's ready count.
+ */
+type PacketEntry = { lease_id: string; closing_cents: number }
+
+export function packetDrift(
+  packet: { items?: PacketEntry[]; skipped?: PacketEntry[] },
+  reviewed: readonly LeaseStatement[],
+): { text: string; warn: boolean } {
+  const items = packet.items ?? []
+  const skipped = packet.skipped ?? []
+  // Compare lease-by-lease (id, closing amount, ready vs blocked) — a count alone misses one lease
+  // leaving and another arriving, and any change of amount (REFUTE round 2).
+  const key = (id: string, cents: number, ready: boolean) => `${id}|${cents}|${ready ? 'ready' : 'blocked'}`
+  const got = new Set([...items.map(i => key(i.lease_id, i.closing_cents, true)), ...skipped.map(s => key(s.lease_id, s.closing_cents, false))])
+  const want = new Set(reviewed.map(r => key(r.lease_id, r.statement.closingCents, r.blockers.length === 0)))
+  const same = got.size === want.size && [...want].every(k => got.has(k))
+  if (same) return { text: `Packet downloaded: ${items.length} drafts, ${skipped.length} skipped. It matches the list above.`, warn: false }
+  return {
+    text: 'The packet does not match the list above (a lease, amount or status changed since you ran statements). Delete the downloaded file, re-run statements and download again before staging.',
+    warn: true,
+  }
+}
+
 /** Packet file name, session-output convention: YYYY-MM-DD_Statements_DraftPacket_<start>_<end>.json */
 export function packetFilename(range: { start: string; end: string }, today: Date = new Date()): string {
   const d = defaultRange(today).end

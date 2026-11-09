@@ -9,7 +9,7 @@ import { EmptyState } from '../../components/ui/EmptyState'
 import { DateInput } from '../../components/form/inputs'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../../components/ui/table'
 import { formatCurrency } from '../../lib/format'
-import { BLOCKER_LABELS, defaultRange, packetFilename, statementQuery, toDollars, validRange, type LeaseStatement } from './statement-view'
+import { BLOCKER_LABELS, defaultRange, packetDrift, packetFilename, statementQuery, toDollars, validRange, type LeaseStatement } from './statement-view'
 
 // /statements — statements for every lease with a balance as of the end date, and the Outlook
 // draft packet. Nothing on this page sends mail: the packet becomes Outlook DRAFTS via
@@ -20,6 +20,7 @@ export function StatementsBatch() {
   const [run, setRun] = useState<{ start: string; end: string } | null>(null)
   const [downloading, setDownloading] = useState(false)
   const [downloadError, setDownloadError] = useState<string | null>(null)
+  const [packetNote, setPacketNote] = useState<{ text: string; warn: boolean } | null>(null)
   const range = validRange(start, end)
 
   const query = useQuery({
@@ -35,8 +36,11 @@ export function StatementsBatch() {
     if (!run) return
     setDownloading(true)
     setDownloadError(null)
+    setPacketNote(null)
     try {
       const { blob } = await api.download(`/statements/packet?${statementQuery(run)}`, packetFilename(run))
+      // The packet is a fresh server read: tell the admin if it differs from the reviewed list.
+      setPacketNote(packetDrift(JSON.parse(await blob.text()), rows))
       const a = document.createElement('a')
       a.href = URL.createObjectURL(blob)
       a.download = packetFilename(run)
@@ -75,6 +79,9 @@ export function StatementsBatch() {
             </Button>
           </div>
           {downloadError && <p role="alert" className="mb-4 text-sm text-status-danger">{downloadError}</p>}
+          {packetNote && (
+            <p role="status" className={`mb-4 text-sm ${packetNote.warn ? 'text-status-warning' : 'text-status-neutral'}`}>{packetNote.text}</p>
+          )}
           <p className="mb-4 text-xs text-status-neutral">
             The packet holds only the {ready.length} ready statements. Stage them with{' '}
             <code className="font-mono">scripts/stage-statement-drafts.ps1 -Packet &lt;file&gt;</code>, review the drafts in Outlook,

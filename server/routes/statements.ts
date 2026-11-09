@@ -62,6 +62,15 @@ const LEDGER_COLS = 'lease_id, tenant_id, tenant_name, property_id, property_nam
 const fail = (message: string, publicMsg = 'Failed to build statement'): ReadFail => ({ ok: false, error: { message }, publicMsg })
 const emailOk = (v: string) => z.string().email().safeParse(v).success
 
+// Amount-free classification of a buildStatement error (see the throws in server/lib/statement.ts).
+export function buildErrorKind(message: string): 'malformed date' | 'invalid range' | 'invalid amount' | 'does not foot' | 'other' {
+  if (/malformed .*date/.test(message)) return 'malformed date'
+  if (/invalid statement range/.test(message)) return 'invalid range'
+  if (/integer cents/.test(message)) return 'invalid amount'
+  if (/does not foot/.test(message)) return 'does not foot'
+  return 'other'
+}
+
 function parseRange(start: string | undefined, end: string | undefined): { start: string; end: string } | string {
   if (!start || !end) return 'start and end are required (YYYY-MM-DD)'
   if (Number.isNaN(daysPastDue(start, start)) || Number.isNaN(daysPastDue(end, end))) return 'start and end must be valid YYYY-MM-DD dates'
@@ -143,18 +152,19 @@ async function readStatements(db: Db, leaseId: string | null, start: string, end
     const ledgerPaid = toCents(led.total_paid)
     const fetchedCharged = lc.reduce((a, c) => a + c.amountCents, 0)
     const fetchedPaid = lp.filter(p => classifyPayment(p) === 'counted').reduce((a, p) => a + p.amountCents, 0)
-    if (ledgerCharged === null || ledgerCharged !== fetchedCharged || ledgerPaid === null || ledgerPaid !== fetchedPaid) {
-      return {
-        ok: true, rows: [],
-        mismatch: `lease ${led.lease_id}: ar_ledger total_charged=${ledgerCharged} total_paid=${ledgerPaid} cents, fetched charges=${fetchedCharged} counted payments=${fetchedPaid} cents`,
-      }
-    }
+    // Log text names the lease and which total failed — never the amounts (REFUTE C6b: tenant
+    // balances must not reach Worker logs).
+    const failed: string[] = []
+    if (ledgerCharged === null || ledgerCharged !== fetchedCharged) failed.push('charges vs ar_ledger.total_charged')
+    if (ledgerPaid === null || ledgerPaid !== fetchedPaid) failed.push('counted payments vs ar_ledger.total_paid')
+    if (failed.length > 0) return { ok: true, rows: [], mismatch: `lease ${led.lease_id}: ${failed.join(', ')} do not tie` }
 
     let statement: Statement
     try {
       statement = buildStatement({ charges: lc, payments: lp, start, end })
     } catch (e) {
-      return fail(`statement build failed for lease ${led.lease_id}: ${(e as Error).message}`)
+      // buildStatement's own message can carry amounts, so log only which check failed.
+      return fail(`statement build failed for lease ${led.lease_id}: ${buildErrorKind((e as Error).message)}`)
     }
 
     const prop = propBy.get(led.property_id)
@@ -197,7 +207,10 @@ async function readBatch(db: Db, start: string, end: string) {
   return { ...read, rows: read.rows.filter(r => r.statement.closingCents > 0) }
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
 statementsRouter.get('/lease/:leaseId', async (c) => {
+  if (!UUID_RE.test(c.req.param('leaseId'))) return c.json({ error: 'lease id must be a uuid' }, 422)
   const range = parseRange(c.req.query('start'), c.req.query('end'))
   if (typeof range === 'string') return c.json({ error: range }, 422)
   const read = await readWithRetry(getDb(c.env), c.req.param('leaseId'), range.start, range.end)
@@ -219,15 +232,17 @@ statementsRouter.get('/packet', async (c) => {
   if (typeof range === 'string') return c.json({ error: range }, 422)
   const read = await readBatch(getDb(c.env), range.start, range.end)
   if (!read.ok) return dbError(c, read.error, read.publicMsg)
-  const items: { lease_id: string; to: string; subject: string; html: string }[] = []
-  const skipped: { lease_id: string; reasons: StatementBlocker[] }[] = []
+  // closing_cents lets the batch page check the packet against the list the admin reviewed (the
+  // packet is a second read; a ledger write in between must not go unnoticed).
+  const items: { lease_id: string; closing_cents: number; to: string; subject: string; html: string }[] = []
+  const skipped: { lease_id: string; closing_cents: number; reasons: StatementBlocker[] }[] = []
   for (const r of read.rows) {
-    if (r.blockers.length > 0) { skipped.push({ lease_id: r.lease_id, reasons: r.blockers }); continue }
+    if (r.blockers.length > 0) { skipped.push({ lease_id: r.lease_id, closing_cents: r.statement.closingCents, reasons: r.blockers }); continue }
     const { subject, html } = renderStatementEmail(r.statement, {
       leaseId: r.lease_id, tenantName: r.tenant_name, contactName: r.contact_name, propertyName: r.property_name,
       propertyAddress: r.property_address, suite: r.suite, entityLlc: r.entity_llc!,
     })
-    items.push({ lease_id: r.lease_id, to: r.contact_email!, subject, html })
+    items.push({ lease_id: r.lease_id, closing_cents: r.statement.closingCents, to: r.contact_email!, subject, html })
   }
   return c.json({ version: 1, start: range.start, end: range.end, generated_at: new Date().toISOString(), items, skipped })
 })

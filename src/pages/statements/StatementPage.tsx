@@ -43,9 +43,12 @@ export function StatementPage() {
           </p>
         )}
       </div>
-      <QueryState query={query}>
-        {query.data && <StatementDocument data={query.data.data} />}
-      </QueryState>
+      {/* A disabled query reports isPending forever; only mount QueryState for a usable range. */}
+      {range !== null && (
+        <QueryState query={query}>
+          {query.data && <StatementDocument data={query.data.data} />}
+        </QueryState>
+      )}
     </div>
   )
 }

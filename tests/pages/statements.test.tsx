@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { createElement } from 'react'
 import { StatementDocument } from '../../src/pages/statements/StatementDocument'
-import { defaultRange, packetFilename, validRange, statementQuery, type LeaseStatement } from '../../src/pages/statements/statement-view'
+import { defaultRange, packetDrift, packetFilename, validRange, statementQuery, type LeaseStatement } from '../../src/pages/statements/statement-view'
 
 const data = (over: Partial<LeaseStatement['statement']> = {}): LeaseStatement => ({
   lease_id: 'l1', tenant_id: 't1', tenant_name: 'Acme Widgets Inc', contact_name: 'Pat Doe', contact_email: 'pat@acme.example',
@@ -33,6 +33,26 @@ describe('statement-view helpers', () => {
   it('statementQuery and packetFilename', () => {
     expect(statementQuery({ start: '2026-10-01', end: '2026-10-31' })).toBe('start=2026-10-01&end=2026-10-31')
     expect(packetFilename({ start: '2026-10-01', end: '2026-10-31' }, new Date(2026, 10, 9))).toBe('2026-11-09_Statements_DraftPacket_2026-10-01_2026-10-31.json')
+  })
+})
+
+describe('packetDrift', () => {
+  const row = (lease_id: string, closingCents: number, blocked = false): LeaseStatement =>
+    ({ ...data({ closingCents }), lease_id, blockers: blocked ? ['missing_contact_email'] : [] })
+  const reviewed = [row('a', 100), row('b', 200), row('c', 300, true)]
+  const packet = { items: [{ lease_id: 'a', closing_cents: 100 }, { lease_id: 'b', closing_cents: 200 }], skipped: [{ lease_id: 'c', closing_cents: 300 }] }
+
+  it('confirms a packet that matches the reviewed list', () => {
+    expect(packetDrift(packet, reviewed).warn).toBe(false)
+  })
+  it('warns when one lease swaps for another at the same count', () => {
+    expect(packetDrift({ ...packet, items: [packet.items[0], { lease_id: 'z', closing_cents: 200 }] }, reviewed).warn).toBe(true)
+  })
+  it('warns when an amount changed', () => {
+    expect(packetDrift({ ...packet, items: [packet.items[0], { lease_id: 'b', closing_cents: 201 }] }, reviewed).warn).toBe(true)
+  })
+  it('warns when a lease moved between ready and blocked', () => {
+    expect(packetDrift({ items: [...packet.items, { lease_id: 'c', closing_cents: 300 }], skipped: [] }, reviewed).warn).toBe(true)
   })
 })
 
