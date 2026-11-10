@@ -840,8 +840,14 @@ camRouter.post('/:id/approve', async (c) => {
         .select()
       if (revertErr) return dbError(c, revertErr, 'Failed to revert the CAM reconciliation to draft')
       return c.json({
-        error: 'A true-up charge was posted for this lease and year by a concurrent approval while this credit was being '
-          + 'approved. The credit was NOT kept as billed. Review and delete the charge, then approve the credit again.',
+        // REFUTE F4 (C7): only a live true-up can be deleted from the app; a voided or foreign key
+        // holder needs manual resolution.
+        error: after.kind === 'live'
+          ? `A true-up charge of ${Number(after.amount).toFixed(2)} was posted for this lease and year by a concurrent `
+            + 'approval while this credit was being approved. The credit was NOT kept as billed. Delete that charge, '
+            + 'then approve the credit again.'
+          : 'Another charge now holds this lease\'s CAM true-up key (it appeared while this credit was being approved). '
+            + 'The credit was NOT kept as billed. Resolve that charge manually before approving the credit.',
       }, 409)
     }
 

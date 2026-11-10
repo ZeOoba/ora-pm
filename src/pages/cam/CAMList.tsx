@@ -170,13 +170,17 @@ export function CAMList() {
     await runExclusive(approveInFlight, async () => {
       setApprovingId(row.id)
       try {
-        await api.post<{ success: boolean; true_up_amount: number }>(`/cam/${row.id}/approve`, {})
+        const res = await api.post<{ success?: boolean; true_up_amount: number; message?: string }>(`/cam/${row.id}/approve`, {})
         await Promise.all([
           qc.invalidateQueries({ queryKey: ['cam'] }),
           qc.invalidateQueries({ queryKey: ['ar-aging'] }),
           qc.invalidateQueries({ queryKey: ['charges'] }),
         ])
-        toast.success('True-up approved and posted to the tenant ledger')
+        // REFUTE F4: only a positive true-up posts a charge. A credit is flagged for manual handling
+        // and a balanced draft posts nothing; the server's own message says which.
+        toast.success(res.true_up_amount > 0
+          ? 'True-up approved and posted to the tenant ledger'
+          : (res.message ?? 'Approved; no charge was posted'))
       } catch (err) {
         toast.error(err instanceof Error ? err.message : 'Approve failed.')
       } finally {
