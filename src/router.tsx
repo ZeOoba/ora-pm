@@ -28,6 +28,9 @@ const QBExport = lazy(() => import('./pages/exports/QBExport').then((m) => ({ de
 const RenewalsPipeline = lazy(() => import('./pages/renewals/RenewalsPipeline').then((m) => ({ default: m.RenewalsPipeline })))
 const PortalApp = lazy(() => import('./portal/PortalApp').then((m) => ({ default: m.PortalApp })))
 const UnitsPage = lazy(() => import('./pages/units/UnitsPage').then((m) => ({ default: m.UnitsPage })))
+const TransactionsPage = lazy(() => import('./pages/transactions/TransactionsPage').then((m) => ({ default: m.TransactionsPage })))
+const ReportLibrary = lazy(() => import('./pages/reports/ReportLibrary').then((m) => ({ default: m.ReportLibrary })))
+const FinancialReport = lazy(() => import('./pages/reports/FinancialReport').then((m) => ({ default: m.FinancialReport })))
 const RentRoll = lazy(() => import('./pages/reports/RentRoll').then((m) => ({ default: m.RentRoll })))
 const PaymentsList = lazy(() => import('./pages/payments/PaymentsList').then((m) => ({ default: m.PaymentsList })))
 const CAMList = lazy(() => import('./pages/cam/CAMList').then((m) => ({ default: m.CAMList })))
@@ -80,6 +83,9 @@ export const router = createBrowserRouter([
   { path: '/insurance', errorElement: <RouteError />, element: <Layout><InsuranceList /></Layout> },
   { path: '/insurance/new', errorElement: <RouteError />, element: <Layout><InsuranceForm /></Layout> },
   { path: '/units', errorElement: <RouteError />, element: <Layout><UnitsPage /></Layout> },
+  { path: '/transactions', errorElement: <RouteError />, element: <Layout><TransactionsPage /></Layout> },
+  { path: '/reports', errorElement: <RouteError />, element: <Layout><ReportLibrary /></Layout> },
+  { path: '/reports/:kind', errorElement: <RouteError />, element: <Layout><FinancialReport /></Layout> },
   { path: '/rent-roll', errorElement: <RouteError />, element: <Layout><RentRoll /></Layout> },
   { path: '/portal/*', errorElement: <RouteError />, element: <Suspense fallback={<PageSkeleton />}><PortalApp /></Suspense> },
   { path: '/portal', errorElement: <RouteError />, element: <Suspense fallback={<PageSkeleton />}><PortalApp /></Suspense> },
