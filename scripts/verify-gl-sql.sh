@@ -23,10 +23,17 @@ DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN CREATE ROLE service_role NOLOGIN; END IF;
 END $$;
 CREATE TABLE properties (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), name TEXT);
+-- Supabase's defaults: every new public table is GRANT ALL to the API roles, and service_role
+-- bypasses RLS. The adversarial tests run as service_role against exactly those privileges.
+GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO anon, authenticated, service_role;
+ALTER ROLE service_role BYPASSRLS;
 SQL
 
 # Apply twice: the migration must be re-runnable.
 psql "$GL_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f supabase/migrations/0023_gl_core.sql
 psql "$GL_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f supabase/migrations/0023_gl_core.sql
 psql "$GL_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f supabase/tests/gl_core.test.sql
+# A fresh session, so the triggers have no cached plans when the shadowing attack runs.
+psql "$GL_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f supabase/tests/gl_service_role.test.sql
 echo "verify-gl-sql: all GL SQL checks passed"

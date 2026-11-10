@@ -74,6 +74,7 @@ describe('migration 0023 — GL core tables (runtime, real SQL on pg-mem)', () =
   it('periods: first of month; locked ⇔ locked_at and locked_by', () => {
     expect(() => db.none(`INSERT INTO gl_periods (entity_id, period_start) VALUES ('${E1}', '2026-11-15')`)).toThrow(/gl_periods_month_start/)
     expect(() => db.none(`INSERT INTO gl_periods (entity_id, period_start, status) VALUES ('${E1}', '2026-11-01', 'locked')`)).toThrow(/gl_periods_lock_pair/)
+    expect(() => db.none(`INSERT INTO gl_periods (entity_id, period_start, locked_by) VALUES ('${E1}', '2026-11-01', 'x')`)).toThrow(/gl_periods_lock_pair/)
     db.none(`INSERT INTO gl_periods (entity_id, period_start) VALUES ('${E1}', '2026-11-01')`)
   })
 })
@@ -136,6 +137,18 @@ describe('migration 0023 — money-rule triggers, functions and access (textual 
       has(new RegExp(`^GRANT EXECUTE ON FUNCTION ${fn}\\([^)]*\\) TO service_role$`))
     }
     expect(sql).not.toMatch(/SECURITY DEFINER/i)
+  })
+
+  it('REFUTE pass 3: pg_temp searched last, no caller triggers, forged lock fields impossible', () => {
+    // F1: every function pins search_path with pg_temp LAST (a bare `public` searches pg_temp first)
+    expect(sql).not.toMatch(/SET search_path = public\n/)
+    expect((sql.match(/SET search_path = public, pg_temp\n/g) ?? []).length).toBeGreaterThanOrEqual(15)
+    // F2: Supabase's default GRANT ALL is cut back
+    has(/^REVOKE ALL ON gl_entities, gl_accounts, gl_periods, gl_journal_entries, gl_journal_lines FROM PUBLIC, anon, authenticated$/)
+    has(/^REVOKE TRIGGER, TRUNCATE, REFERENCES ON gl_entities, gl_accounts, gl_periods, gl_journal_entries, gl_journal_lines FROM service_role$/)
+    // F3: the DB stamps locked_at; open rows carry no lock fields
+    expect(sql).toMatch(/NEW\.locked_at := now\(\);/)
+    expect(sql).toMatch(/status = 'open' AND locked_at IS NULL AND locked_by IS NULL/)
   })
 
   it('RLS on every gl_ table, no policies', () => {

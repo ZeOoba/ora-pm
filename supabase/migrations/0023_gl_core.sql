@@ -42,13 +42,18 @@
 -- REFUTE (2026-11-10, independent adversarial reviewer, real Postgres 16, as service_role): the
 -- first draft of rules 4, 5 and 7 was bypassable by direct SQL (D1–D4) and blocked two postings
 -- in one transaction (D5). This version closes each; supabase/tests/gl_core.test.sql reproduces
--- every attack and asserts it now fails.
+-- every attack and asserts it now fails. Pass 2 found reversal-mirror, period-lock and
+-- reclassification-race bypasses; pass 3 found that temp tables could shadow the ledger tables in
+-- the triggers' lookups (every function now pins search_path = public, pg_temp, which searches
+-- pg_temp LAST) and that service_role's default TRIGGER privilege let a caller add a trigger that
+-- rewrote rows after the guards ran (revoked below). Each is reproduced in the test suite.
 --
 -- Writes go through two functions (gl_post_entry, gl_reverse_entry) and gl_lock_period, so header
 -- and lines land in ONE transaction (PostgREST runs each RPC in its own transaction).
 --
 -- RLS: enabled with NO policies on every table (default-deny for anon/authenticated, the
--- 0013/0018 pattern). Functions: SECURITY INVOKER, EXECUTE revoked from PUBLIC/anon/authenticated
+-- 0013/0018 pattern); table privileges revoked from anon/authenticated, and TRIGGER/TRUNCATE/
+-- REFERENCES from service_role. Functions: SECURITY INVOKER, EXECUTE revoked from PUBLIC/anon/authenticated
 -- and granted to service_role only (the 0014 pattern).
 --
 -- ORDERING: purely additive (new tables, functions, triggers; one nullable column on properties).
@@ -94,7 +99,10 @@ CREATE TABLE IF NOT EXISTS gl_periods (
   locked_at TIMESTAMPTZ,
   locked_by TEXT,
   PRIMARY KEY (entity_id, period_start),
-  CONSTRAINT gl_periods_lock_pair CHECK ((status = 'locked') = (locked_at IS NOT NULL AND locked_by IS NOT NULL))
+  -- Open rows carry no lock fields; locked rows carry both, with a real locker (REFUTE-3 F3).
+  CONSTRAINT gl_periods_lock_pair CHECK (
+    (status = 'open' AND locked_at IS NULL AND locked_by IS NULL)
+    OR (status = 'locked' AND locked_at IS NOT NULL AND locked_by IS NOT NULL AND btrim(locked_by) <> ''))
 );
 
 -- ── Journal ───────────────────────────────────────────────────────────────────────────────────
@@ -142,7 +150,7 @@ CREATE INDEX IF NOT EXISTS gl_journal_lines_entity_account_idx ON gl_journal_lin
 -- ── Rule 2: balanced, at least two lines (checked at COMMIT) ──────────────────────────────────
 CREATE OR REPLACE FUNCTION gl_assert_entry_balanced() RETURNS trigger
 LANGUAGE plpgsql
-SET search_path = public
+SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_entry UUID;
@@ -183,7 +191,7 @@ CREATE CONSTRAINT TRIGGER gl_journal_lines_balanced
 -- ── Rule 4: immutability ──────────────────────────────────────────────────────────────────────
 CREATE OR REPLACE FUNCTION gl_reject_change() RETURNS trigger
 LANGUAGE plpgsql
-SET search_path = public
+SET search_path = public, pg_temp
 AS $$
 BEGIN
   RAISE EXCEPTION 'gl: % rows are immutable once posted; post a reversing entry instead', TG_TABLE_NAME
@@ -219,12 +227,12 @@ CREATE TRIGGER gl_journal_lines_no_truncate
 -- session TimeZone, UTC on Supabase, would end a month around 7 pm Central).
 CREATE OR REPLACE FUNCTION gl_today() RETURNS date
 LANGUAGE sql STABLE
-SET search_path = public
+SET search_path = public, pg_temp
 AS $$ SELECT (now() AT TIME ZONE 'America/Chicago')::date $$;
 
 CREATE OR REPLACE FUNCTION gl_hold_open_period(p_entity_id UUID, p_date DATE) RETURNS void
 LANGUAGE plpgsql
-SET search_path = public
+SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_status TEXT;
@@ -246,7 +254,7 @@ $$;
 
 CREATE OR REPLACE FUNCTION gl_assert_entry_insert() RETURNS trigger
 LANGUAGE plpgsql
-SET search_path = public
+SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_ref_source TEXT;
@@ -287,7 +295,7 @@ CREATE TRIGGER gl_journal_entries_insert_guard
 -- every row of a multi-row INSERT is visible, closes reversal-of-a-reversal (REFUTE-2 S1).
 CREATE OR REPLACE FUNCTION gl_check_reversal(p_reversal_id UUID) RETURNS void
 LANGUAGE plpgsql
-SET search_path = public
+SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_target UUID;
@@ -315,7 +323,7 @@ $$;
 
 CREATE OR REPLACE FUNCTION gl_assert_reversal_mirror() RETURNS trigger
 LANGUAGE plpgsql
-SET search_path = public
+SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_rev UUID;
@@ -352,7 +360,7 @@ CREATE CONSTRAINT TRIGGER gl_journal_lines_reversal_mirror
 -- impossible to correct.
 CREATE OR REPLACE FUNCTION gl_assert_line_insert() RETURNS trigger
 LANGUAGE plpgsql
-SET search_path = public
+SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_entry gl_journal_entries%ROWTYPE;
@@ -385,7 +393,7 @@ CREATE TRIGGER gl_journal_lines_insert_guard
 -- ── Periods: a lock is permanent; period rows are never deleted or truncated (REFUTE D3) ───────
 CREATE OR REPLACE FUNCTION gl_guard_period_change() RETURNS trigger
 LANGUAGE plpgsql
-SET search_path = public
+SET search_path = public, pg_temp
 AS $$
 BEGIN
   IF TG_OP = 'DELETE' THEN
@@ -412,6 +420,8 @@ BEGIN
     IF NEW.locked_by IS NULL OR btrim(NEW.locked_by) = '' THEN
       RAISE EXCEPTION 'gl: locked_by is required' USING ERRCODE = 'check_violation';
     END IF;
+    -- The lock time is the database's, never the caller's (REFUTE-3 F3).
+    NEW.locked_at := now();
   END IF;
   RETURN NEW;
 END;
@@ -424,7 +434,7 @@ CREATE TRIGGER gl_periods_guard
 
 CREATE OR REPLACE FUNCTION gl_reject_truncate() RETURNS trigger
 LANGUAGE plpgsql
-SET search_path = public
+SET search_path = public, pg_temp
 AS $$
 BEGIN
   RAISE EXCEPTION 'gl: % cannot be truncated', TG_TABLE_NAME USING ERRCODE = 'restrict_violation';
@@ -443,7 +453,7 @@ CREATE TRIGGER gl_entities_no_truncate BEFORE TRUNCATE ON gl_entities FOR EACH S
 -- allowed). Once an entity has entries, its accounting basis is fixed.
 CREATE OR REPLACE FUNCTION gl_guard_account_change() RETURNS trigger
 LANGUAGE plpgsql
-SET search_path = public
+SET search_path = public, pg_temp
 AS $$
 BEGIN
   IF (NEW.entity_id <> OLD.entity_id OR NEW.account_type <> OLD.account_type)
@@ -461,7 +471,7 @@ CREATE TRIGGER gl_accounts_guard
 
 CREATE OR REPLACE FUNCTION gl_guard_entity_change() RETURNS trigger
 LANGUAGE plpgsql
-SET search_path = public
+SET search_path = public, pg_temp
 AS $$
 BEGIN
   IF NEW.accounting_basis <> OLD.accounting_basis
@@ -490,7 +500,7 @@ CREATE OR REPLACE FUNCTION gl_post_entry(
   p_lines JSONB
 ) RETURNS UUID
 LANGUAGE plpgsql
-SET search_path = public
+SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_entry UUID;
@@ -538,7 +548,7 @@ CREATE OR REPLACE FUNCTION gl_reverse_entry(
   p_posted_by TEXT
 ) RETURNS UUID
 LANGUAGE plpgsql
-SET search_path = public
+SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_orig gl_journal_entries%ROWTYPE;
@@ -570,7 +580,7 @@ $$;
 -- can be locked (a lock is permanent; locking a future month by mistake would be unfixable).
 CREATE OR REPLACE FUNCTION gl_lock_period(p_entity_id UUID, p_period_start DATE, p_locked_by TEXT) RETURNS void
 LANGUAGE plpgsql
-SET search_path = public
+SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_status TEXT;
@@ -603,6 +613,14 @@ ALTER TABLE gl_accounts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE gl_periods ENABLE ROW LEVEL SECURITY;
 ALTER TABLE gl_journal_entries ENABLE ROW LEVEL SECURITY;
 ALTER TABLE gl_journal_lines ENABLE ROW LEVEL SECURITY;
+
+-- Supabase's default privileges GRANT ALL on new public tables to anon, authenticated and
+-- service_role. The API roles get nothing here. service_role keeps SELECT/INSERT/UPDATE/DELETE
+-- (the triggers decide what may change) but NOT TRIGGER: a caller-defined trigger firing after
+-- the guards could rewrite rows they had already approved (REFUTE-3 F2). TRUNCATE and REFERENCES
+-- go too.
+REVOKE ALL ON gl_entities, gl_accounts, gl_periods, gl_journal_entries, gl_journal_lines FROM PUBLIC, anon, authenticated;
+REVOKE TRIGGER, TRUNCATE, REFERENCES ON gl_entities, gl_accounts, gl_periods, gl_journal_entries, gl_journal_lines FROM service_role;
 
 REVOKE EXECUTE ON FUNCTION gl_post_entry(UUID, DATE, TEXT, TEXT, TEXT, JSONB) FROM PUBLIC, anon, authenticated;
 REVOKE EXECUTE ON FUNCTION gl_reverse_entry(UUID, DATE, TEXT, TEXT) FROM PUBLIC, anon, authenticated;
