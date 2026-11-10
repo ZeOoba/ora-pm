@@ -31,8 +31,10 @@ ALTER ROLE service_role BYPASSRLS;
 SQL
 
 # Apply twice: the migration must be re-runnable.
-psql "$GL_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f supabase/migrations/0023_gl_core.sql
-psql "$GL_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f supabase/migrations/0023_gl_core.sql
+for m in supabase/migrations/0023_gl_core.sql supabase/migrations/0024_gl_qb_account_type.sql; do
+  psql "$GL_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f "$m"
+  psql "$GL_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f "$m"
+done
 psql "$GL_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f supabase/tests/gl_core.test.sql
 # A fresh session, so the triggers have no cached plans when the shadowing attack runs.
 psql "$GL_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f supabase/tests/gl_service_role.test.sql

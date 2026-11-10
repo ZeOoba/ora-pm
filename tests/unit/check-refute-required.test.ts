@@ -71,10 +71,11 @@ describe('check-refute-required — financial-source classification', () => {
     // B8 general ledger core.
     expect(isFinancialSourcePath('server/lib/gl.ts')).toBe(true)
     expect(isFinancialSourcePath('server/routes/gl.ts')).toBe(true)
+    expect(isFinancialSourcePath('server/lib/qb-iif-accounts.ts')).toBe(true)
   })
 
   it('exposes the financial path set with the expected membership', () => {
-    expect(FINANCIAL_SOURCE_PATHS.size).toBe(23)
+    expect(FINANCIAL_SOURCE_PATHS.size).toBe(24)
     for (const p of [
       'server/routes/cron.ts',
       'server/routes/stripe.ts',
