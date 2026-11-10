@@ -76,7 +76,7 @@ chargesRouter.delete('/:id', async (c) => {
   // (no row) is the genuine 404; any other error is a DB failure and must not be reported as 404.
   const { data: charge, error: readErr } = await db
     .from('charges')
-    .select('source, voided_at')
+    .select('source, voided_at, type, lease_id, period_start, idempotency_key')
     .eq('id', c.req.param('id'))
     .single()
   if (readErr && readErr.code !== 'PGRST116') return dbError(c, readErr, 'Failed to load charge')
@@ -93,7 +93,98 @@ chargesRouter.delete('/:id', async (c) => {
   if ((charge as { voided_at: string | null }).voided_at !== null) {
     return c.json({ error: 'Voided charges cannot be deleted' }, 400)
   }
+  const camGuard = await billedCamTrueUpGuard(db, charge as ChargeGuardRow)
+  if (camGuard.kind === 'db_error') return dbError(c, camGuard.error, 'Failed to load CAM reconciliation')
+  if (camGuard.kind === 'refuse') return c.json({ error: camGuard.reason }, camGuard.status)
   const { error } = await db.from('charges').delete().eq('id', c.req.param('id'))
   if (error) return dbError(c, error, 'Failed to delete charge')
   return c.json({ success: true })
 })
+
+type ChargeGuardRow = {
+  type?: string | null
+  lease_id?: string | null
+  period_start?: string | null
+  idempotency_key?: string | null
+}
+
+type CamGuard =
+  | { kind: 'allow' }
+  | { kind: 'refuse'; status: 409 | 500; reason: string }
+  | { kind: 'db_error'; error: { code?: string; message: string } }
+
+// Only a UUID-shaped lease part: 0022 builds the key from lease_id::text, and a malformed legacy key
+// would otherwise reach the uuid column filter and 500 (22P02) on every delete attempt (REFUTE D2).
+const CAM_KEY = /^cam_true_up:([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}):(\d{4})$/
+
+// There is no in-app void action yet (no route or UI writes voided_at); a void is a manual DB
+// operation, so the refusals say so instead of pointing at a button that does not exist (REFUTE D1).
+const VOID_HOW = 'Void the charge instead: an administrator sets voided_at and void_reason on it in the '
+  + 'database (migration 0016). The charge stays on record as an audit row.'
+
+// A billed CAM reconciliation's true-up must not be hard-deleted. approve_cam_reconciliation()
+// (migration 0022) posts it under cam_true_up:<lease>:<year> and marks the reconciliation billed in
+// one transaction; approve then refuses any non-draft row (not_draft). Deleting the charge afterwards
+// left the row billed with nothing on the ledger and no way to re-post — the true-up was lost.
+//
+// Refuse (409) while the reconciliation the charge belongs to is billed or collected; void is the
+// correction path (voided_at/void_reason, migration 0016: audit row kept, reversible). Deletion stays
+// allowed while that reconciliation is a draft (or absent): approve's live_mismatch answer tells the
+// user to delete a stale true-up, and the next approve re-posts the right figure.
+//
+// Which reconciliation: the one the reserved key names (that is the row approve keys on), and also
+// the charge's own lease + period_start year (a legacy true-up posted before the reserved key). Any
+// charge holding a cam_true_up: key is checked, whatever its type — it occupies the key all the same.
+//
+// Fail closed: a missing `type` (column dropped from the select) or an undeterminable year on a
+// cam_true_up refuses; any read error on cam_reconciliations is a 500, never a delete.
+//
+// Concurrency: no gap for rows 0022 posts — the charge becomes visible only in the same commit that
+// bills the reconciliation, so a delete that can see the charge also sees `billed`. The residual
+// window is a PRE-0022 row left mid-approve (live keyed charge, draft reconciliation): an approve
+// committing between this read and the DELETE bills it, then the delete removes it. Closing that
+// fully needs the delete inside a function holding the reconciliation lock (see PR body).
+async function billedCamTrueUpGuard(db: ReturnType<typeof getDb>, row: ChargeGuardRow): Promise<CamGuard> {
+  if (row.type === undefined) {
+    return { kind: 'refuse', status: 500, reason: 'Charge type could not be read; refusing to delete.' }
+  }
+  const targets = new Map<string, { leaseId: string; year: number }>()
+  const keyMatch = typeof row.idempotency_key === 'string' ? CAM_KEY.exec(row.idempotency_key) : null
+  if (keyMatch) {
+    const year = Number(keyMatch[2])
+    targets.set(`${keyMatch[1]}:${year}`, { leaseId: keyMatch[1], year })
+  }
+  if (row.type === 'cam_true_up') {
+    const year = typeof row.period_start === 'string' ? Number(row.period_start.slice(0, 4)) : NaN
+    if (row.lease_id && Number.isInteger(year) && year > 0) {
+      targets.set(`${row.lease_id}:${year}`, { leaseId: row.lease_id, year })
+    } else if (targets.size === 0) {
+      return {
+        kind: 'refuse',
+        status: 409,
+        reason: 'This CAM true-up charge cannot be matched to a reconciliation year, so it cannot be '
+          + `deleted safely. ${VOID_HOW}`,
+      }
+    }
+  }
+  for (const { leaseId, year } of targets.values()) {
+    const { data, error } = await db
+      .from('cam_reconciliations')
+      .select('status')
+      .eq('lease_id', leaseId)
+      .eq('reconciliation_year', year)
+      .maybeSingle()
+    if (error) return { kind: 'db_error', error }
+    const status = (data as { status?: string } | null)?.status
+    if (data && status !== 'draft') {
+      return {
+        kind: 'refuse',
+        status: 409,
+        reason: `This is the ${year} CAM true-up for a reconciliation that is already ${status ?? 'billed'}. `
+          + `Deleting it would leave the reconciliation ${status ?? 'billed'} with nothing posted, and it `
+          + `cannot be re-approved. ${VOID_HOW}`,
+      }
+    }
+  }
+  return { kind: 'allow' }
+}

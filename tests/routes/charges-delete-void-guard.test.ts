@@ -52,7 +52,7 @@ describe('DELETE /api/charges/:id — voided-charge guard (OI-310)', () => {
 
   it('still deletes an ordinary un-voided manual charge', async () => {
     const deleteSpy = vi.fn()
-    mockFrom.mockReturnValue(chargesTable({ source: 'manual', voided_at: null }, deleteSpy))
+    mockFrom.mockReturnValue(chargesTable({ source: 'manual', voided_at: null, type: 'rent' }, deleteSpy))
 
     const res = await app.request('/api/charges/charge_live', { method: 'DELETE' }, env)
 
