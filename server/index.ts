@@ -23,6 +23,7 @@ import { portalInsuranceRouter } from './routes/portal-insurance'
 import { intakeRouter } from './routes/intake'
 import { searchRouter } from './routes/search'
 import { statementsRouter } from './routes/statements'
+import { glRouter } from './routes/gl'
 import { collectionsRouter } from './routes/collections'
 import { errorHandlerMiddleware } from './middleware/error-handler'
 import { checkRateLimit } from './lib/rate-limit'
@@ -55,6 +56,7 @@ export interface Env {
   CONFIDENTIAL_TERMS?: string  // comma-separated denylist; never commit real terms
   INTAKE_MODEL?: string        // optional override for the lease-intake extraction model
   ADMIN_EMAILS?: string        // comma-separated exact-match admin allowlist (OI-036); see admin-auth.ts
+  GL_PERIOD_LOCK_EMAILS?: string // comma-separated: who may lock a GL period (B8). Unset = nobody (fail-closed)
   // OI-038 remainder: durable, cross-isolate rate-limit counter storage. See
   // server/lib/rate-limit.ts for the KV-backed limiter and wrangler.toml for
   // the binding (and the manual provisioning step still needed before this
@@ -151,6 +153,7 @@ export function createApp() {
   app.route('/api/intake', intakeRouter)
   app.route('/api/search', searchRouter)
   app.route('/api/statements', statementsRouter)
+  app.route('/api/gl', glRouter)
   app.route('/api/collections', collectionsRouter)
   app.route('/api/stripe', stripeRouter)
   app.route('/api/admin', portalAuthRouter)

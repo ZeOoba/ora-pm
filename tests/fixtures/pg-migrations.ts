@@ -62,6 +62,12 @@ export const PG_MEM_SKIP: RegExp[] = [
   // 0019's backfill reads the critical_dates VIEW, which pg-mem never creates (views are skipped
   // above); tests/db/sent-notifications-tier-migration-0019.test.ts runs it standalone.
   /^UPDATE sent_notifications\s+SET alert_tier = CASE\b[\s\S]*\bFROM critical_dates cd\b/i,
+  // 0023 (B8 GL core): triggers and constraint triggers carry the ledger's money rules (balanced
+  // at commit, immutability, period lock, same-transaction lines). pg-mem parses neither CREATE
+  // [CONSTRAINT] TRIGGER nor DROP TRIGGER, and has no plpgsql. Those rules are tested on REAL
+  // Postgres by supabase/tests/gl_core.test.sql via scripts/verify-gl-sql.sh; their presence is
+  // pinned textually by tests/db/gl-core-migration-0023.test.ts.
+  /^(DROP TRIGGER IF EXISTS|CREATE (CONSTRAINT )?TRIGGER)\b/i,
 ]
 
 // pg-mem gives an unnamed table constraint NO name, while Postgres names it
