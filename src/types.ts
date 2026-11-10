@@ -58,6 +58,11 @@ export interface Lease {
   expense_stop_amount: number | null; ti_allowance: number | null
   /** 0021: stated Proportionate Share, fraction in (0,1]; base year + its recoverable total ($). */
   proportionate_share_pct: number | null; base_year: number | null; base_year_expense_amount: number | null
+  /** 0025: categories passed through (null = all recoverable), annual cap + its end date, and the
+   *  not-reconciled flag with its reason. Optional: absent on rows read before 0025. */
+  recoverable_categories?: string[] | null; base_year_categories?: string[] | null
+  cam_annual_cap?: number | null; cam_cap_through?: string | null
+  cam_reconciled?: boolean; cam_exclusion_reason?: string | null
   ti_reimbursement_schedule: unknown | null
   percentage_rent_terms: PercentageRentTerms | null
   options: LeaseOption[] | null; notes: string | null; created_at: string

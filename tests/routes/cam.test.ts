@@ -89,6 +89,8 @@ const state = {
   leaseBaseYear: null as number | null,
   leaseBaseAmount: null as number | null,
   omitOtherLease: false,
+  /** 0025 columns on the tenant lease (recoverable_categories, cam_annual_cap, ...). */
+  leaseExtra: {} as Row,
   expenses: [] as Row[],
   unitsError: null as PgError | null,
   expensesError: null as PgError | null,
@@ -125,6 +127,8 @@ function leaseRows(): Row[] {
   const sfOf = (unitId: string) => unitRows().find((u) => u.id === unitId)
   const row = (r: Row): Row => ({
     proportionate_share_pct: null, base_year: null, base_year_expense_amount: null,
+    // 0025 column defaults (DB: NULL / NULL / NULL / NOT NULL DEFAULT true / NULL).
+    recoverable_categories: null, cam_annual_cap: null, cam_cap_through: null, cam_reconciled: true, cam_exclusion_reason: null,
     ...r,
     units: { sf: sfOf(r.unit_id as string)?.sf, property_id: sfOf(r.unit_id as string)?.property_id },
   })
@@ -135,6 +139,7 @@ function leaseRows(): Row[] {
       rent_type: state.leaseRentType, expense_stop_amount: state.leaseExpenseStop,
       proportionate_share_pct: state.leaseStatedPct, base_year: state.leaseBaseYear,
       base_year_expense_amount: state.leaseBaseAmount,
+      ...state.leaseExtra,
     }),
     ...(state.omitOtherLease ? [] : [row({
       id: OTHER_LEASE_ID, unit_id: 'u_other', status: 'active',
@@ -245,7 +250,8 @@ function installDbMock() {
       return pgTable([{ id: PROPERTY_ID, cam_denominator_rsf: state.denominatorRSF }], state.propertyError ? { error: state.propertyError } : {})
     }
     if (table === 'expenses') {
-      return pgTable(state.expenses, state.expensesError ? { error: state.expensesError } : {})
+      // expenses.category is NOT NULL (0002): fixtures that omit it get 'maintenance'.
+      return pgTable(state.expenses.map((e) => ({ category: 'maintenance', ...e })), state.expensesError ? { error: state.expensesError } : {})
     }
     if (table === 'charges') {
       return {
@@ -409,6 +415,7 @@ beforeEach(() => {
   state.leaseBaseYear = null
   state.leaseBaseAmount = null
   state.omitOtherLease = false
+  state.leaseExtra = {}
   state.expenses = [{ id: 'e_1', property_id: PROPERTY_ID, expense_date: '2025-06-01', amount: 10000, recoverable: true }]
   state.unitsError = null
   state.expensesError = null
@@ -1681,5 +1688,181 @@ describe('approve, REFUTE F3 (2026-11-10): balanced drafts, foreign key holders,
     expect(((await res.json()) as { error: string }).error).toBe('already billed')
     expect(chargesInsertSpy).not.toHaveBeenCalled()
     expect(state.charges).toHaveLength(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 0025 (Gabriel rulings 2026-11-10): recoverable categories, annual cap, not-reconciled leases.
+// Tenant: 1,000 SF of a 50,000 RSF denominator = 2%, full 2025.
+// ---------------------------------------------------------------------------
+describe('POST /api/cam/calculate: recoverable categories, cap, not reconciled (0025)', () => {
+  const BODY = { lease_id: TENANT_LEASE_ID, reconciliation_year: 2025 }
+  const savedPatch = () => (camInsertSpy.mock.calls.at(-1)?.[0] ?? camUpdateSpy.mock.calls.at(-1)?.[0]) as Row
+  beforeEach(() => {
+    state.expenses = [
+      { id: 'e_1', property_id: PROPERTY_ID, expense_date: '2025-03-01', amount: 40000, recoverable: true, category: 'taxes' },
+      { id: 'e_2', property_id: PROPERTY_ID, expense_date: '2025-04-01', amount: 10000, recoverable: true, category: 'insurance' },
+      { id: 'e_3', property_id: PROPERTY_ID, expense_date: '2025-05-01', amount: 20000, recoverable: true, category: 'maintenance' },
+      { id: 'e_4', property_id: PROPERTY_ID, expense_date: '2025-06-01', amount: 5000, recoverable: true, category: 'utilities' },
+      { id: 'e_5', property_id: PROPERTY_ID, expense_date: '2025-07-01', amount: 99999, recoverable: false, category: 'maintenance' },
+    ]
+  })
+
+  it('no categories entered: the whole recoverable pool, as before (2% of $75,000)', async () => {
+    const res = await calculate(BODY)
+    expect(res.status).toBe(200)
+    expect(savedPatch()).toMatchObject({ total_property_recoverable_expenses: 75000, actual_cam_owed: 1500, recoverable_categories: null, cam_annual_cap_applied: null })
+  })
+
+  it('taxes only (55 New Plant Ct): 2% of $40,000', async () => {
+    state.leaseExtra = { recoverable_categories: ['taxes'] }
+    const res = await calculate(BODY)
+    expect(res.status).toBe(200)
+    expect(savedPatch()).toMatchObject({ total_property_recoverable_expenses: 40000, actual_cam_owed: 800, recoverable_categories: ['taxes'] })
+  })
+
+  it('CAM + water/sewer without taxes or insurance (Zettler s.36): 2% of $25,000', async () => {
+    state.leaseExtra = { recoverable_categories: ['maintenance', 'utilities'] }
+    const res = await calculate(BODY)
+    expect(res.status).toBe(200)
+    expect(savedPatch()).toMatchObject({ total_property_recoverable_expenses: 25000, actual_cam_owed: 500 })
+  })
+
+  it('a base-year lease compares the base amount against its own category pool', async () => {
+    state.leaseExtra = { recoverable_categories: ['taxes'], base_year_categories: ['taxes'] }
+    state.leaseBaseYear = 2024
+    state.leaseBaseAmount = 30000
+    const res = await calculate(BODY)
+    expect(res.status).toBe(200)
+    // 2% x (40,000 - 30,000)
+    expect(savedPatch()).toMatchObject({ actual_cam_owed: 200, recovery_basis: 'above_base_year' })
+  })
+
+  it('REFUTE 0025: a base amount entered for other categories is refused (422), nothing priced', async () => {
+    state.leaseExtra = { recoverable_categories: ['taxes'], base_year_categories: null }
+    state.leaseBaseYear = 2024
+    state.leaseBaseAmount = 110000
+    const res = await calculate(BODY)
+    expect(res.status).toBe(422)
+    expect(((await res.json()) as { error: string }).error).toMatch(/entered for all recoverable categories, but the lease now recovers taxes/)
+    expectRefusedNotPriced()
+  })
+
+  it('annual cap binds (29000 Information Lane 507): owed = cap, cap saved on the draft', async () => {
+    state.leaseExtra = { cam_annual_cap: '1000.00', cam_cap_through: '2029-06-30' }
+    const res = await calculate(BODY)
+    expect(res.status).toBe(200)
+    expect(savedPatch()).toMatchObject({ actual_cam_owed: 1000, cam_annual_cap_applied: 1000 })
+  })
+
+  it('cap ending inside the year: whole year capped, warning returned and saved', async () => {
+    state.leaseExtra = { cam_annual_cap: 1000, cam_cap_through: '2025-06-30' }
+    const res = await calculate(BODY)
+    expect(res.status).toBe(200)
+    const body = await res.json() as { warnings: string[] }
+    expect(body.warnings.join('\n')).toMatch(/cap ends 2025-06-30/)
+    expect(savedPatch()).toMatchObject({ actual_cam_owed: 1000 })
+    expect(String(savedPatch().basis_warnings)).toMatch(/cap ends 2025-06-30/)
+  })
+
+  it('not CAM-reconciled (401 Sunburst direct pay): 422 with the reason, nothing priced', async () => {
+    state.leaseExtra = { cam_reconciled: false, cam_exclusion_reason: 'Direct pay per Second Amendment' }
+    const res = await calculate(BODY)
+    expect(res.status).toBe(422)
+    expect(((await res.json()) as { error: string }).error).toMatch(/not CAM-reconciled: Direct pay per Second Amendment/)
+    expectRefusedNotPriced()
+  })
+
+  it('a NULL cam_reconciled (schema drift) is refused, never treated as reconciled', async () => {
+    state.leaseExtra = { cam_reconciled: null }
+    const res = await calculate(BODY)
+    expect(res.status).toBe(422)
+    expectRefusedNotPriced()
+  })
+
+  it('invalid categories on the lease row: 422, nothing priced', async () => {
+    state.leaseExtra = { recoverable_categories: ['cam'] }
+    const res = await calculate(BODY)
+    expect(res.status).toBe(422)
+    expectRefusedNotPriced()
+  })
+
+  it('an expense row with an unknown category fails closed (500), nothing priced', async () => {
+    state.expenses.push({ id: 'e_9', property_id: PROPERTY_ID, expense_date: '2025-08-01', amount: 1, recoverable: true, category: 'bogus' })
+    const res = await calculate(BODY)
+    expect(res.status).toBe(500)
+    expect(camInsertSpy).not.toHaveBeenCalled()
+  })
+})
+
+describe('GET /api/cam/pool: 0025 fields', () => {
+  it('lists categories, the not-reconciled flag and reason; excluded shares are left out of the over-recovery sum', async () => {
+    state.leaseStatedPct = 0.6
+    state.leaseExtra = { cam_reconciled: false, cam_exclusion_reason: 'Fixed charge in rent' }
+    state.leaseUnits = { sf: 500 }
+    state.extraUnits = [{ id: 'u_x', property_id: PROPERTY_ID, sf: 500 }]
+    state.extraLeases = [{ id: '66666666-6666-4666-8666-666666666666', unit_id: 'u_x', status: 'active', start_date: '2020-01-01', end_date: '2030-12-31', rent_type: 'nnn', expense_stop_amount: null, proportionate_share_pct: 0.6 }]
+    state.omitOtherLease = true
+    const res = await app.request(`/api/cam/pool?property_id=${PROPERTY_ID}&year=2025`, {}, env)
+    expect(res.status).toBe(200)
+    const body = await res.json() as { data: { warnings: string[]; recoverable_by_category: Row; leases: Row[] } }
+    const t = body.data.leases.find((l) => l.lease_id === TENANT_LEASE_ID) as Row
+    expect(t).toMatchObject({ cam_reconciled: false, cam_exclusion_reason: 'Fixed charge in rent', recoverable_categories: null })
+    expect(body.data.warnings.join('\n')).not.toMatch(/more than 100%/)
+    expect(body.data.recoverable_by_category).toMatchObject({ maintenance: 10000 })
+  })
+
+  it('the same two 60% leases both reconciled DO warn (control)', async () => {
+    state.leaseStatedPct = 0.6
+    state.leaseUnits = { sf: 500 }
+    state.extraUnits = [{ id: 'u_x', property_id: PROPERTY_ID, sf: 500 }]
+    state.extraLeases = [{ id: '66666666-6666-4666-8666-666666666666', unit_id: 'u_x', status: 'active', start_date: '2020-01-01', end_date: '2030-12-31', rent_type: 'nnn', expense_stop_amount: null, proportionate_share_pct: 0.6 }]
+    state.omitOtherLease = true
+    const res = await app.request(`/api/cam/pool?property_id=${PROPERTY_ID}&year=2025`, {}, env)
+    const body = await res.json() as { data: { warnings: string[] } }
+    expect(body.data.warnings.join('\n')).toMatch(/more than 100%/)
+  })
+})
+
+describe('POST /api/cam/:id/approve: 0025 edits after the draft', () => {
+  beforeEach(approveFixture)
+
+  it('categories narrowed after the draft: 409 stale, nothing posted', async () => {
+    state.leaseExtra = { recoverable_categories: ['taxes'] }
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(409)
+    expect(chargesInsertSpy).not.toHaveBeenCalled()
+    expect(state.rec?.status).toBe('draft')
+  })
+
+  it('marked not reconciled after the draft: 409, nothing posted', async () => {
+    state.leaseExtra = { cam_reconciled: false, cam_exclusion_reason: 'Direct pay' }
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(409)
+    expect(chargesInsertSpy).not.toHaveBeenCalled()
+  })
+
+  it('a cap added after the draft: 409, nothing posted', async () => {
+    state.leaseExtra = { cam_annual_cap: 400 } // draft owes $500; the cap now binds at $400
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(409)
+    expect(chargesInsertSpy).not.toHaveBeenCalled()
+  })
+
+  it('categories that do not change the pool still block: the draft records what it billed', async () => {
+    // All expenses in the approve fixture are 'maintenance', so ['maintenance'] prices the same $500.
+    state.leaseExtra = { recoverable_categories: ['maintenance'] }
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: string }).error).toMatch(/recoverable_categories/)
+    expect(chargesInsertSpy).not.toHaveBeenCalled()
+  })
+
+  it('an unchanged draft with matching categories still approves', async () => {
+    state.leaseExtra = { recoverable_categories: ['maintenance'] }
+    state.rec = freshRec({ lease_id: TENANT_LEASE_ID, recoverable_categories: ['maintenance'] })
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(200)
+    expect(state.rec?.status).toBe('billed')
   })
 })

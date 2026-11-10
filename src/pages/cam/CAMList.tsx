@@ -28,6 +28,8 @@ type CamPoolLease = {
   stated_share_pct: number | null; computed_share_pct: number | null
   share_basis: ShareBasis | null; annual_share_pct: number | null; effective_share_pct: number | null
   share_error: string | null; warnings: string[]
+  /** 0025: categories passed through (null = all) and the not-reconciled flag with its reason. */
+  recoverable_categories?: string[] | null; cam_reconciled?: boolean; cam_exclusion_reason?: string | null
 }
 type CamPool = {
   recoverable_total: number
@@ -113,6 +115,7 @@ export function CAMList() {
   // ── Derived values ─────────────────────────────────────────────────────────
   const poolReady = pool.isSuccess && !pool.isFetching
   const poolLeases = pool.data?.leases ?? []
+  const reconciledLeases = poolLeases.filter(l => l.cam_reconciled !== false)
   const weightedLeasedSF = pool.data?.weighted_leased_sf ?? 0
   const denominatorRSF = pool.data?.denominator_rsf ?? null
 
@@ -132,7 +135,7 @@ export function CAMList() {
 
   // ── Calculate reconciliation ───────────────────────────────────────────────
   async function handleCalculate() {
-    if (!propertyId || !recoverableReady || !poolReady || poolLeases.length === 0) return
+    if (!propertyId || !recoverableReady || !poolReady || reconciledLeases.length === 0) return
     setCalcError(null)
     setCalcWarnings([])
     setCalculating(true)
@@ -141,7 +144,8 @@ export function CAMList() {
       // recoverable total. allSettled: a lease the server refuses (e.g. modified-gross with no
       // expense stop) must not hide the results of the others.
       const results = await Promise.allSettled(
-        poolLeases.map(l =>
+        // 0025: a lease marked not CAM-reconciled is skipped (the server would 422 it anyway).
+        reconciledLeases.map(l =>
           api.post<{ data: CAMReconciliation; warnings?: string[] }>('/cam/calculate', {
             lease_id: l.lease_id,
             reconciliation_year: year,
@@ -192,7 +196,7 @@ export function CAMList() {
   }
 
   // ── Render ─────────────────────────────────────────────────────────────────
-  const canCalculate = !!propertyId && recoverableReady && poolReady && poolLeases.length > 0 && !calculating
+  const canCalculate = !!propertyId && recoverableReady && poolReady && reconciledLeases.length > 0 && !calculating
 
   return (
     <div>
@@ -292,7 +296,12 @@ export function CAMList() {
                       <td className="pr-4 py-1 font-mono">{Math.round(l.sf).toLocaleString()}</td>
                       <td className="pr-4 py-1 font-mono">{l.overlap_days}/{pool.data?.days_in_year}</td>
                       <td className="pr-4 py-1">
-                        {l.share_basis ? SHARE_BASIS_LABEL[l.share_basis] : <span className="text-status-danger">{l.share_error ?? 'No basis'}</span>}
+                        {l.cam_reconciled === false
+                          ? <span className="text-muted-foreground">Not CAM-reconciled{l.cam_exclusion_reason ? `: ${l.cam_exclusion_reason}` : ''}</span>
+                          : l.share_basis ? SHARE_BASIS_LABEL[l.share_basis] : <span className="text-status-danger">{l.share_error ?? 'No basis'}</span>}
+                        {l.cam_reconciled !== false && l.recoverable_categories && (
+                          <p className="text-muted-foreground">Recovers: {l.recoverable_categories.join(', ')}</p>
+                        )}
                         {l.warnings.map(w => <p key={w} className="text-amber-600">{w}</p>)}
                       </td>
                       <td className="pr-4 py-1 font-mono">{pct(l.stated_share_pct)}</td>
