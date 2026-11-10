@@ -1,12 +1,12 @@
 /// <reference types="node" />
-// B1: promises_to_pay and ar_disputes (supabase/migrations/0020_collections_workflow.sql).
+// B1: promises_to_pay and ar_disputes (supabase/migrations/0022_collections_workflow.sql).
 // Runs the REAL migration chain on pg-mem (tests/fixtures/pg-migrations.ts) and exercises each
 // constraint; textual assertions cover what pg-mem skips (RLS) and the re-runnable form.
 import { describe, it, expect, beforeEach } from 'vitest'
 import { freshMigratedDb, migrationFiles, readMigration, splitSqlStatements, statementBody, type MigratedDb } from '../fixtures/pg-migrations'
 import { migrationTouchesFinancialTables } from '../../scripts/check-refute-required'
 
-const FILE = '0020_collections_workflow.sql'
+const FILE = '0022_collections_workflow.sql'
 const PROP = '00000000-0000-4000-8000-000000000001'
 const UNIT = '00000000-0000-4000-8000-000000000002'
 const TENANT = '00000000-0000-4000-8000-000000000003'
@@ -23,12 +23,12 @@ function seed(db: MigratedDb) {
   `)
 }
 
-describe('migration 0020 — collections workflow tables (runtime, real SQL on pg-mem)', () => {
+describe('migration 0022 — collections workflow tables (runtime, real SQL on pg-mem)', () => {
   let db: MigratedDb
   beforeEach(() => { db = freshMigratedDb(); seed(db) })
 
-  it('ships as the only 0020 migration', () => {
-    expect(migrationFiles().filter((f) => f.startsWith('0020_'))).toEqual([FILE])
+  it('ships as the only 0022 migration', () => {
+    expect(migrationFiles().filter((f) => f.startsWith('0022_'))).toEqual([FILE])
   })
 
   it('a promise defaults to open with no resolved_at', () => {
@@ -67,7 +67,7 @@ describe('migration 0020 — collections workflow tables (runtime, real SQL on p
   })
 })
 
-describe('migration 0020 — text', () => {
+describe('migration 0022 — text', () => {
   const sql = readMigration(FILE)
   const body = splitSqlStatements(sql).map(statementBody)
 

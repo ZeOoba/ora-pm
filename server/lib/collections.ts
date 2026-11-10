@@ -1,5 +1,5 @@
 // B1 collections workflow: request schemas and read-time derivation for promises to pay and AR
-// disputes (supabase/migrations/0020_collections_workflow.sql).
+// disputes (supabase/migrations/0022_collections_workflow.sql).
 //
 // Not financial-decision code: these records move no money and nothing in billing, late fees,
 // autopay or the balance/aging reports reads them. Kept out of server/lib/schemas.ts (which bounds
