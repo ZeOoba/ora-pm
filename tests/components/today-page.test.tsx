@@ -20,7 +20,7 @@ const ok = (data: unknown) => ({ isPending: false, isLoading: false, isError: fa
 const failed = (msg: string) => ({ isPending: false, isLoading: false, isError: true, error: new Error(msg), data: undefined, refetch: vi.fn() })
 const totals = { current: 0, d1_30: 0, d31_60: 6340.18, d61_90: 0, d90_plus: 0, unallocated: 0, balance: 6340.18 }
 const arRows = [{
-  lease_id: 'L3', tenant_id: 'T3', tenant_name: 'KC Brewing Supply', property_name: 'Raytown Flex', suite: '3',
+  lease_id: 'L3', tenant_id: 'T3', tenant_name: 'KC Brewing Supply', property_id: 'P', property_name: 'Raytown Flex', suite: '3',
   balance: 6340.18, buckets: { current: 0, d1_30: 0, d31_60: 6340.18, d61_90: 0, d90_plus: 0, unallocated: 0 },
 }]
 const fin = {

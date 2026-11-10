@@ -66,11 +66,32 @@ const lease = {
   lease_amendments: [{ id: 'a1', description: 'Rent bump', effective_date: '2026-02-01' }],
   tenant_notices: [{ id: 'n1', notice_type: 'late_payment', sent_date: '2026-05-01', method: 'email', notes: null }],
   lease_documents: [], broker_commissions: [],
+  options: [{ type: 'renewal', exercise_deadline: '2026-07-31', description: '1 × 5 yrs at 95% of FMV' }],
+}
+const is = (income: number, opex: number) => ({
+  income: [], total_income: income, operating_expense: [], total_operating_expense: opex, noi: income - opex,
+  capital: [], total_capital: 0, net_income: income - opex, excluded: { security_deposits: 0 },
+})
+const t12 = { months: ['2025-11', '2026-10'], statements: [], total: is(120000, 30000) }
+const statement = {
+  lease_id: 'l1', tenant_id: 't1', tenant_name: 'Acme Test LLC', suite: '101', property_name: 'Acme Test Park',
+  statement: {
+    start: '2026-05-01', end: '2026-11-10', openingCents: 0, chargesCents: 120000, paymentsCents: 100000, closingCents: 20000,
+    pending: [], pendingCents: 0, aging: {},
+    lines: [
+      { date: '2026-10-01', kind: 'charge', id: 'c1', label: 'Base rent, Oct', amountCents: 120000, balanceCents: 120000 },
+      { date: '2026-10-05', kind: 'payment', id: 'p1', label: 'Check #1188', amountCents: 100000, balanceCents: 20000 },
+    ],
+  },
+}
+const arRow = {
+  lease_id: 'l1', tenant_id: 't1', tenant_name: 'Acme Test LLC', property_id: 'p1', property_name: 'Acme Test Park', suite: '101',
+  balance: 200, buckets: { current: 0, d1_30: 0, d31_60: 200, d61_90: 0, d90_plus: 0, unallocated: 0 },
 }
 
 describe('entity detail pages', () => {
   it('PropertyDetail renders Overview / Units / Leases tabs and KPIs', () => {
-    results.current = { property: ok(property), 'rent-roll': ok([]), units: ok(property.units) }
+    results.current = { property: ok(property), 'rent-roll': ok([]), units: ok(property.units), 'ar-aging': ok({ data: [], totals: {} }), 'income-12mo': ok(t12) }
     const html = render('/properties/p1', '/properties/:id', PropertyDetail)
     for (const t of ['Overview', 'Units', 'Leases']) expect(html).toContain(`>${t}</button>`)
     expect(html).toContain('Acme Test Park')
@@ -78,8 +99,47 @@ describe('entity detail pages', () => {
     expect(html).toContain('Property Summary')
   })
 
+  it('PropertyDetail shows the stacking plan (past-due suite flagged) and the billed-basis T12', () => {
+    const rr = [
+      { property_id: 'p1', property_name: 'Acme Test Park', unit_id: 'u1', suite: '101', sf: 1000, unit_status: 'occupied', tenant_id: 't1',
+        tenant_name: 'Acme Test LLC', lease_id: 'l1', start_date: '2025-01-01', end_date: '2029-01-31', lease_status: 'active', rent_type: 'nnn',
+        base_rent_monthly: 1000, cam_estimate_monthly: 0, total_monthly: 1000, rent_psf_annual: 12 },
+      { property_id: 'p1', property_name: 'Acme Test Park', unit_id: 'u2', suite: '102', sf: 500, unit_status: 'vacant', tenant_id: null,
+        tenant_name: null, lease_id: null, start_date: null, end_date: null, lease_status: null, rent_type: null,
+        base_rent_monthly: null, cam_estimate_monthly: null, total_monthly: null, rent_psf_annual: null },
+    ]
+    results.current = { property: ok(property), 'rent-roll': ok(rr), units: ok(property.units), 'ar-aging': ok({ data: [arRow], totals: {} }), 'income-12mo': ok(t12) }
+    const html = render('/properties/p1', '/properties/:id', PropertyDetail)
+    expect(html).toContain('Stacking plan')
+    expect(html).toContain('$200 past due')
+    expect(html).toContain('Vacant')
+    expect(html).toContain('66.7%')
+    expect(html).toContain('$90,000.00')
+    expect(html).toContain('Not a general ledger')
+  })
+
+  it('TenantDetail leads with the balance and the ledger, newest line first', () => {
+    results.current = { tenant: ok(tenant), 'ar-aging': ok({ data: [arRow], totals: {} }), statement: ok(statement) }
+    const html = render('/tenants/t1', '/tenants/:id', TenantDetail)
+    expect(html).toContain('Balance due')
+    expect(html).toContain('$200.00 past due')
+    expect(html.indexOf('Check #1188')).toBeGreaterThan(-1)
+    expect(html.indexOf('Check #1188')).toBeLessThan(html.indexOf('Base rent, Oct'))
+    expect(html).toContain('Opening balance')
+  })
+
+  it('LeaseDetail shows the term timeline and option notice cards', () => {
+    results.current = { lease: ok(lease) }
+    const html = render('/leases/l1', '/leases/:id', LeaseDetail)
+    expect(html).toContain('Acme Test LLC at Acme Test Park, Suite 101')
+    expect(html).toContain('Term timeline')
+    expect(html).toContain('aria-label="Lease term')
+    expect(html).toContain('renewal option')
+    expect(html).toContain('1 × 5 yrs at 95% of FMV')
+  })
+
   it('TenantDetail renders its five tabs and the correspondence timeline newest first', () => {
-    results.current = { tenant: ok(tenant) }
+    results.current = { tenant: ok(tenant), 'ar-aging': ok({ data: [], totals: {} }), statement: ok(statement) }
     const html = render('/tenants/t1', '/tenants/:id', TenantDetail)
     for (const t of ['Overview', 'Leases', 'Insurance', 'Correspondence', 'Portal']) expect(html).toContain(`>${t}</button>`)
     expect(html.indexOf('Newer email')).toBeGreaterThan(-1)
@@ -98,9 +158,9 @@ describe('entity detail pages', () => {
     ['TenantDetail', '/tenants/t1', '/tenants/:id', TenantDetail, 'tenant'],
     ['LeaseDetail', '/leases/l1', '/leases/:id', LeaseDetail, 'lease'],
   ] as const)('%s shows a skeleton while loading and an error banner on failure', (_n, path, route, Page, key) => {
-    results.current = { [key]: loading(), 'rent-roll': loading() }
+    results.current = { [key]: loading(), 'rent-roll': loading(), 'ar-aging': loading(), 'income-12mo': loading(), statement: loading() }
     expect(render(path, route, Page)).toContain('aria-busy="true"')
-    results.current = { [key]: failed(`boom ${key}`), 'rent-roll': loading() }
+    results.current = { [key]: failed(`boom ${key}`), 'rent-roll': loading(), 'ar-aging': loading(), 'income-12mo': loading(), statement: loading() }
     const html = render(path, route, Page)
     expect(html).toContain('role="alert"')
     expect(html).toContain(`boom ${key}`)
