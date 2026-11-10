@@ -20,6 +20,22 @@ concurrency:
 jobs:
   ci:
     runs-on: ubuntu-latest
+    # Throwaway Postgres for the GL money-rule suite (scripts/verify-gl-sql.sh). pg-mem cannot run
+    # the plpgsql triggers that enforce balance, immutability and period locks, so this is the
+    # only place CI executes them. Test-only credentials; the container dies with the job.
+    services:
+      postgres:
+        # Match production (Supabase, Postgres 17): privileges such as MAINTAIN differ by major version.
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
         with:
@@ -49,6 +65,13 @@ jobs:
 
       - name: Run tests
         run: npm test
+
+      # B8 ledger: run the real-Postgres GL suite on every PR and before every production deploy.
+      # A failure here blocks the deploy steps below.
+      - name: GL money rules on real Postgres
+        env:
+          GL_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        run: npm run verify:gl-sql
 
       # Off-host backup-trigger self-test (no network: CURL_BIN stub). It also runs
       # inside delinquency-backup.yml before each scheduled POST, which only ever
