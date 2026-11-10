@@ -6,7 +6,7 @@ describe('calculateCAMTrueUp', () => {
     const r = calculateCAMTrueUp({
       totalRecoverableExpenses: 100000,
       tenantSF: 5000,
-      totalLeasedSF: 25000,
+      tenantSharePct: 5000 / 25000,
       estimatedCamPaid: 3500,
     })
     expect(r.tenantProRataSharePct).toBeCloseTo(0.2)
@@ -18,7 +18,7 @@ describe('calculateCAMTrueUp', () => {
     const r = calculateCAMTrueUp({
       totalRecoverableExpenses: 50000,
       tenantSF: 5000,
-      totalLeasedSF: 25000,
+      tenantSharePct: 5000 / 25000,
       estimatedCamPaid: 12000,
     })
     expect(r.actualCamOwed).toBe(10000)
@@ -29,7 +29,7 @@ describe('calculateCAMTrueUp', () => {
     const r = calculateCAMTrueUp({
       totalRecoverableExpenses: 40000,
       tenantSF: 10000,
-      totalLeasedSF: 10000,
+      tenantSharePct: 1,
       estimatedCamPaid: 40000,
     })
     expect(r.tenantProRataSharePct).toBe(1)
@@ -40,7 +40,7 @@ describe('calculateCAMTrueUp', () => {
     const r = calculateCAMTrueUp({
       totalRecoverableExpenses: 100000,
       tenantSF: 1,
-      totalLeasedSF: 3,
+      tenantSharePct: 1 / 3,
       estimatedCamPaid: 0,
     })
     const str = r.actualCamOwed.toString()
@@ -48,25 +48,17 @@ describe('calculateCAMTrueUp', () => {
     expect(decimals).toBeLessThanOrEqual(2)
   })
 
-  it('throws when totalLeasedSF is zero', () => {
-    expect(() =>
-      calculateCAMTrueUp({
-        totalRecoverableExpenses: 100,
-        tenantSF: 0,
-        totalLeasedSF: 0,
-        estimatedCamPaid: 0,
-      })
-    ).toThrow('totalLeasedSF cannot be zero')
+  it('throws when the share is not a fraction in [0, 1]', () => {
+    for (const tenantSharePct of [-0.01, 1.0001, NaN, Infinity]) {
+      expect(() =>
+        calculateCAMTrueUp({ totalRecoverableExpenses: 100, tenantSF: 0, tenantSharePct, estimatedCamPaid: 0 })
+      ).toThrow(/share/i)
+    }
   })
 
-  it('throws when tenantSF exceeds totalLeasedSF', () => {
+  it('throws when tenantSF is negative', () => {
     expect(() =>
-      calculateCAMTrueUp({
-        totalRecoverableExpenses: 100,
-        tenantSF: 200,
-        totalLeasedSF: 100,
-        estimatedCamPaid: 0,
-      })
+      calculateCAMTrueUp({ totalRecoverableExpenses: 100, tenantSF: -1, tenantSharePct: 0.1, estimatedCamPaid: 0 })
     ).toThrow()
   })
 })
@@ -80,7 +72,7 @@ describe('calculateCAMTrueUp', () => {
 // Example pool: $100,000 recoverable, tenant 5,000 SF of 25,000 SF -> 20% -> $20,000 share.
 // ---------------------------------------------------------------------------
 describe('calculateCAMTrueUp: rent type and expense stop', () => {
-  const pool = { totalRecoverableExpenses: 100000, tenantSF: 5000, totalLeasedSF: 25000, estimatedCamPaid: 0 }
+  const pool = { totalRecoverableExpenses: 100000, tenantSF: 5000, tenantSharePct: 0.2, estimatedCamPaid: 0 }
 
   it('nnn recovers the full pro-rata share and ignores any expense stop', () => {
     const r = calculateCAMTrueUp({ ...pool, rentType: 'nnn', expenseStopPerSF: 3 })
@@ -192,7 +184,7 @@ describe('computeCamPool', () => {
     const owed = leases.map((l) => calculateCAMTrueUp({
       totalRecoverableExpenses: 100000,
       tenantSF: pool.byLease[l.id].weightedSF,
-      totalLeasedSF: pool.weightedLeasedSF,
+      tenantSharePct: pool.byLease[l.id].weightedSF / pool.weightedLeasedSF,
       estimatedCamPaid: 0,
     }).actualCamOwed)
     expect(owed.reduce((x, y) => x + y, 0)).toBeCloseTo(100000, 1)
@@ -235,7 +227,7 @@ describe('computeCamPool: same-unit overlap (REFUTE C4b)', () => {
 // $/SF/yr field silently zeroes recovery. stop x SF more than 2x the tenant's pro-rata share
 // (i.e. exceeding it by more than 1x) is treated as a likely unit error and refused.
 describe('calculateCAMTrueUp: implausible expense stop (REFUTE C4d)', () => {
-  const mg = { totalRecoverableExpenses: 80000, tenantSF: 10000, totalLeasedSF: 10000, estimatedCamPaid: 12000, rentType: 'modified_gross' as const }
+  const mg = { totalRecoverableExpenses: 80000, tenantSF: 10000, tenantSharePct: 1, estimatedCamPaid: 12000, rentType: 'modified_gross' as const }
 
   it('refuses a stop entered as a total dollar amount (probe: $42,000 in a $/SF/yr field)', () => {
     expect(() => calculateCAMTrueUp({ ...mg, expenseStopPerSF: 42000 })).toThrow(CAMTermsError)
