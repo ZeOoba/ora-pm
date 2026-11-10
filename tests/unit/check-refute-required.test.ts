@@ -70,7 +70,7 @@ describe('check-refute-required — financial-source classification', () => {
   })
 
   it('exposes the financial path set with the expected membership', () => {
-    expect(FINANCIAL_SOURCE_PATHS.size).toBe(15)
+    expect(FINANCIAL_SOURCE_PATHS.size).toBe(18)
     for (const p of [
       'server/routes/cron.ts',
       'server/routes/stripe.ts',
@@ -87,6 +87,9 @@ describe('check-refute-required — financial-source classification', () => {
       'server/routes/exports.ts',
       'server/lib/iif-export.ts',
       'server/lib/ar-aging.ts',
+      'server/lib/statement.ts',
+      'server/lib/statement-render.ts',
+      'server/routes/statements.ts',
     ]) {
       expect(FINANCIAL_SOURCE_PATHS.has(p)).toBe(true)
     }

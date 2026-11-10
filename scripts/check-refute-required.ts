@@ -69,6 +69,12 @@ export const FINANCIAL_SOURCE_PATHS: ReadonlySet<string> = new Set([
   'server/lib/iif-export.ts',
   // AR-aging oldest-first allocation of payments to charges (the aging buckets and their totals).
   'server/lib/ar-aging.ts',
+  // Tenant account statements (2026-11-09): opening/closing balance, counted-vs-pending payment
+  // classification, as-of-end aging, the ar_ledger cross-check, and the rendered figures and
+  // signing entity that go out to tenants as Outlook drafts.
+  'server/lib/statement.ts',
+  'server/lib/statement-render.ts',
+  'server/routes/statements.ts',
 ])
 
 // Tables whose schema/view/index changes are financial: charges (what tenants owe), payments
