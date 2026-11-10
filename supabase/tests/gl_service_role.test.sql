@@ -63,7 +63,15 @@ BEGIN
     EXCEPTION WHEN insufficient_privilege THEN NULL;
     END;
   END LOOP;
-  RAISE NOTICE 'ok: F2 no TRIGGER/TRUNCATE/REFERENCES for service_role; no table access for anon/authenticated; journal is insert-only';
+  -- Postgres 17+: MAINTAIN alone would allow LOCK TABLE (production runs 17).
+  IF pg_catalog.current_setting('server_version_num')::int >= 170000 THEN
+    FOREACH t IN ARRAY ARRAY['gl_entities', 'gl_accounts', 'gl_periods', 'gl_journal_entries', 'gl_journal_lines'] LOOP
+      IF has_table_privilege('service_role', 'public.' || t, 'MAINTAIN') THEN
+        RAISE EXCEPTION 'PG17: service_role keeps MAINTAIN on %', t;
+      END IF;
+    END LOOP;
+  END IF;
+  RAISE NOTICE 'ok: F2 no TRIGGER/TRUNCATE/REFERENCES (or MAINTAIN on 17+) for service_role; no table access for anon/authenticated; journal is insert-only';
 END $$;
 
 -- F3: lock audit fields cannot be forged: open rows carry none, and the DB stamps locked_at.

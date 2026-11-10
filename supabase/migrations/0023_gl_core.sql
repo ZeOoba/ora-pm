@@ -642,6 +642,16 @@ REVOKE TRIGGER, TRUNCATE, REFERENCES ON gl_entities, gl_accounts, gl_periods, gl
 -- (REFUTE-5 N1). gl_periods/gl_accounts/gl_entities keep UPDATE: the SECURITY INVOKER lock and
 -- guard paths need it.
 REVOKE UPDATE, DELETE ON gl_journal_entries, gl_journal_lines FROM service_role;
+-- Postgres 17 added the MAINTAIN privilege (VACUUM, ANALYZE, REINDEX, CLUSTER, LOCK TABLE), and
+-- Supabase's default GRANT ALL includes it. Production runs 17, where MAINTAIN alone lets
+-- service_role LOCK TABLE the journal and stall posting and month-end (REFUTE-5 N1, confirmed on
+-- 17+). REVOKE MAINTAIN is a syntax error before 17, hence the version guard.
+DO $$
+BEGIN
+  IF pg_catalog.current_setting('server_version_num')::int >= 170000 THEN
+    EXECUTE 'REVOKE MAINTAIN ON gl_entities, gl_accounts, gl_periods, gl_journal_entries, gl_journal_lines FROM service_role';
+  END IF;
+END $$;
 
 REVOKE EXECUTE ON FUNCTION gl_post_entry(UUID, DATE, TEXT, TEXT, TEXT, JSONB) FROM PUBLIC, anon, authenticated;
 REVOKE EXECUTE ON FUNCTION gl_reverse_entry(UUID, DATE, TEXT, TEXT) FROM PUBLIC, anon, authenticated;

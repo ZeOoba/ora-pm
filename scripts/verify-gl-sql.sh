@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs supabase/tests/gl_core.test.sql against a REAL, EMPTY Postgres 15+ (pg-mem cannot execute the
+# Runs supabase/tests/gl_core.test.sql against a REAL, EMPTY Postgres 16+ (CI and production: 17) (pg-mem cannot execute the
 # plpgsql functions and triggers that carry the GL money rules). Never point this at production:
 # it creates roles and tables.
 #

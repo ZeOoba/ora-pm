@@ -25,7 +25,8 @@ jobs:
     # only place CI executes them. Test-only credentials; the container dies with the job.
     services:
       postgres:
-        image: postgres:16
+        # Match production (Supabase, Postgres 17): privileges such as MAINTAIN differ by major version.
+        image: postgres:17
         env:
           POSTGRES_PASSWORD: postgres
         ports:

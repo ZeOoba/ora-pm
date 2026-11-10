@@ -160,6 +160,8 @@ describe('migration 0023 — money-rule triggers, functions and access (textual 
     expect(code).not.toMatch(/(?<!pg_catalog\.)->>/)
     expect((code.match(/OPERATOR\(pg_catalog\.->>\) '[a-z_]+'::text/g) ?? []).length).toBe(4)
     has(/^REVOKE UPDATE, DELETE ON gl_journal_entries, gl_journal_lines FROM service_role$/)
+    // Postgres 17 (production): MAINTAIN alone allows LOCK TABLE
+    expect(sql).toMatch(/server_version_num'\)::int >= 170000 THEN\s+EXECUTE 'REVOKE MAINTAIN ON gl_entities, gl_accounts, gl_periods, gl_journal_entries, gl_journal_lines FROM service_role'/)
   })
 
   it('RLS on every gl_ table, no policies', () => {
