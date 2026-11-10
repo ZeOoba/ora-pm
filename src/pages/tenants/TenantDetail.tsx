@@ -205,11 +205,12 @@ function TenantView({ data, id }: { data: TenantWithJoins; id: string | undefine
                     {['Suite', 'Property', 'Base Rent', 'End Date', 'Status'].map(h => (
                       <TableHead key={h}>{h}</TableHead>
                     ))}
+                    <TableHead><span className="sr-only">Statement</span></TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {leases.length === 0 && (
-                    <TableRow><TableCell colSpan={5} className="py-8 text-center text-status-neutral">No leases on file.</TableCell></TableRow>
+                    <TableRow><TableCell colSpan={6} className="py-8 text-center text-status-neutral">No leases on file.</TableCell></TableRow>
                   )}
                   {leases.map(lease => (
                     <TableRow key={lease.id}>
@@ -222,6 +223,9 @@ function TenantView({ data, id }: { data: TenantWithJoins; id: string | undefine
                       <TableCell className="font-mono">{formatCurrency(lease.base_rent_monthly)}/mo</TableCell>
                       <TableCell className="text-status-neutral">{formatDate(lease.end_date)}</TableCell>
                       <TableCell><StatusBadge status={lease.status} /></TableCell>
+                      <TableCell className="text-right">
+                        <Link to={`/statements/lease/${lease.id}`} className="text-sm text-navy underline-offset-2 hover:underline">Statement</Link>
+                      </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
