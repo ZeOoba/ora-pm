@@ -14,6 +14,7 @@ import { Field } from '../../components/form/Field'
 import { TextInput, DateInput, Select } from '../../components/form/inputs'
 import { formatCurrency, formatDate, formatSF, formatPSF } from '../../lib/format'
 import { CamTermsEditor } from './CamTermsEditor'
+import { LeaseTermTimeline } from './LeaseTermTimeline'
 import type { Lease, Tenant, Unit, Property, LeaseAmendment, BrokerCommission, LeaseDocument, TenantNotice } from '../../types'
 
 type LeaseDetail = Lease & {
@@ -181,8 +182,9 @@ export function LeaseDetail() {
         <EmptyState title="Lease not found" message="It may have been removed." />
       ) : (
         <EntityPage
-          title={`${data.tenants.name} — ${data.units.suite}`}
-          subtitle={data.units.properties.name}
+          title={`${data.tenants.name} at ${data.units.properties.name}, Suite ${data.units.suite}`}
+          subtitle={`${data.rent_type.toUpperCase()} · ${formatSF(data.units.sf)} · ${data.lease_amendments.length} ${data.lease_amendments.length === 1 ? 'amendment' : 'amendments'}`}
+          banner={<LeaseTermTimeline start={data.start_date} end={data.end_date} options={data.options} />}
           status={<StatusBadge status={data.status} />}
           actions={
             <Button asChild variant="ghost" className="border border-border">
@@ -208,6 +210,20 @@ export function LeaseDetail() {
               value: 'terms',
               label: 'Terms',
               content: (
+                <div className="flex flex-col gap-6">
+                {(data.options ?? []).length > 0 && (
+                  <div className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-3">
+                    {(data.options ?? []).map((o, i) => (
+                      <div key={`${o.type}-${i}`} className="flex flex-col gap-1.5 rounded-xl border border-border bg-card p-3.5">
+                        <div className="flex justify-between gap-2">
+                          <span className="text-[11px] uppercase tracking-[0.08em] text-muted-foreground">{o.type} option</span>
+                          <span className="whitespace-nowrap font-mono text-[11px] text-gold-600">notice by {formatDate(o.exercise_deadline)}</span>
+                        </div>
+                        <span className="text-[15px] font-semibold leading-snug text-navy">{o.description || '—'}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
                 <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
                   <SectionCard title="Lease Terms" action={<CamTermsEditor leaseId={data.id} lease={data} />}>
                     <dl className="space-y-2">
@@ -243,6 +259,7 @@ export function LeaseDetail() {
                       <TermRow label="SF">{formatSF(data.units.sf)}</TermRow>
                     </dl>
                   </SectionCard>
+                </div>
                 </div>
               ),
             },

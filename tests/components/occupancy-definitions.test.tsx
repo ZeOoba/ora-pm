@@ -11,8 +11,8 @@ describe('occupancy metric definitions', () => {
     expect(html).toContain('occupied + notice SF')
     expect(html).toContain('excluding unavailable units')
   })
-  it('Dashboard states the unit occupancy definition', () => {
-    const src = readFileSync(join(__dirname, '../../src/pages/Dashboard.tsx'), 'utf-8')
-    expect(src).toContain('occupied units ÷ all units')
+  it('Today states the SF occupancy definition (same basis as the donut)', () => {
+    const src = readFileSync(join(__dirname, '../../src/pages/today/TodayPage.tsx'), 'utf-8')
+    expect(src).toContain('occupied + notice SF, excluding unavailable units')
   })
 })

@@ -16,6 +16,9 @@ import { formatCurrency, formatDate } from '../../lib/format'
 import type { Tenant, Lease, InsuranceCertificate, Unit, Property, CorrespondenceEntry } from '../../types'
 import { TenantPortalAdmin } from '../admin/TenantPortalAdmin'
 import { useSaveMutation } from '../../lib/mutations'
+import { TenantLedger } from './TenantLedger'
+import { over30, pastDue, type ArAgingLeaseRow } from '../today/today-queue'
+import type { AgingTotals } from '../ar/ar-aging-view'
 
 type LeaseWithJoins = Lease & {
   units?: Unit & { properties?: Property }
@@ -149,6 +152,20 @@ function TenantView({ data, id }: { data: TenantWithJoins; id: string | undefine
   const insuranceIssues = certs.filter(c => c.status === 'expired' || c.status === 'expiring_soon').length
   const hasPortal = !!data.auth_user_id
 
+  // Portfolio aging (shared cache with Today/Collections), narrowed to this tenant's leases.
+  const arAging = useQuery({
+    queryKey: ['ar-aging', 'buckets', ''],
+    queryFn: () => api.get<{ data: ArAgingLeaseRow[]; totals: AgingTotals }>('/reports/ar-aging'),
+  })
+  const mine = (arAging.data?.data ?? []).filter(a => a.tenant_id === data.id)
+  const balance = mine.reduce((s, a) => s + a.balance, 0)
+  const late = mine.reduce((s, a) => s + pastDue(a.buckets), 0)
+  const late30 = mine.reduce((s, a) => s + over30(a.buckets), 0)
+  const ledgerLeases = [...activeLeases, ...leases.filter(l => l.status !== 'active')].map(l => ({
+    id: l.id,
+    label: `${l.units?.properties?.name ?? 'Lease'} · ${l.units?.suite ?? '—'}`,
+  }))
+
   return (
     <EntityPage
       title={data.name}
@@ -160,6 +177,12 @@ function TenantView({ data, id }: { data: TenantWithJoins; id: string | undefine
         </Button>
       }
       kpis={[
+        {
+          label: 'Balance due',
+          value: arAging.data ? formatCurrency(balance) : '—',
+          sub: arAging.isError ? 'AR aging failed to load' : late > 0 ? `${formatCurrency(late)} past due · ${formatCurrency(late30)} over 30 days` : 'Nothing past due',
+          warn: late > 0,
+        },
         { label: 'Active Leases', value: activeLeases.length, sub: `${leases.length} total` },
         { label: 'Base Rent', value: formatCurrency(monthlyRent), sub: 'Active leases, per month' },
         { label: 'Insurance', value: insuranceIssues === 0 ? 'OK' : insuranceIssues, sub: insuranceIssues === 0 ? `${certs.length} on file` : 'Expired or expiring', warn: insuranceIssues > 0 },
@@ -176,6 +199,22 @@ function TenantView({ data, id }: { data: TenantWithJoins; id: string | undefine
           value: 'overview',
           label: 'Overview',
           content: (
+            <div className="flex flex-wrap items-start gap-6">
+              <div className="min-w-0 flex-[999_1_460px]">
+                <TenantLedger leases={ledgerLeases} />
+              </div>
+              <div className="flex min-w-0 flex-[1_1_260px] flex-col gap-4">
+                <div className="flex flex-col gap-1.5">
+                  <span className="text-[11px] uppercase tracking-[0.1em] text-muted-foreground">Leases</span>
+                  {leases.length === 0 && <span className="text-sm text-muted-foreground">No leases on file.</span>}
+                  {leases.map(l => (
+                    <Link key={l.id} to={`/leases/${l.id}`} className="flex flex-col gap-0.5 rounded-lg border border-border bg-card p-3 text-[13px] hover:border-gold">
+                      <span className="font-semibold text-navy">{l.units?.properties?.name ?? '—'} · Suite {l.units?.suite ?? '—'} · {l.rent_type?.toUpperCase()}</span>
+                      <span className="text-muted-foreground">{formatDate(l.start_date)} → {formatDate(l.end_date)} · {formatCurrency(l.base_rent_monthly)}/mo · {l.status}</span>
+                      <span className="text-gold-600">Open lease →</span>
+                    </Link>
+                  ))}
+                </div>
             <SectionCard title="Contact">
               <DetailList>
                 <DetailRow label="Name">{data.contact_name ?? '—'}</DetailRow>
@@ -192,6 +231,8 @@ function TenantView({ data, id }: { data: TenantWithJoins; id: string | undefine
                 <p className="mt-3 border-t border-border pt-3 text-sm text-status-neutral">{data.notes}</p>
               )}
             </SectionCard>
+              </div>
+            </div>
           ),
         },
         {

@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { KpiStat } from './ui/KpiStat'
+import { cn } from '@/lib/utils'
 import { Card } from './ui/Card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs'
 import { ActivityTimeline } from './ActivityTimeline'
@@ -32,6 +32,7 @@ export function EntityPage({
   defaultTab,
   timeline,
   timelineTitle = 'Activity',
+  banner,
 }: {
   title: string
   subtitle?: string
@@ -42,28 +43,36 @@ export function EntityPage({
   defaultTab?: string
   timeline?: TimelineItem[]
   timelineTitle?: string
+  /** Full-width content between the KPI strip and the tabs (e.g. a lease term timeline). */
+  banner?: ReactNode
 }) {
   const first = defaultTab ?? tabs[0]?.value
   return (
     <div>
-      <div className="mb-6 flex flex-wrap items-start justify-between gap-3">
-        <div>
+      <div className="mb-5 flex flex-wrap items-end justify-between gap-4 border-b border-border pb-5">
+        <div className="flex min-w-0 flex-col gap-1">
           <div className="flex flex-wrap items-center gap-3">
-            <h1 className="text-2xl font-display text-navy">{title}</h1>
+            <h1 className="font-display text-3xl leading-tight text-navy md:text-[40px]">{title}</h1>
             {status}
           </div>
-          {subtitle && <p className="mt-0.5 text-sm text-status-neutral">{subtitle}</p>}
+          {subtitle && <p className="text-sm text-muted-foreground">{subtitle}</p>}
         </div>
-        {actions && <div className="flex shrink-0 items-center gap-2">{actions}</div>}
+        {actions && <div className="flex shrink-0 flex-wrap items-center gap-2">{actions}</div>}
       </div>
 
       {kpis && kpis.length > 0 && (
-        <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <dl className="mb-6 grid grid-cols-[repeat(auto-fit,minmax(130px,1fr))] gap-4 border-b border-border pb-5">
           {kpis.map((k) => (
-            <KpiStat key={k.label} label={k.label} value={k.value} sub={k.sub} warn={k.warn} />
+            <div key={k.label} className="flex min-w-0 flex-col gap-0.5">
+              <dt className="text-[11px] uppercase tracking-[0.06em] text-muted-foreground">{k.label}</dt>
+              <dd className={cn('truncate font-display text-[26px] leading-tight', k.warn ? 'text-status-danger' : 'text-navy')}>{k.value}</dd>
+              {k.sub && <dd className="truncate text-xs text-muted-foreground">{k.sub}</dd>}
+            </div>
           ))}
-        </div>
+        </dl>
       )}
+
+      {banner && <div className="mb-6">{banner}</div>}
 
       <div className={timeline ? 'grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr)_20rem]' : ''}>
         <Tabs defaultValue={first} className="min-w-0 gap-4">

@@ -36,10 +36,16 @@ function writeCollapsed(v: boolean) {
 
 function Brand({ compact = false }: { compact?: boolean }) {
   return (
-    <div className={cn('border-b border-white/10 py-5', compact ? 'px-0 text-center' : 'px-5')}>
-      <p className="text-[10px] font-semibold uppercase tracking-[0.15em] text-gold">{compact ? 'ORA' : 'Oxford Realty'}</p>
-      {!compact && <p className="mt-0.5 font-display text-sm">Property Manager</p>}
-    </div>
+    <Link to="/" aria-label="Oxford PM, Today" className={cn('flex items-baseline gap-2 border-b border-white/10 py-5', compact ? 'justify-center px-0' : 'px-5')}>
+      {compact ? (
+        <span className="font-display text-lg text-white">O</span>
+      ) : (
+        <>
+          <span className="font-display text-[22px] leading-none text-white">Oxford</span>
+          <span className="font-mono text-[10px] tracking-[0.14em] text-gold">PM</span>
+        </>
+      )}
+    </Link>
   )
 }
 
@@ -124,7 +130,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               </SheetContent>
             </Sheet>
           </div>
-          <span className="font-display text-sm font-semibold text-primary md:hidden">Property Manager</span>
+          <span className="font-display text-base text-primary md:hidden">Oxford <span className="font-mono text-[10px] tracking-[0.14em] text-gold-600">PM</span></span>
 
           <nav aria-label="Breadcrumb" className="hidden min-w-0 md:block">
             <ol className="flex items-center gap-1.5 text-sm text-muted-foreground">
