@@ -21,15 +21,19 @@ import { InsuranceList } from '../../src/pages/insurance/InsuranceList'
 import { RenewalsPipeline } from '../../src/pages/renewals/RenewalsPipeline'
 import { RentRoll } from '../../src/pages/reports/RentRoll'
 
-function render(Page: ComponentType) {
+function render(Page: ComponentType, path = '/') {
   return renderToStaticMarkup(
     createElement(
       QueryClientProvider,
       { client: new QueryClient() },
-      createElement(MemoryRouter, null, createElement(Page)),
+      createElement(MemoryRouter, { initialEntries: [path] }, createElement(Page)),
     ),
   )
 }
+
+// Rent roll and Renewals default to the prototype views (grouped / timeline); their DataTable
+// lives behind ?view=table / ?view=list and must keep paging, search and CSV export.
+const PATHS: Record<string, string> = { RenewalsPipeline: '/renewals?view=list', RentRoll: '/rent-roll?view=table' }
 
 describe('list pages render through DataTable (loading state)', () => {
   const cases: [string, ComponentType, string, { search: boolean; csv: boolean }][] = [
@@ -47,7 +51,7 @@ describe('list pages render through DataTable (loading state)', () => {
 
   for (const [name, Page, title, expected] of cases) {
     it(`${name}: header, skeleton rows, ${expected.search ? 'search box' : 'no search box'}`, () => {
-      const html = render(Page)
+      const html = render(Page, PATHS[name])
       expect(html).toContain(title)
       expect(html).toContain('data-slot="skeleton"')
       expect(html.includes('type="search"')).toBe(expected.search)
