@@ -2,7 +2,7 @@
 // adminAuthMiddleware gates every route here — see server/index.ts ADMIN_EXEMPT).
 //
 // Work-log records only: nothing here posts, voids or applies money, and no billing, late-fee,
-// autopay or balance code reads these tables. See supabase/migrations/0020_collections_workflow.sql.
+// autopay or balance code reads these tables. See supabase/migrations/0022_collections_workflow.sql.
 import { Hono, type Context } from 'hono'
 import { getDb } from '../db/client'
 import { dbError } from '../lib/api-error'
