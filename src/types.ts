@@ -23,6 +23,8 @@ export type CriticalDateUrgency = 'overdue' | 'urgent' | 'warning' | 'notice'
 export interface Property {
   id: string; name: string; address: string; city: string; state: string; zip: string
   total_sf: number | null; property_type: PropertyType; entity_llc: string | null
+  /** 0021: CAM Proportionate Share denominator (building/project rentable SF the lease names). */
+  cam_denominator_rsf: number | null
   notes: string | null; created_at: string
 }
 
@@ -54,6 +56,8 @@ export interface Lease {
   start_date: string; end_date: string; status: LeaseStatus; rent_type: RentType
   base_rent_monthly: number; cam_estimate_monthly: number; security_deposit: number
   expense_stop_amount: number | null; ti_allowance: number | null
+  /** 0021: stated Proportionate Share, fraction in (0,1]; base year + its recoverable total ($). */
+  proportionate_share_pct: number | null; base_year: number | null; base_year_expense_amount: number | null
   ti_reimbursement_schedule: unknown | null
   percentage_rent_terms: PercentageRentTerms | null
   options: LeaseOption[] | null; notes: string | null; created_at: string
@@ -94,6 +98,10 @@ export interface CAMReconciliation {
   total_property_recoverable_expenses: number; tenant_pro_rata_share_pct: number
   estimated_cam_paid: number; actual_cam_owed: number; true_up_amount: number
   status: CAMStatus; billed_date: string | null; notes: string | null; created_at: string
+  /** 0021: how the draft was derived (null = calculated before 0021). */
+  share_basis: 'lease_stated_pct' | 'premises_rsf_over_denominator' | null
+  recovery_basis: 'full_pro_rata' | 'above_expense_stop' | 'none_gross' | 'above_base_year' | null
+  basis_warnings: string | null
 }
 
 export interface InsuranceCertificate {

@@ -240,6 +240,15 @@ export function LeaseDetail() {
                       {data.expense_stop_amount != null && (
                         <TermRow label="Expense Stop">{formatCurrency(data.expense_stop_amount)}/SF/yr</TermRow>
                       )}
+                      {data.proportionate_share_pct != null && (
+                        <TermRow label="Proportionate Share">{(data.proportionate_share_pct * 100).toFixed(2)}% (stated in lease)</TermRow>
+                      )}
+                      {data.base_year != null && (
+                        <TermRow label="Base Year">
+                          {data.base_year}
+                          {data.base_year_expense_amount != null ? ` · ${formatCurrency(data.base_year_expense_amount)} total` : ' · base-year amount not entered'}
+                        </TermRow>
+                      )}
                     </dl>
                   </SectionCard>
                   <SectionCard title="Property">
