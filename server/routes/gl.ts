@@ -22,6 +22,7 @@ import {
   type TbAccount,
   type TbLine,
 } from '../lib/gl'
+import { MAX_IIF_CHARS, parseIifAccounts, planAccountImport, type ExistingAccount } from '../lib/qb-iif-accounts'
 
 type Env = { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string; GL_PERIOD_LOCK_EMAILS?: string }
 type Ctx = Context<{ Bindings: Env }>
@@ -84,6 +85,64 @@ glRouter.post('/entities/:id/accounts', async (c) => {
     return writeError(c, error, 'Failed to import accounts')
   }
   return c.json({ data }, 201)
+})
+
+/**
+ * B8 slice 1: an LLC's QuickBooks Desktop chart from an IIF export (Lists → Chart of Accounts).
+ * Body: { iif: <file text>, apply?: boolean, expected_new?: number }. Without apply (the default) nothing is written and
+ * the response is the plan: new / unchanged / conflicts / warnings / ledger_only / skipped.
+ * With apply: refuses (409) on any conflict, or when expected_new (the preview's count) no longer
+ * matches; otherwise inserts every new account in ONE statement
+ * (all-or-nothing). Existing accounts are never changed or deleted by an import.
+ */
+glRouter.post('/entities/:id/accounts/qb-iif', async (c) => {
+  const id = c.req.param('id')
+  if (!isUuid(id)) return c.json({ error: 'id must be a uuid' }, 422)
+  // Refuse an oversized body before reading it (JSON escaping can at most ~6x the text).
+  const declared = Number(c.req.header('content-length') ?? '0')
+  if (declared > MAX_IIF_CHARS * 6 + 1024) return c.json({ error: 'The IIF file is too large' }, 413)
+  const raw = await body(c)
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return c.json({ error: 'Body must be { iif, apply?, expected_new? }' }, 422)
+  const { iif, apply, expected_new: expectedNew, ...extra } = raw as Record<string, unknown>
+  if (Object.keys(extra).length) return c.json({ error: `Unknown field(s): ${Object.keys(extra).join(', ')}` }, 422)
+  if (typeof iif !== 'string' || iif.length === 0) return c.json({ error: 'iif must be the text of the IIF file' }, 422)
+  if (iif.length > MAX_IIF_CHARS) return c.json({ error: 'The IIF file is too large' }, 422)
+  if (apply !== undefined && typeof apply !== 'boolean') return c.json({ error: 'apply must be true or false' }, 422)
+  if (expectedNew !== undefined && !(Number.isInteger(expectedNew) && (expectedNew as number) >= 0)) return c.json({ error: 'expected_new must be a whole number' }, 422)
+
+  const db = getDb(c.env)
+  const entity = await db.from('gl_entities').select('id').eq('id', id).maybeSingle()
+  if (entity.error) return dbError(c, entity.error, 'Failed to load entity')
+  if (!entity.data) return c.json({ error: 'Entity not found' }, 404)
+
+  const parsed = parseIifAccounts(iif)
+  if (parsed.errors.length) return c.json({ error: 'The IIF file could not be imported', data: { errors: parsed.errors, skipped: parsed.skipped } }, 422)
+
+  const existing = await fetchAllPages<ExistingAccount>((after) => {
+    let q = db.from('gl_accounts').select('id, qb_name, number, account_type, qb_account_type, is_active').eq('entity_id', id)
+    if (after !== null) q = q.gt('id', after)
+    return q.order('id').limit(POSTGREST_MAX_ROWS)
+  }, (r) => r.id)
+  if (existing.error) return dbError(c, existing.error, 'Failed to load accounts')
+
+  const plan = { ...planAccountImport(parsed.accounts, existing.data), skipped: parsed.skipped }
+  if (apply !== true) return c.json({ data: { ...plan, applied: false, inserted: 0 } })
+  if (plan.conflicts.length) return c.json({ error: 'The file conflicts with the ledger; nothing was imported', data: { ...plan, applied: false, inserted: 0 } }, 409)
+  // The preview the user approved must still be the plan: if the ledger changed in between, stop.
+  if (expectedNew !== undefined && expectedNew !== plan.new.length) {
+    return c.json({ error: `The ledger changed since the preview (${String(expectedNew)} new then, ${plan.new.length} now); nothing was imported. Preview again.`, data: { ...plan, applied: false, inserted: 0 } }, 409)
+  }
+  if (!plan.new.length) return c.json({ data: { ...plan, applied: true, inserted: 0 } })
+
+  const rows = plan.new.map((a) => ({
+    entity_id: id, qb_name: a.qb_name, number: a.number, account_type: a.account_type, qb_account_type: a.qb_account_type, is_active: a.is_active,
+  }))
+  const { data, error } = await db.from('gl_accounts').insert(rows).select('id')
+  if (error) {
+    if (error.code === '23505') return c.json({ error: 'An account in the file was added to the ledger meanwhile; re-run the preview' }, 409)
+    return writeError(c, error, 'Failed to import accounts')
+  }
+  return c.json({ data: { ...plan, applied: true, inserted: data?.length ?? 0 } }, 201)
 })
 
 // ── Journal ───────────────────────────────────────────────────────────────────────────────────

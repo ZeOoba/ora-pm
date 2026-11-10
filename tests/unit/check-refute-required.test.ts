@@ -71,12 +71,12 @@ describe('check-refute-required — financial-source classification', () => {
     // B8 general ledger core.
     expect(isFinancialSourcePath('server/lib/gl.ts')).toBe(true)
     expect(isFinancialSourcePath('server/routes/gl.ts')).toBe(true)
+    expect(isFinancialSourcePath('server/lib/qb-iif-accounts.ts')).toBe(true)
   })
 
   it('exposes the financial path set with the expected membership', () => {
-    // 23 on main (#67 ar-aging-report, #71 gl.ts lib + route) + server/lib/lease-abstract.ts from this PR.
-    // GitHub's "Update branch" auto-merge kept both sides' pins (22 and 23); the true total is 24.
-    expect(FINANCIAL_SOURCE_PATHS.size).toBe(24)
+    // 24 on main (#67 ar-aging-report, #71 gl.ts lib + route, #76 qb-iif-accounts) + server/lib/lease-abstract.ts from this PR.
+    expect(FINANCIAL_SOURCE_PATHS.size).toBe(25)
     for (const p of [
       'server/routes/cron.ts',
       'server/routes/stripe.ts',
