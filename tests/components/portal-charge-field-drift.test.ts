@@ -16,10 +16,11 @@ describe('Portal charge fields — no reintroduced charge_type/status drift', ()
     join(__dirname, '../../src/portal/pages/PortalPayNow.tsx'),
     'utf-8'
   )
-  const dashboardSource = readFileSync(
-    join(__dirname, '../../src/portal/pages/PortalDashboard.tsx'),
-    'utf-8'
-  )
+  // B13: the portal home's rendering moved to PortalHomeView (shared with the admin preview);
+  // PortalDashboard only loads data. Scan both so the guard follows the code.
+  const dashboardSource = ['../../src/portal/pages/PortalDashboard.tsx', '../../src/portal/components/PortalHomeView.tsx']
+    .map((p) => readFileSync(join(__dirname, p), 'utf-8'))
+    .join('\n')
 
   it('PortalPayNow does not reference the non-existent charge_type/status fields', () => {
     expect(payNowSource).not.toMatch(/charge_type/)

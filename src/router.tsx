@@ -16,6 +16,7 @@ const PropertyForm = lazy(() => import('./pages/properties/PropertyForm').then((
 const PropertyDetail = lazy(() => import('./pages/properties/PropertyDetail').then((m) => ({ default: m.PropertyDetail })))
 const TenantsList = lazy(() => import('./pages/tenants/TenantsList').then((m) => ({ default: m.TenantsList })))
 const TenantForm = lazy(() => import('./pages/tenants/TenantForm').then((m) => ({ default: m.TenantForm })))
+const TenantPortalPreview = lazy(() => import('./pages/tenants/TenantPortalPreview').then((m) => ({ default: m.TenantPortalPreview })))
 const TenantDetail = lazy(() => import('./pages/tenants/TenantDetail').then((m) => ({ default: m.TenantDetail })))
 const InsuranceForm = lazy(() => import('./pages/insurance/InsuranceForm').then((m) => ({ default: m.InsuranceForm })))
 const LeasesList = lazy(() => import('./pages/leases/LeasesList').then((m) => ({ default: m.LeasesList })))
@@ -70,6 +71,7 @@ export const router = createBrowserRouter([
   { path: '/tenants', errorElement: <RouteError />, element: <Layout><TenantsList /></Layout> },
   { path: '/tenants/new', errorElement: <RouteError />, element: <Layout><TenantForm /></Layout> },
   { path: '/tenants/:id/edit', errorElement: <RouteError />, element: <Layout><TenantForm /></Layout> },
+  { path: '/tenants/:id/portal-preview', errorElement: <RouteError />, element: <Layout><TenantPortalPreview /></Layout> },
   { path: '/tenants/:id', errorElement: <RouteError />, element: <Layout><TenantDetail /></Layout> },
   { path: '/leases', errorElement: <RouteError />, element: <Layout><LeasesList /></Layout> },
   { path: '/leases/new', errorElement: <RouteError />, element: <Layout><LeaseForm /></Layout> },
