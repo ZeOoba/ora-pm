@@ -110,7 +110,7 @@ describe('migration 0023 — money-rule triggers, functions and access (textual 
     expect(sql).toMatch(/FROM gl_entities WHERE id = NEW\.entity_id FOR SHARE;/)
     // periods are born open; the lock transition checks the month and the locker (REFUTE-2 S2)
     expect(sql).toMatch(/a period row is created open/)
-    expect(sql).toMatch(/NEW\.period_start >= date_trunc\('month', gl_today\(\)\)::date/)
+    expect(sql).toMatch(/NEW\.period_start >= pg_catalog\.date_trunc\('month', \(gl_today\(\)\)::timestamp\)::date/)
     expect(sql).toMatch(/now\(\) AT TIME ZONE 'America\/Chicago'/)
     expect(sql).toMatch(/CONSTRAINT gl_journal_entries_date_range CHECK/)
     for (const t of ['gl_periods', 'gl_accounts', 'gl_entities']) {
@@ -124,7 +124,11 @@ describe('migration 0023 — money-rule triggers, functions and access (textual 
     expect(sql).toMatch(/posted_txid IS DISTINCT FROM pg_current_xact_id\(\)::text::bigint/)
     expect(sql).not.toMatch(/e\.posted_at = now\(\)/)
     // only ended months lock
-    expect(sql).toMatch(/p_period_start >= date_trunc\('month', gl_today\(\)\)::date/)
+    expect(sql).toMatch(/p_period_start >= pg_catalog\.date_trunc\('month', \(gl_today\(\)\)::timestamp\)::date/)
+    // REFUTE-4 F1: no unqualified date_trunc a public overload could capture
+    expect(sql.replace(/^--.*$/gm, '')).not.toMatch(/(?<!pg_catalog\.)date_trunc\(/)
+    // REFUTE-4 F2: reclassification only at READ COMMITTED
+    expect((sql.match(/pg_catalog\.current_setting\('transaction_isolation'\) <> 'read committed'/g) ?? []).length).toBe(2)
     expect(sql).not.toMatch(/current_date/)
   })
 

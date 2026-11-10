@@ -46,7 +46,11 @@
 -- reclassification-race bypasses; pass 3 found that temp tables could shadow the ledger tables in
 -- the triggers' lookups (every function now pins search_path = public, pg_temp, which searches
 -- pg_temp LAST) and that service_role's default TRIGGER privilege let a caller add a trigger that
--- rewrote rows after the guards ran (revoked below). Each is reproduced in the test suite.
+-- rewrote rows after the guards ran (revoked below). Pass 4 found that a public
+-- date_trunc(text, date) (where CREATE on public is granted) would win overload resolution over
+-- pg_catalog's, so every month computation is now pg_catalog.date_trunc on an explicit timestamp;
+-- and that REPEATABLE READ snapshots let the reclassification guards miss committed postings, so
+-- those changes are refused outside READ COMMITTED. Each is reproduced in the test suite.
 --
 -- Writes go through two functions (gl_post_entry, gl_reverse_entry) and gl_lock_period, so header
 -- and lines land in ONE transaction (PostgREST runs each RPC in its own transaction).
@@ -237,16 +241,16 @@ AS $$
 DECLARE
   v_status TEXT;
 BEGIN
-  INSERT INTO gl_periods (entity_id, period_start) VALUES (p_entity_id, date_trunc('month', p_date)::date)
+  INSERT INTO gl_periods (entity_id, period_start) VALUES (p_entity_id, pg_catalog.date_trunc('month', (p_date)::timestamp)::date)
     ON CONFLICT (entity_id, period_start) DO NOTHING;
   SELECT status INTO v_status FROM gl_periods
-   WHERE entity_id = p_entity_id AND period_start = date_trunc('month', p_date)::date
+   WHERE entity_id = p_entity_id AND period_start = pg_catalog.date_trunc('month', (p_date)::timestamp)::date
    FOR SHARE;
   IF v_status IS NULL THEN
-    RAISE EXCEPTION 'gl: period row for % missing after upsert', date_trunc('month', p_date)::date USING ERRCODE = 'check_violation';
+    RAISE EXCEPTION 'gl: period row for % missing after upsert', pg_catalog.date_trunc('month', (p_date)::timestamp)::date USING ERRCODE = 'check_violation';
   END IF;
   IF v_status = 'locked' THEN
-    RAISE EXCEPTION 'gl: period % is locked for entity %; post in an open month', date_trunc('month', p_date)::date, p_entity_id
+    RAISE EXCEPTION 'gl: period % is locked for entity %; post in an open month', pg_catalog.date_trunc('month', (p_date)::timestamp)::date, p_entity_id
       USING ERRCODE = 'check_violation';
   END IF;
 END;
@@ -414,7 +418,7 @@ BEGIN
     RAISE EXCEPTION 'gl: a period''s entity and month cannot change' USING ERRCODE = 'restrict_violation';
   END IF;
   IF NEW.status = 'locked' THEN
-    IF NEW.period_start >= date_trunc('month', gl_today())::date THEN
+    IF NEW.period_start >= pg_catalog.date_trunc('month', (gl_today())::timestamp)::date THEN
       RAISE EXCEPTION 'gl: only a month that has ended can be locked (% has not)', NEW.period_start USING ERRCODE = 'check_violation';
     END IF;
     IF NEW.locked_by IS NULL OR btrim(NEW.locked_by) = '' THEN
@@ -457,6 +461,12 @@ SET search_path = public, pg_temp
 AS $$
 BEGIN
   IF (NEW.entity_id <> OLD.entity_id OR NEW.account_type <> OLD.account_type)
+     AND pg_catalog.current_setting('transaction_isolation') <> 'read committed' THEN
+    -- Under REPEATABLE READ/SERIALIZABLE the EXISTS below reads an old snapshot and would miss a
+    -- posting committed since (REFUTE-4 F2); only READ COMMITTED sees it after the row lock.
+    RAISE EXCEPTION 'gl: change an account''s entity or type only at READ COMMITTED isolation' USING ERRCODE = 'restrict_violation';
+  END IF;
+  IF (NEW.entity_id <> OLD.entity_id OR NEW.account_type <> OLD.account_type)
      AND EXISTS (SELECT 1 FROM gl_journal_lines WHERE account_id = OLD.id) THEN
     RAISE EXCEPTION 'gl: account % has posted lines; its entity and type cannot change', OLD.id USING ERRCODE = 'restrict_violation';
   END IF;
@@ -474,6 +484,10 @@ LANGUAGE plpgsql
 SET search_path = public, pg_temp
 AS $$
 BEGIN
+  IF NEW.accounting_basis <> OLD.accounting_basis
+     AND pg_catalog.current_setting('transaction_isolation') <> 'read committed' THEN
+    RAISE EXCEPTION 'gl: change an entity''s accounting basis only at READ COMMITTED isolation' USING ERRCODE = 'restrict_violation';
+  END IF;
   IF NEW.accounting_basis <> OLD.accounting_basis
      AND EXISTS (SELECT 1 FROM gl_journal_entries WHERE entity_id = OLD.id) THEN
     RAISE EXCEPTION 'gl: entity % has posted entries; its accounting basis cannot change', OLD.id USING ERRCODE = 'restrict_violation';
@@ -585,10 +599,10 @@ AS $$
 DECLARE
   v_status TEXT;
 BEGIN
-  IF p_period_start <> date_trunc('month', p_period_start)::date THEN
+  IF p_period_start <> pg_catalog.date_trunc('month', (p_period_start)::timestamp)::date THEN
     RAISE EXCEPTION 'gl: period_start must be the first day of a month' USING ERRCODE = 'check_violation';
   END IF;
-  IF p_period_start >= date_trunc('month', gl_today())::date THEN
+  IF p_period_start >= pg_catalog.date_trunc('month', (gl_today())::timestamp)::date THEN
     RAISE EXCEPTION 'gl: only a month that has ended can be locked (% has not)', p_period_start USING ERRCODE = 'check_violation';
   END IF;
   IF p_locked_by IS NULL OR btrim(p_locked_by) = '' THEN

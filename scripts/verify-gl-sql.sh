@@ -36,4 +36,5 @@ psql "$GL_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f supabase/migrations/0023_g
 psql "$GL_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f supabase/tests/gl_core.test.sql
 # A fresh session, so the triggers have no cached plans when the shadowing attack runs.
 psql "$GL_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f supabase/tests/gl_service_role.test.sql
+psql "$GL_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f supabase/tests/gl_shadow_functions.test.sql
 echo "verify-gl-sql: all GL SQL checks passed"
