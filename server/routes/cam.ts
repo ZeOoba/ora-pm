@@ -624,7 +624,7 @@ camRouter.post('/calculate', async (c) => {
 
 /** The true-up charge already holding this lease/year's idempotency key, if any. The key is unique
  *  across voided and live charges alike, so a voided one still blocks a new insert. Advisory here:
- *  approve_cam_reconciliation() (migration 0023) re-reads and locks the holder before it bills. */
+ *  approve_cam_reconciliation() (migration 0024) re-reads and locks the holder before it bills. */
 async function loadPostedTrueUp(db: Db, leaseId: string, idempotencyKey: string): Promise<
   { kind: 'none' } | { kind: 'live'; amount: number | string } | { kind: 'voided' } | { kind: 'foreign' } | { kind: 'db_error'; error: PgErr }
 > {
@@ -642,7 +642,7 @@ async function loadPostedTrueUp(db: Db, leaseId: string, idempotencyKey: string)
   return row.voided_at ? { kind: 'voided' } : { kind: 'live', amount: row.amount }
 }
 
-/** What approve_cam_reconciliation() (migration 0023) returns. NUMERIC fields may arrive as strings. */
+/** What approve_cam_reconciliation() (migration 0024) returns. NUMERIC fields may arrive as strings. */
 type ApproveOutcome =
   | { outcome: 'billed'; inserted: boolean; true_up_amount: number | string }
   | { outcome: 'billed_credit'; true_up_amount: number | string }
@@ -728,7 +728,7 @@ function approveRefusal(c: Parameters<typeof dbError>[0], o: ApproveRefusal, r: 
 //     property, unit or expense edit after it was calculated leaves it priced on data that no longer
 //     holds. Before anything posts, the reconciliation is recomputed from the DB as it is NOW and the
 //     approval refused (409) unless it still matches the draft.
-//  2. approve_cam_reconciliation() (migration 0023): ONE Postgres transaction that locks the row,
+//  2. approve_cam_reconciliation() (migration 0024): ONE Postgres transaction that locks the row,
 //     re-checks status / share_basis / the figures stage 1 priced, classifies whatever charge holds
 //     cam_true_up:<lease>:<year> (locking it), inserts the charge only for a positive true-up and sets
 //     the row billed. It replaced the insert-then-compare-and-swap sequence and its compensation
@@ -759,7 +759,7 @@ camRouter.post('/:id/approve', async (c) => {
 
   // Advisory look at the key holder (the function repeats it under lock): refuse early with the
   // specific reason, and recognise crash recovery. A live charge equal to this draft's positive
-  // true-up was posted by the pre-0023 two-call code path, which could crash between the insert and
+  // true-up was posted by the pre-0024 two-call code path, which could crash between the insert and
   // the status update; the money already moved, so the recompute is skipped and the function only
   // completes the status (after verifying that charge again under the lock).
   const idempotencyKey = `cam_true_up:${r.lease_id}:${r.reconciliation_year}`
