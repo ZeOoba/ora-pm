@@ -16,25 +16,23 @@
 # into, including the dashboard-paste fallback for when this workflow can't
 # be used.
 #
-# PREREQUISITE (not yet done as of authoring this file): two repo secrets
-# must exist before this workflow can succeed —
-#   SUPABASE_ACCESS_TOKEN  — a personal or scoped access token (supabase.com/dashboard/account/tokens)
-#   SUPABASE_DB_PASSWORD   — the production project's Postgres password
-# Until both are set, this workflow fails cleanly at the link/push step with
-# an auth error — it does not silently no-op or apply anything partial.
+# SECRETS: SUPABASE_ACCESS_TOKEN (supabase.com/dashboard/account/tokens) and
+# SUPABASE_DB_PASSWORD (the production project's Postgres password) are both
+# set as repo secrets. If either is removed, the workflow fails cleanly at the
+# link/push step with an auth error; it never no-ops or applies anything partial.
 #
-# NOT YET LIVE-TESTED: built and YAML-validated from a Code sandbox with no
-# production DB credentials, so the actual `supabase link`/`db push` calls
-# have never run against the real project. Known open question worth
-# checking on the FIRST real run (with dry_run: true): the OI-073 backfill
-# inserted schema_migrations rows for 0008-0011 with `statements` left NULL
-# (there was nothing authentic to populate it with — see open-items-tracker.md
-# OI-073). If the CLI's "already applied" check for `db push` relies on
-# anything beyond the bare version number being present (e.g. a statements/
-# checksum comparison), those 4 backfilled rows could read as drifted rather
-# than applied. `supabase migration list --linked` (this workflow's own
-# "Show pending migrations" step) surfaces that before any push runs — read
-# its output before trusting a dry run or a real push.
+# LIVE-PROVEN 2026-11-10 applying 0020_lease_abstraction.sql: the dry run
+# (run 42867746324) then the real push (run 42867821652) both succeeded, and
+# 0020 landed in supabase_migrations.schema_migrations. That first run also
+# settled the old open question: the OI-073 backfilled rows for 0008-0011
+# (`statements` NULL) read as APPLIED, not drifted — `migration list --linked`
+# showed Local = Remote for 0001-0019. Keep reading the "Show pending
+# migrations" output before trusting any push.
+#
+# Before applying a migration that uses DO blocks, extensions or constraints
+# pg-mem cannot run, the real-Postgres replay test
+# (tests/db/real-postgres-migrations.test.ts, PGlite) must pass: Supabase
+# branching is not available on this project's plan.
 #
 # REFUTE pass (2026-08-04, security-auditor agent) caught two real gaps,
 # fixed in this version: (1) `dry_run` now defaults to true, so the default
