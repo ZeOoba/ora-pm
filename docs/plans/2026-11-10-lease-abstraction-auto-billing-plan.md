@@ -103,6 +103,17 @@ Many legacy leases are scans, so this caps coverage.
 - Add `server/lib/billing.ts`, `server/lib/lease-abstract.ts` (money fields), `server/lib/rent-schedule.ts` and the
   approve RPC migration to `FINANCIAL_SOURCE_PATHS`.
 
+### 5a. Phase 7 hard requirements (from the Phase 2 REFUTE pass, 2026-11-10)
+
+Phase 2 ships the engine with `cron.ts` unchanged. Before `cron.ts` passes `schedule`:
+1. **Surface `BillingOutput.exception`** into `leaseExceptions` / `errorMessages`; a schedule exception means no charges AND no autopay debit for that lease, reported, never silent.
+2. **Lease edits route through the schedule.** Once a lease has rows, `leases.base_rent_monthly` no longer bills. The lease form must edit schedule rows (or be read-only for scheduled leases), and a renewal that extends `end_date` must add schedule rows in the same transaction, or billing stops with `schedule_gap`. Keep `leases.base_rent_monthly` in sync for the 0004 views (or move the views to the schedule).
+3. **Superseded-only schedules fail closed** (`schedule_missing_rent`), already built in Phase 2 — the approve RPC must never leave a lease in that state.
+4. **'other' line keys change on supersede** (`other:<row id>`): re-abstracting mid-month then re-running cron would post a second escrow. Key 'other' lines on a stable discriminator (e.g. normalized description) or block re-billing a period that already has an 'other' charge for that lease.
+5. **NUMERIC as string/null:** coerce the cron select's numerics the same way legacy does before calling the engine, or a stray null blocks rent with `invalid_row`.
+6. **`'all'` + `fixed_amount` is rejected by the engine** (`invalid_row`): it has no defined rent/CAM split. Extraction/approval (Phases 3–4) must split such a waiver into one fixed concession per charge class; consider a matching 0020-follow-up CHECK.
+7. Confirm the hosted PostgREST `max_rows` ≥ 1000 (`fetchAllPages` assumption) before the backfill runs.
+
 ## 6. Phases (each a PR; TDD; done bar per Engineering OS)
 
 | # | PR | Contents | Size | Gate |
