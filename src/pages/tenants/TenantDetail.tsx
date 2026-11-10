@@ -17,6 +17,7 @@ import type { Tenant, Lease, InsuranceCertificate, Unit, Property, Correspondenc
 import { TenantPortalAdmin } from '../admin/TenantPortalAdmin'
 import { useSaveMutation } from '../../lib/mutations'
 import { TenantLedger } from './TenantLedger'
+import { TenantCollectionsCard } from '../money/TenantCollectionsCard'
 import { over30, pastDue, type ArAgingLeaseRow } from '../today/today-queue'
 import type { AgingTotals } from '../ar/ar-aging-view'
 
@@ -204,6 +205,7 @@ function TenantView({ data, id }: { data: TenantWithJoins; id: string | undefine
                 <TenantLedger leases={ledgerLeases} />
               </div>
               <div className="flex min-w-0 flex-[1_1_260px] flex-col gap-4">
+                <TenantCollectionsCard tenantId={data.id} leases={ledgerLeases} />
                 <div className="flex flex-col gap-1.5">
                   <span className="text-[11px] uppercase tracking-[0.1em] text-muted-foreground">Leases</span>
                   {leases.length === 0 && <span className="text-sm text-muted-foreground">No leases on file.</span>}

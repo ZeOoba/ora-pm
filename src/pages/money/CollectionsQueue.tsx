@@ -6,8 +6,11 @@ import { downloadCsv, toCsv } from '../../components/data-table/csv'
 import { csvFilename } from '../../components/data-table/csv'
 import { oldestBucketLabel, over30, type ArAgingLeaseRow } from '../today/today-queue'
 import { COLLECTIONS_TABS, collectionsFilter, type CollectionsTab } from './money-derive'
+import { formatDate } from '../../lib/format'
+import type { LeaseCollectionsState } from './collections-records'
+import { CollectionsRecordSheet, type RecordTarget } from './CollectionsRecordSheet'
 
-const GRID = 'grid grid-cols-[28px_minmax(0,1.4fr)_110px_150px_minmax(0,1fr)_110px] gap-3.5'
+const GRID = 'grid grid-cols-[28px_minmax(0,1.4fr)_110px_140px_minmax(0,1.2fr)_150px] gap-3.5'
 
 const SEGS: { key: 'd1_30' | 'd31_60' | 'd61_90' | 'd90_plus'; label: string; cls: string }[] = [
   { key: 'd1_30', label: '1–30', cls: 'bg-chart-4' },
@@ -29,12 +32,14 @@ function statusOf(r: ArAgingLeaseRow): { label: string; tone: string } {
  * Collections as a work queue (prototype screen 3a): tabs, risk-first order (most over 30 days),
  * per-lease aging bars, and multi-select with a batch bar. Batch actions are limited to what the
  * app can do today (CSV of the selection, statements); reminders, late fees and demand letters
- * arrive with backend epics B1/B9/B11.
+ * arrive with backend epics B9/B11. Promises to pay and disputes (B1) show per row and can be
+ * logged from it; they are work-log records and change no balance.
  */
-export function CollectionsQueue({ rows }: { rows: ArAgingLeaseRow[] }) {
+export function CollectionsQueue({ rows, records = new Map() }: { rows: ArAgingLeaseRow[]; records?: Map<string, LeaseCollectionsState> }) {
   const [tab, setTab] = useState<CollectionsTab>('over30')
   const [sel, setSel] = useState<Set<string>>(new Set())
-  const shown = collectionsFilter(rows, tab)
+  const [logFor, setLogFor] = useState<RecordTarget | null>(null)
+  const shown = collectionsFilter(rows, tab, records)
   const selected = rows.filter((r) => sel.has(r.lease_id))
   const toggle = (id: string) => setSel((s) => {
     const n = new Set(s)
@@ -64,7 +69,7 @@ export function CollectionsQueue({ rows }: { rows: ArAgingLeaseRow[] }) {
     <div className="flex flex-col gap-3">
       <div className="flex flex-wrap items-center gap-2 text-[13px]">
         {COLLECTIONS_TABS.map((t) => {
-          const n = collectionsFilter(rows, t.key).length
+          const n = collectionsFilter(rows, t.key, records).length
           return (
             <button key={t.key} type="button" aria-pressed={tab === t.key} onClick={() => setTab(t.key)}
               className={cn('rounded-full border px-3 py-1', tab === t.key ? 'border-navy bg-navy text-white' : 'border-border bg-card text-navy hover:bg-muted')}>
@@ -72,7 +77,7 @@ export function CollectionsQueue({ rows }: { rows: ArAgingLeaseRow[] }) {
             </button>
           )
         })}
-        <span className="ml-auto text-muted-foreground">Sorted by amount over 30 days</span>
+        <span className="ml-auto text-muted-foreground">Lapsed promises first, then amount over 30 days</span>
       </div>
 
       {selected.length > 0 && (
@@ -88,12 +93,13 @@ export function CollectionsQueue({ rows }: { rows: ArAgingLeaseRow[] }) {
       <div className="overflow-x-auto rounded-xl border border-border bg-card">
         <div className={cn(GRID, 'min-w-[820px] items-center bg-muted px-4 py-2 text-[11px] uppercase tracking-[0.08em] text-muted-foreground')}>
           <Check on={allShownSelected} onClick={toggleAll} label="Select all shown" />
-          <span>Tenant</span><span className="text-right">Balance</span><span>Aging</span><span>Oldest past due</span><span />
+          <span>Tenant</span><span className="text-right">Balance</span><span>Aging</span><span>Status</span><span />
         </div>
         {shown.length === 0 && <p className="px-4 py-8 text-center text-sm text-muted-foreground">Nothing in this view.</p>}
         {shown.map((r) => {
           const on = sel.has(r.lease_id)
           const s = statusOf(r)
+          const rec = records.get(r.lease_id)
           const segs = SEGS.filter((x) => r.buckets[x.key] > 0)
           return (
             <div key={r.lease_id} className={cn(GRID, 'min-w-[820px] items-center border-t border-border/60 px-4 py-3', on ? 'bg-gold/10' : 'bg-card')}>
@@ -107,17 +113,32 @@ export function CollectionsQueue({ rows }: { rows: ArAgingLeaseRow[] }) {
                 className="flex h-2.5 gap-px bg-muted">
                 {segs.map((x) => <div key={x.key} className={x.cls} style={{ flex: r.buckets[x.key] }} />)}
               </div>
-              <div className="flex min-w-0 flex-col">
+              <div className="flex min-w-0 flex-col gap-0.5">
                 <span className={cn('font-mono text-[11px]', s.tone)}>{s.label}</span>
                 <span className="truncate text-xs text-muted-foreground">
                   {over30(r.buckets) > 0 ? `${formatCurrency(over30(r.buckets))} over 30 days` : oldestBucketLabel(r.buckets) === 'current' ? 'Not yet due' : 'Under 30 days'}
                 </span>
+                {rec?.promise && (
+                  <span className={cn('truncate font-mono text-[11px]', rec.promise.lapsed ? 'text-status-danger' : 'text-status-active')}>
+                    {rec.promise.lapsed ? 'PROMISE LAPSED' : 'PROMISED'} · {formatCurrency(rec.promise.amount)} by {formatDate(rec.promise.promised_date)}
+                  </span>
+                )}
+                {rec?.dispute && (
+                  <span className="truncate font-mono text-[11px] text-status-pending" title={rec.dispute.reason}>
+                    DISPUTED{rec.dispute.amount != null ? ` · ${formatCurrency(rec.dispute.amount)}` : ''} · {rec.dispute.reason}
+                  </span>
+                )}
               </div>
-              <Link to={`/tenants/${r.tenant_id}`} className="rounded-md border border-navy py-1.5 text-center text-xs text-navy hover:bg-muted">Open ledger</Link>
+              <div className="flex gap-1.5">
+                <Link to={`/tenants/${r.tenant_id}`} className="flex-1 rounded-md border border-navy py-1.5 text-center text-xs text-navy hover:bg-muted">Ledger</Link>
+                <button type="button" onClick={() => setLogFor({ lease_id: r.lease_id, label: `${r.tenant_name} · ${r.property_name} · Ste ${r.suite}` })}
+                  className="flex-1 rounded-md bg-navy py-1.5 text-center text-xs text-white hover:bg-navy-700">Log…</button>
+              </div>
             </div>
           )
         })}
       </div>
+      <CollectionsRecordSheet key={logFor?.lease_id ?? 'none'} target={logFor} onClose={() => setLogFor(null)} />
     </div>
   )
 }

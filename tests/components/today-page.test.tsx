@@ -28,7 +28,7 @@ const fin = {
   cash_flow: { period: { total_cash_in: 874 } },
 }
 function healthy(): Record<string, unknown> {
-  return { 'rent-roll': ok([]), 'ar-aging': ok({ data: arRows, totals }), 'critical-dates': ok([]), financials: ok(fin) }
+  return { 'rent-roll': ok([]), 'ar-aging': ok({ data: arRows, totals }), 'critical-dates': ok([]), financials: ok(fin), collections: ok([]) }
 }
 const render = () => renderToStaticMarkup(createElement(MemoryRouter, null, createElement(TodayPage)))
 
