@@ -9,8 +9,16 @@ const routerSrc = readFileSync(join(__dirname, '../../src/router.tsx'), 'utf-8')
 const ROUTE_PATHS = new Set([...routerSrc.matchAll(/path:\s*'([^']+)'/g)].map((m) => m[1]))
 
 describe('nav-config', () => {
-  it('has the five specified groups', () => {
-    expect(NAV_GROUPS.map((g) => g.heading)).toEqual(['Home', 'Portfolio', 'Leasing', 'Accounting', 'Reports'])
+  it('follows the prototype IA: Today, then Portfolio · Leasing · Money · Books', () => {
+    expect(NAV_GROUPS.map((g) => g.heading)).toEqual([undefined, 'Portfolio', 'Leasing', 'Money', 'Books'])
+    expect(NAV_GROUPS[0].items).toEqual([expect.objectContaining({ to: '/', label: 'Today' })])
+  })
+
+  it('keeps every pre-redesign page one click away', () => {
+    const tos = new Set(flatNavItems().map((i) => i.to))
+    for (const to of ['/properties', '/units', '/tenants', '/leases', '/insurance', '/renewals', '/critical-dates',
+      '/transactions', '/billing', '/payments', '/ar', '/statements', '/cam', '/expenses', '/budgets', '/reports',
+      '/rent-roll', '/exports']) expect(tos.has(to), to).toBe(true)
   })
 
   it('every nav `to` is a real route in the router', () => {
@@ -32,7 +40,7 @@ describe('nav-config', () => {
   })
 
   it('derives breadcrumbs from the pathname', () => {
-    expect(breadcrumbFor('/')).toEqual([{ label: 'Home', to: '/' }])
+    expect(breadcrumbFor('/')).toEqual([{ label: 'Today', to: '/' }])
     expect(breadcrumbFor('/leases')).toEqual([{ label: 'Portfolio' }, { label: 'Leases', to: '/leases' }])
     expect(breadcrumbFor('/leases/abc-123')).toEqual([
       { label: 'Portfolio' },

@@ -35,7 +35,7 @@ describe('AppShell', () => {
   })
 
   it('renders group headings', () => {
-    for (const h of ['Portfolio', 'Leasing', 'Accounting', 'Reports']) expect(html).toContain(h)
+    for (const h of ['Portfolio', 'Leasing', 'Money', 'Books']) expect(html).toContain(h)
   })
 
   it('uses md: responsive classes (rail >= md, top bar < md)', () => {
@@ -88,5 +88,17 @@ describe('AppShell collapsed rail (first render)', () => {
     withStorage(throwing, () => {
       expect(render('/leases')).toContain('aria-label="Collapse navigation"')
     })
+  })
+})
+
+describe('AppShell mobile tab bar', () => {
+  const html = render('/ar')
+  it('renders a < md bottom tab bar with Today, Collections, Rent roll and Search', () => {
+    expect(html).toMatch(/<nav aria-label="Quick" class="[^"]*md:hidden/)
+    for (const t of ['Today', 'Collections', 'Rent roll', 'Search']) expect(html).toContain(t)
+    expect(html).toMatch(/aria-current="page"[^>]*href="\/ar"|href="\/ar"[^>]*aria-current="page"/)
+  })
+  it('pads main so content clears the bar on phones', () => {
+    expect(html).toContain('pb-24 md:pb-8')
   })
 })

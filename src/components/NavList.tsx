@@ -16,12 +16,13 @@ export function NavList({
   return (
     <nav aria-label="Primary" className="flex-1 overflow-y-auto py-3">
       {NAV_GROUPS.map((group) => (
-        <div key={group.heading} className="mb-3">
-          {collapsed ? (
-            <div className="mx-3 mb-1 border-t border-white/10 first:hidden" />
-          ) : (
-            <p className="px-5 mb-1 text-[10px] font-semibold uppercase tracking-wider text-white/40">{group.heading}</p>
-          )}
+        <div key={group.heading ?? 'top'} className="mb-3">
+          {group.heading &&
+            (collapsed ? (
+              <div className="mx-3 mb-1 border-t border-white/10" />
+            ) : (
+              <p className="mb-1 px-5 text-[10px] font-semibold uppercase tracking-[0.14em] text-chart-4">{group.heading}</p>
+            ))}
           {group.items.map(({ to, label, icon: Icon }) => {
             const active = isNavActive(pathname, to)
             const link = (

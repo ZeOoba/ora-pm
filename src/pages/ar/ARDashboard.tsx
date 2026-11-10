@@ -8,19 +8,23 @@ import { Table, TableBody, TableCell, TableFooter, TableHead, TableHeader, Table
 import { formatCurrency } from '../../lib/format'
 import type { ARLedgerRow } from '../../types'
 import { AGING_COLUMNS, UNALLOCATED_COLUMN, hasUnallocated, type AgingBuckets, type AgingTotals } from './ar-aging-view'
+import { CollectionsQueue } from '../money/CollectionsQueue'
+import { collectionsSummary } from '../money/money-derive'
+import { compactMoney } from '../today/today-queue'
 
 type AgingRow = ARLedgerRow & { buckets: AgingBuckets }
 type AgingResponse = { data: AgingRow[]; totals: AgingTotals }
 
 export function ARDashboard() {
-  // Shares ['ar-aging', 'buckets'] (same full response: rows + totals) with Dashboard, so the two
-  // views read one cache entry. invalidateQueries(['ar-aging']) prefix-matches it.
+  // Shares ['ar-aging', 'buckets', ''] (same full response: rows + totals) with Today, Portfolio
+  // and Tenant, so they read one cache entry. invalidateQueries(['ar-aging']) prefix-matches it.
   const query = useQuery({
-    queryKey: ['ar-aging', 'buckets'],
+    queryKey: ['ar-aging', 'buckets', ''],
     queryFn: () => api.get<AgingResponse>('/reports/ar-aging'),
   })
   const rows = query.data?.data ?? []
   const totals = query.data?.totals
+  const summary = collectionsSummary(rows)
 
   const totalCharged = rows.reduce((s, r) => s + r.total_charged, 0)
   const totalPaid = rows.reduce((s, r) => s + r.total_paid, 0)
@@ -29,15 +33,39 @@ export function ARDashboard() {
 
   return (
     <div>
-      <PageHeader title="AR / Collections" subtitle="Aging assumes payments retire the oldest charges first." />
-
       <QueryState
         query={query}
         isEmpty={(d) => (d as AgingResponse | undefined)?.data.length === 0}
-        empty={<EmptyState title="No outstanding balances" message="Every lease is paid up." />}
+        empty={<><PageHeader title="Collections" /><EmptyState title="No outstanding balances" message="Every lease is paid up." /></>}
       >
         {totals && (
           <>
+            <div className="mb-5 flex flex-wrap items-end gap-x-8 gap-y-5">
+              <div className="flex flex-[1_1_320px] flex-col gap-1">
+                <h1 className="font-display text-3xl leading-tight text-navy md:text-[38px]">
+                  {formatCurrency(totals.balance)} owed by {summary.tenants} {summary.tenants === 1 ? 'tenant' : 'tenants'}
+                </h1>
+                <p className="text-sm text-muted-foreground">
+                  {formatCurrency(summary.over30)} is over 30 days, across {summary.tenantsOver30} {summary.tenantsOver30 === 1 ? 'tenant' : 'tenants'}.
+                  Aging assumes payments retire the oldest charges first.
+                </p>
+              </div>
+              <div className="flex flex-[1.4_1_400px] flex-col gap-1.5">
+                <div role="img" aria-label={`Portfolio aging: ${AGING_COLUMNS.map((c) => `${c.label} ${formatCurrency(totals[c.key])}`).join(', ')}`}
+                  className="flex h-7 overflow-hidden rounded">
+                  {AGING_COLUMNS.filter((c) => totals[c.key] > 0).map((c) => (
+                    <div key={c.key} style={{ flex: totals[c.key], background: c.color }} />
+                  ))}
+                </div>
+                <div className="flex flex-wrap gap-x-4 gap-y-1 font-mono text-xs text-muted-foreground">
+                  {AGING_COLUMNS.map((c) => <span key={c.key}>{c.label} · {compactMoney(totals[c.key])}</span>)}
+                </div>
+              </div>
+            </div>
+
+            <CollectionsQueue rows={rows} />
+
+            <h2 className="mb-3 mt-10 font-display text-2xl text-navy">Aging detail</h2>
             <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-3">
               {[
                 { label: 'Total Outstanding', value: totals.balance, danger: totals.balance > 0 },
