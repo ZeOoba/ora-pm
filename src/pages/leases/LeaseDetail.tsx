@@ -13,6 +13,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '.
 import { Field } from '../../components/form/Field'
 import { TextInput, DateInput, Select } from '../../components/form/inputs'
 import { formatCurrency, formatDate, formatSF, formatPSF } from '../../lib/format'
+import { CamTermsEditor } from './CamTermsEditor'
 import type { Lease, Tenant, Unit, Property, LeaseAmendment, BrokerCommission, LeaseDocument, TenantNotice } from '../../types'
 
 type LeaseDetail = Lease & {
@@ -208,7 +209,7 @@ export function LeaseDetail() {
               label: 'Terms',
               content: (
                 <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-                  <SectionCard title="Lease Terms">
+                  <SectionCard title="Lease Terms" action={<CamTermsEditor leaseId={data.id} lease={data} />}>
                     <dl className="space-y-2">
                       <TermRow label="Status"><StatusBadge status={data.status} /></TermRow>
                       <TermRow label="Type">{data.rent_type.toUpperCase()}</TermRow>

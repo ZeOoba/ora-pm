@@ -296,6 +296,189 @@ camRouter.get('/pool', async (c) => {
   })
 })
 
+/**
+ * First field on which a saved draft differs from a recomputed (or re-read) one, or null when they
+ * match. Money compared in cents and the share to 1e-9 (NUMERIC columns can arrive as strings).
+ */
+function draftMismatch(saved: Record<string, unknown>, now: Record<string, unknown>): string | null {
+  const cents = (v: unknown) => Math.round(Number(v) * 100)
+  for (const f of ['true_up_amount', 'actual_cam_owed', 'estimated_cam_paid', 'total_property_recoverable_expenses']) {
+    const a = cents(saved[f])
+    const b = cents(now[f])
+    if (!(Number.isFinite(a) && Number.isFinite(b)) || a !== b) return `${f} ${String(saved[f])} -> ${String(now[f])}`
+  }
+  const pa = Number(saved.tenant_pro_rata_share_pct)
+  const pb = Number(now.tenant_pro_rata_share_pct)
+  if (!(Number.isFinite(pa) && Number.isFinite(pb)) || Math.abs(pa - pb) > 1e-9) {
+    return `tenant_pro_rata_share_pct ${String(saved.tenant_pro_rata_share_pct)} -> ${String(now.tenant_pro_rata_share_pct)}`
+  }
+  for (const f of ['share_basis', 'recovery_basis']) {
+    if ((saved[f] ?? null) !== (now[f] ?? null)) return `${f} ${String(saved[f])} -> ${String(now[f])}`
+  }
+  return null
+}
+
+/** What a CAM reconciliation for one lease/year comes to, computed from the DB as it is now. */
+type ReconciliationPatch = {
+  total_property_recoverable_expenses: number
+  tenant_pro_rata_share_pct: number
+  estimated_cam_paid: number
+  actual_cam_owed: number
+  true_up_amount: number
+  share_basis: ResolvedShare['basis']
+  recovery_basis: string
+  basis_warnings: string | null
+  status: 'draft'
+}
+type Computed =
+  | { kind: 'ok'; patch: ReconciliationPatch; warnings: string[] }
+  /** The lease's terms or data do not support a reconciliation (422/400): the user fixes data. */
+  | { kind: 'refused'; message: string; httpStatus: 422 | 400 }
+  | { kind: 'not_found' }
+  | { kind: 'db_error'; error: PgErr; label: string }
+
+/**
+ * Compute (never save) the reconciliation for a lease/year. Shared by POST /calculate, which saves
+ * it, and POST /:id/approve, which recomputes it to prove the saved draft still matches the lease,
+ * property, unit and expense data before any charge is posted (REFUTE D1/D2, 2026-11-10).
+ *
+ * Every read FAILS CLOSED (PR #42 refute): they used to discard `error`, so a failed query read as
+ * SF 0 / estimated_cam_paid 0 and SAVED a draft with a wrong pro-rata or an overstated
+ * true_up_amount that /approve would then post. A genuinely missing lease is PGRST116 (no row):
+ * a 404-class input error, not a DB failure.
+ */
+async function computeReconciliation(db: Db, lease_id: string, reconciliation_year: number): Promise<Computed> {
+  const { data: lease, error: leaseErr } = await db
+    .from('leases')
+    .select('id, rent_type, expense_stop_amount, base_year, base_year_expense_amount, units(property_id)')
+    .eq('id', lease_id)
+    .single()
+  if (leaseErr) {
+    if (leaseErr.code === 'PGRST116') return { kind: 'not_found' }
+    return { kind: 'db_error', error: leaseErr, label: 'Failed to load lease' }
+  }
+
+  // rent_type + expense_stop_amount (audit finding cam-ignores-rent-type-expense-stop): the true-up
+  // used to bill every lease its full pro-rata share, so gross and modified-gross tenants were
+  // charged CAM their leases do not pass through. calculateCAMTrueUp applies the schema semantics.
+  const leaseRow = lease as unknown as {
+    units: { property_id: string } | null
+    rent_type: CAMRentType | null
+    expense_stop_amount: number | string | null
+    base_year: number | string | null
+    base_year_expense_amount: number | string | null
+  } | null
+  const refused = (message: string, httpStatus: 422 | 400 = 422): Computed => ({ kind: 'refused', message, httpStatus })
+
+  const propertyId = leaseRow?.units?.property_id
+  if (!propertyId) return refused('Lease has no unit/property — cannot build the CAM pool')
+  const rentType: CAMRentType = leaseRow?.rent_type ?? 'nnn' // column is NOT NULL DEFAULT 'nnn'
+  // NUMERIC can arrive as a string from PostgREST; null stays null (no stop).
+  const expenseStopPerSF = numOrNull(leaseRow?.expense_stop_amount)
+  // Base year (0021; ruling 2026-11-08): recover only the increase over the base year's total.
+  const baseYear = numOrNull(leaseRow?.base_year)
+  // REFUTE L3: base_year is INTEGER in the schema, but a non-integer here (NaN from a bad string)
+  // compared `reconciliationYear < NaN` as false and billed as if the base year had passed.
+  if (baseYear !== null && !Number.isInteger(baseYear)) {
+    return refused(`Lease base year "${String(leaseRow?.base_year)}" is not a calendar year`)
+  }
+  const baseYearExpenseAmount = numOrNull(leaseRow?.base_year_expense_amount)
+
+  // Server-side pool: recoverable total, the leases in effect during the year (days in effect,
+  // same-unit overlap, stale-end-date and RSF-covers-pool checks) and the property's denominator RSF.
+  const recoverable = await loadRecoverableTotal(db, propertyId, reconciliation_year)
+  if (recoverable.error) return { kind: 'db_error', error: recoverable.error, label: 'Failed to load recoverable expenses' }
+  const total_property_recoverable_expenses = recoverable.total
+  const loaded = await loadCamPool(db, propertyId, reconciliation_year)
+  if (loaded.error instanceof CAMTermsError) return refused(loaded.error.message)
+  if (loaded.error) return { kind: 'db_error', error: loaded.error, label: 'Failed to load CAM pool' }
+  const holdoverFlag = loaded.holdover.get(lease_id)
+  const tenantInPool = loaded.pool.byLease[lease_id]
+  if (!tenantInPool) {
+    // A holdover lease that ended before this year is not in the pool: say so rather than
+    // "not in effect" (ruling 2026-11-08: holdover excluded and flagged).
+    return refused(holdoverFlag
+      ?? `Lease was not in effect during ${reconciliation_year} (or is pending) — no CAM reconciliation for that year`)
+  }
+  // Proportionate Share (ruling 2026-11-08): the lease-stated %, else premises RSF / the property's
+  // building/project RSF; neither -> 422. Prorated by days in effect. A stated-vs-computed gap over
+  // 0.5 pp is a warning returned (and saved) with the draft, never a refusal; so is a pool whose
+  // concurrent shares total more than 100% (only reachable through stated percentages).
+  const poolShares = resolvePoolShares(loaded.pool, loaded.leases, loaded.denominatorRSF)
+  const resolved = poolShares.byLease.get(lease_id)
+  if (resolved === undefined) return refused('Lease is missing from its CAM pool')
+  if (resolved instanceof CAMTermsError) return refused(resolved.message)
+  const share: ResolvedShare = resolved
+  // Occupancy-weighted premises SF: the basis an expense stop is applied to, prorated by the same
+  // days-in-effect factor as the share (see calculateCAMTrueUp).
+  const tenantSF = tenantInPool.weightedSF
+
+  // Sum all CAM estimate charges billed this year. OI-278 / migration 0016: a voided estimate was
+  // never really billed, so it must not count as CAM paid (that would understate the true-up).
+  // Fail closed on a read error — including 42703 while the app runs ahead of migration 0016.
+  const { data: camCharges, error: camChargesErr } = await db
+    .from('charges')
+    .select('amount')
+    .eq('lease_id', lease_id)
+    .eq('type', 'cam_estimate')
+    .is('voided_at', null)
+    .gte('period_start', `${reconciliation_year}-01-01`)
+    .lte('period_end', `${reconciliation_year}-12-31`)
+  if (camChargesErr) return { kind: 'db_error', error: camChargesErr, label: 'Failed to load CAM estimate charges' }
+
+  // REFUTE L1: charges.amount is NUMERIC and can arrive from PostgREST as a string; `s + ch.amount`
+  // would then concatenate. Summed in integer cents like loadRecoverableTotal; a non-numeric amount
+  // makes the sum NaN, which calculateCAMTrueUp refuses (fail closed).
+  const estimatedCamPaid = (camCharges ?? []).reduce(
+    (cents: number, ch: { amount: number | string }) => cents + Math.round(Number(ch.amount) * 100),
+    0,
+  ) / 100
+
+  let result
+  try {
+    result = calculateCAMTrueUp({
+      totalRecoverableExpenses: total_property_recoverable_expenses,
+      tenantSF,
+      tenantSharePct: share.effectivePct,
+      estimatedCamPaid,
+      rentType,
+      expenseStopPerSF,
+      baseYear,
+      baseYearExpenseAmount,
+      reconciliationYear: reconciliation_year,
+    })
+  } catch (err) {
+    // Lease-terms problems (e.g. modified_gross with no expense stop) are a 422 the user fixes on
+    // the lease; nothing is saved either way.
+    if (err instanceof CAMTermsError) return refused(err.message)
+    return refused((err as Error).message, 400)
+  }
+
+  // Non-blocking warnings travel with every successful response (and are saved on the draft).
+  // The denominator warning (H1) only bears on a computed share; a stated share ignores the RSF.
+  const warnings = [
+    ...share.warnings,
+    ...(poolShares.poolWarning ? [poolShares.poolWarning] : []),
+    ...(share.basis === 'premises_rsf_over_denominator' ? loaded.denominatorWarnings : []),
+    ...(holdoverFlag ? [holdoverFlag] : []),
+  ]
+  return {
+    kind: 'ok',
+    warnings,
+    patch: {
+      total_property_recoverable_expenses,
+      tenant_pro_rata_share_pct: result.tenantProRataSharePct,
+      estimated_cam_paid: estimatedCamPaid,
+      actual_cam_owed: result.actualCamOwed,
+      true_up_amount: result.trueUpAmount,
+      share_basis: share.basis,
+      recovery_basis: result.recoveryBasis,
+      basis_warnings: warnings.length > 0 ? warnings.join('\n') : null,
+      status: 'draft',
+    },
+  }
+}
+
 // Calculate and save CAM reconciliation for a lease/year.
 // Body: { lease_id, reconciliation_year }. total_property_recoverable_expenses / total_leased_sf
 // are still ACCEPTED (an already-loaded older page bundle sends them) but IGNORED: both are
@@ -315,140 +498,27 @@ camRouter.post('/calculate', async (c) => {
   // used to swallow PGRST116 and fall through with tenantSF defaulted to 0, computing a true-up
   // against a nonexistent lease that only failed later, and generically, via the
   // cam_reconciliations FK constraint on insert).
-  const { data: lease, error: leaseErr } = await db
-    .from('leases')
-    .select('id, rent_type, expense_stop_amount, base_year, base_year_expense_amount, units(property_id)')
-    .eq('id', lease_id)
-    .single()
-  if (leaseErr) {
-    if (leaseErr.code === 'PGRST116') return c.json({ error: 'Lease not found' }, 404)
-    return dbError(c, leaseErr, 'Failed to load lease')
-  }
-
-  // rent_type + expense_stop_amount (audit finding cam-ignores-rent-type-expense-stop): the true-up
-  // used to bill every lease its full pro-rata share, so gross and modified-gross tenants were
-  // charged CAM their leases do not pass through. calculateCAMTrueUp applies the schema semantics.
-  const leaseRow = lease as unknown as {
-    units: { property_id: string } | null
-    rent_type: CAMRentType | null
-    expense_stop_amount: number | string | null
-    base_year: number | string | null
-    base_year_expense_amount: number | string | null
-  } | null
   // REFUTE H2 (2026-11-10): a refused recalculation must not leave the previous draft billable. If
   // the lease's terms changed (base year added, stated share fixed, RSF corrected) and this run is
   // refused, the old draft was priced on terms that no longer hold. Strip its share_basis so
   // /:id/approve refuses it until a recalculation succeeds. Only 'draft' rows are touched (billed /
   // collected rows are history). If the invalidation itself fails, fail closed with a 500 rather
   // than report a 422 that leaves a stale draft approvable.
-  const refuse = async (message: string, httpStatus: 422 | 400 = 422) => {
+  const computed = await computeReconciliation(db, lease_id, reconciliation_year)
+  if (computed.kind === 'not_found') return c.json({ error: 'Lease not found' }, 404)
+  if (computed.kind === 'db_error') return dbError(c, computed.error, computed.label)
+  if (computed.kind === 'refused') {
     const { error: invalidateErr } = await db
       .from('cam_reconciliations')
-      .update({ share_basis: null, basis_warnings: `Last recalculation was refused: ${message}` })
+      .update({ share_basis: null, basis_warnings: `Last recalculation was refused: ${computed.message}` })
       .eq('lease_id', lease_id)
       .eq('reconciliation_year', reconciliation_year)
       .eq('status', 'draft')
       .select()
     if (invalidateErr) return dbError(c, invalidateErr, 'Failed to invalidate the stale CAM draft')
-    return c.json({ error: message }, httpStatus)
+    return c.json({ error: computed.message }, computed.httpStatus)
   }
-
-  const propertyId = leaseRow?.units?.property_id
-  if (!propertyId) return refuse('Lease has no unit/property — cannot build the CAM pool')
-  const rentType: CAMRentType = leaseRow?.rent_type ?? 'nnn' // column is NOT NULL DEFAULT 'nnn'
-  // NUMERIC can arrive as a string from PostgREST; null stays null (no stop).
-  const expenseStopPerSF = leaseRow?.expense_stop_amount == null ? null : Number(leaseRow.expense_stop_amount)
-  // Base year (0021; ruling 2026-11-08): recover only the increase over the base year's total.
-  const baseYear = numOrNull(leaseRow?.base_year)
-  const baseYearExpenseAmount = numOrNull(leaseRow?.base_year_expense_amount)
-
-  // Server-side pool: recoverable total, the leases in effect during the year (days in effect,
-  // same-unit overlap, stale-end-date and RSF-covers-pool checks) and the property's denominator RSF.
-  const recoverable = await loadRecoverableTotal(db, propertyId, reconciliation_year)
-  if (recoverable.error) return dbError(c, recoverable.error, 'Failed to load recoverable expenses')
-  const total_property_recoverable_expenses = recoverable.total
-  const loaded = await loadCamPool(db, propertyId, reconciliation_year)
-  if (loaded.error instanceof CAMTermsError) return refuse(loaded.error.message)
-  if (loaded.error) return dbError(c, loaded.error, 'Failed to load CAM pool')
-  const holdoverFlag = loaded.holdover.get(lease_id)
-  const tenantInPool = loaded.pool.byLease[lease_id]
-  if (!tenantInPool) {
-    // A holdover lease that ended before this year is not in the pool: say so rather than
-    // "not in effect" (ruling 2026-11-08: holdover excluded and flagged).
-    return refuse(holdoverFlag
-      ?? `Lease was not in effect during ${reconciliation_year} (or is pending) — no CAM reconciliation for that year`)
-  }
-  // Proportionate Share (ruling 2026-11-08): the lease-stated %, else premises RSF / the property's
-  // building/project RSF; neither -> 422. Prorated by days in effect. A stated-vs-computed gap over
-  // 0.5 pp is a warning returned (and saved) with the draft, never a refusal; so is a pool whose
-  // concurrent shares total more than 100% (only reachable through stated percentages).
-  const poolShares = resolvePoolShares(loaded.pool, loaded.leases, loaded.denominatorRSF)
-  const resolved = poolShares.byLease.get(lease_id)
-  if (resolved === undefined) return refuse('Lease is missing from its CAM pool')
-  if (resolved instanceof CAMTermsError) return refuse(resolved.message)
-  const share: ResolvedShare = resolved
-  // Occupancy-weighted premises SF: the basis an expense stop is applied to, prorated by the same
-  // days-in-effect factor as the share (see calculateCAMTrueUp).
-  const tenantSF = tenantInPool.weightedSF
-
-  // Sum all CAM estimate charges billed this year. OI-278 / migration 0016: a voided estimate was
-  // never really billed, so it must not count as CAM paid (that would understate the true-up).
-  // Fail closed on a read error — including 42703 while the app runs ahead of migration 0016.
-  const { data: camCharges, error: camChargesErr } = await db
-    .from('charges')
-    .select('amount')
-    .eq('lease_id', lease_id)
-    .eq('type', 'cam_estimate')
-    .is('voided_at', null)
-    .gte('period_start', `${reconciliation_year}-01-01`)
-    .lte('period_end', `${reconciliation_year}-12-31`)
-  if (camChargesErr) return dbError(c, camChargesErr, 'Failed to load CAM estimate charges')
-
-  const estimatedCamPaid = (camCharges ?? []).reduce(
-    (s: number, ch: { amount: number }) => s + ch.amount,
-    0
-  )
-
-  let result
-  try {
-    result = calculateCAMTrueUp({
-      totalRecoverableExpenses: total_property_recoverable_expenses,
-      tenantSF,
-      tenantSharePct: share.effectivePct,
-      estimatedCamPaid,
-      rentType,
-      expenseStopPerSF,
-      baseYear,
-      baseYearExpenseAmount,
-      reconciliationYear: reconciliation_year,
-    })
-  } catch (err) {
-    // Lease-terms problems (e.g. modified_gross with no expense stop) are a 422 the user fixes on
-    // the lease; nothing is saved either way.
-    if (err instanceof CAMTermsError) return refuse(err.message)
-    return refuse((err as Error).message, 400)
-  }
-
-  const patch = {
-    total_property_recoverable_expenses,
-    tenant_pro_rata_share_pct: result.tenantProRataSharePct,
-    estimated_cam_paid: estimatedCamPaid,
-    actual_cam_owed: result.actualCamOwed,
-    true_up_amount: result.trueUpAmount,
-    share_basis: share.basis,
-    recovery_basis: result.recoveryBasis,
-    basis_warnings: null as string | null,
-    status: 'draft' as const,
-  }
-  // Non-blocking warnings travel with every successful response (and are saved on the draft).
-  // The denominator warning (H1) only bears on a computed share; a stated share ignores the RSF.
-  const warnings = [
-    ...share.warnings,
-    ...(poolShares.poolWarning ? [poolShares.poolWarning] : []),
-    ...(share.basis === 'premises_rsf_over_denominator' ? loaded.denominatorWarnings : []),
-    ...(holdoverFlag ? [holdoverFlag] : []),
-  ]
-  patch.basis_warnings = warnings.length > 0 ? warnings.join('\n') : null
+  const { patch, warnings } = computed
 
   const ALREADY_BILLED = {
     error: 'This reconciliation has already been billed. Recalculating would silently reopen it '
@@ -583,8 +653,51 @@ camRouter.post('/:id/approve', async (c) => {
         + 'recalculate it before approving.',
     }, 409)
   }
-  const trueUp = r.true_up_amount
+  const trueUp = Number(r.true_up_amount)
   if (trueUp === 0) return c.json({ message: 'No true-up required (balanced)', true_up_amount: 0 })
+
+  // REFUTE D1/D2 (2026-11-10): a draft is a snapshot. A lease, property, unit or expense edit after
+  // it was calculated (base year added, RSF corrected, an expense posted late) leaves it priced on
+  // data that no longer holds, and nothing else invalidates it. Before posting anything, recompute
+  // the reconciliation from the DB as it is NOW and refuse (409) unless it still matches the draft.
+  // Crash recovery: if this draft's true-up charge is already posted (a crash after the insert,
+  // before the status update), skip the recompute and only complete the status transition — the
+  // money already moved, and the documented retry path must not get stuck on later data edits.
+  const idempotencyKey = `cam_true_up:${r.lease_id}:${r.reconciliation_year}`
+  const { data: posted, error: postedErr } = await db
+    .from('charges')
+    .select('id')
+    .eq('idempotency_key', idempotencyKey)
+    .limit(1)
+  if (postedErr) return dbError(c, postedErr, 'Failed to check for an already-posted true-up')
+  const alreadyPosted = (posted ?? []).length > 0
+
+  // Only a 'draft' is priced here; a billed/collected row falls through to the conditional status
+  // update below, which rejects it ('already billed') exactly as before.
+  if (!alreadyPosted && r.status === 'draft') {
+    const now = await computeReconciliation(db, r.lease_id, r.reconciliation_year)
+    if (now.kind === 'db_error') return dbError(c, now.error, now.label)
+    if (now.kind !== 'ok') {
+      const why = now.kind === 'refused' ? now.message : 'the lease no longer exists'
+      return c.json({ error: `This draft is stale: recalculating it now is refused (${why}). Fix the data and recalculate before approving.` }, 409)
+    }
+    const mismatch = draftMismatch(rec as Record<string, unknown>, now.patch)
+    if (mismatch) {
+      return c.json({ error: `This draft is stale: the lease, property or expense data changed since it was calculated (${mismatch}). Recalculate it before approving.` }, 409)
+    }
+    // D1: re-read the row immediately before posting, so a recalculation or a refused-recalculation
+    // invalidation that landed while the recompute ran is not billed on the old figures.
+    const { data: fresh, error: freshErr } = await db
+      .from('cam_reconciliations')
+      .select('*')
+      .eq('id', id)
+      .single()
+    if (freshErr || !fresh) return dbError(c, freshErr ?? { message: 'reconciliation vanished' }, 'Failed to re-read the CAM reconciliation')
+    const drift = draftMismatch(fresh as Record<string, unknown>, rec as Record<string, unknown>)
+    if (drift || (fresh as { status?: string }).status !== 'draft') {
+      return c.json({ error: `This draft changed while it was being approved (${drift ?? 'status'}). Reload and try again.` }, 409)
+    }
+  }
 
   const today = new Date().toISOString().slice(0, 10)
 
@@ -627,7 +740,7 @@ camRouter.post('/:id/approve', async (c) => {
     amount: Math.abs(trueUp),
     description: `${r.reconciliation_year} CAM True-Up`,
     source: 'manual',
-    idempotency_key: `cam_true_up:${r.lease_id}:${r.reconciliation_year}`,
+    idempotency_key: idempotencyKey,
   })
 
   // 23505 = unique-constraint conflict on idempotency_key: this true-up was

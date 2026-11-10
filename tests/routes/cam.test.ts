@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { createApp } from '../../server/index'
 import { pgTable } from '../fixtures/pg-table'
+import type * as CamLib from '../../server/lib/cam'
 
 // ---------------------------------------------------------------------------
 // Bypass admin auth (same pattern as tests/routes/notices.test.ts) — this
@@ -31,6 +32,21 @@ vi.mock('../../server/middleware/admin-auth', () => ({
 // ---------------------------------------------------------------------------
 const mockFrom = vi.hoisted(() => vi.fn())
 vi.mock('@supabase/supabase-js', () => ({ createClient: () => ({ from: mockFrom }) }))
+
+// REFUTE M6 (2026-11-10): calculateCAMTrueUp's plain-Error throws (share outside 0-1, negative SF)
+// are guarded upstream and unreachable with valid mock data, so this flag forces one to prove the
+// generic-error path in /calculate still invalidates the stale draft.
+const faults = vi.hoisted(() => ({ trueUpThrowsPlainError: false }))
+vi.mock('../../server/lib/cam', async (importOriginal) => {
+  const actual = await importOriginal<typeof CamLib>()
+  return {
+    ...actual,
+    calculateCAMTrueUp: (...args: Parameters<typeof actual.calculateCAMTrueUp>) => {
+      if (faults.trueUpThrowsPlainError) throw new Error('tenant share must be a fraction between 0 and 1')
+      return actual.calculateCAMTrueUp(...args)
+    },
+  }
+})
 
 type Row = Record<string, unknown>
 type PgError = { code?: string; message: string }
@@ -79,6 +95,9 @@ const state = {
   leaseSelectError: null as PgError | null,
   charges: [] as Row[],
   chargesInsertError: null as PgError | null,
+  chargesSelectError: null as PgError | null,
+  recReads: 0,
+  afterRecRead: null as ((n: number) => void) | null,
   reconciliationUpdateError: null as PgError | null,
   camInsertError: null as PgError | null,
   listReconciliations: [] as Row[],
@@ -137,7 +156,13 @@ function installDbMock() {
                 if (!matchesAll(state.rec, predicates)) {
                   return { data: null, error: { message: 'not found', code: 'PGRST116' } }
                 }
-                return { data: state.rec, error: null }
+                // A COPY, like a real query result: approve's first read and its pre-post re-read
+                // (REFUTE D1) must be able to differ. afterRecRead simulates a concurrent write
+                // landing between the two reads.
+                const snapshot = { ...(state.rec as Row) }
+                state.recReads += 1
+                state.afterRecRead?.(state.recReads)
+                return { data: snapshot, error: null }
               }),
               maybeSingle: vi.fn().mockImplementation(async () => {
                 if (state.recSelectError) return { data: null, error: state.recSelectError }
@@ -224,7 +249,16 @@ function installDbMock() {
         // OI-278 / migration 0016: the `.is('voided_at', null)` link is applied for real — a voided
         // estimate row must not count as CAM already paid (it would understate the true-up).
         select: vi.fn().mockReturnValue({
-          eq: vi.fn().mockReturnValue({
+          eq: vi.fn().mockImplementation((firstCol: string, firstVal: unknown) => firstCol === 'idempotency_key'
+            // /:id/approve's already-posted check (REFUTE D1/D2 crash-recovery path).
+            ? {
+                limit: vi.fn().mockImplementation(async () => (
+                  state.chargesSelectError
+                    ? { data: null, error: state.chargesSelectError }
+                    : { data: state.charges.filter((ch) => ch.idempotency_key === firstVal).map((ch) => ({ id: ch.idempotency_key })), error: null }
+                )),
+              }
+            : {
             eq: vi.fn().mockReturnValue({
               is: vi.fn().mockImplementation((col: string, val: unknown) => ({
                 gte: vi.fn().mockReturnValue({
@@ -294,6 +328,12 @@ function freshRec(overrides: Partial<Row> = {}): Row {
     status: 'draft',
     // 0021: drafts priced on the building-RSF basis carry a share_basis (a NULL one is pre-0021).
     share_basis: 'premises_rsf_over_denominator',
+    // What /approve's recompute yields under APPROVE_FIXTURE: 2% of a $25,000 pool, nothing paid.
+    total_property_recoverable_expenses: 25000,
+    tenant_pro_rata_share_pct: 0.02,
+    estimated_cam_paid: 0,
+    actual_cam_owed: 500,
+    recovery_basis: 'full_pro_rata',
     ...overrides,
   }
 }
@@ -325,6 +365,10 @@ beforeEach(() => {
   state.leaseSelectError = null
   state.charges = []
   state.chargesInsertError = null
+  state.chargesSelectError = null
+  state.recReads = 0
+  state.afterRecRead = null
+  faults.trueUpThrowsPlainError = false
   state.reconciliationUpdateError = null
   state.camInsertError = null
   state.listReconciliations = []
@@ -345,7 +389,18 @@ function expectRefusedNotPriced() {
 // ---------------------------------------------------------------------------
 // POST /api/cam/:id/approve — atomic approval (OI-046)
 // ---------------------------------------------------------------------------
+// /approve recomputes before posting (REFUTE D1/D2): a $25,000 2025 pool makes the tenant's 2% share
+// $500, so the default freshRec() draft is current.
+// The default draft belongs to a dummy lease (so /calculate tests see "no existing row"); approve
+// tests re-point it at TENANT_LEASE_ID, the lease the mocked DB can actually price.
+function approveFixture() {
+  state.expenses = [{ id: 'e_1', property_id: PROPERTY_ID, expense_date: '2025-06-01', amount: 25000, recoverable: true }]
+  state.rec = freshRec({ lease_id: TENANT_LEASE_ID })
+}
+
 describe('POST /api/cam/:id/approve', () => {
+  beforeEach(approveFixture)
+
   it('returns 404 when the reconciliation does not exist', async () => {
     state.rec = null
     const res = await approve('nope')
@@ -401,12 +456,14 @@ describe('POST /api/cam/:id/approve', () => {
     const res = await approve(REC_ID)
     expect(res.status).toBe(200)
     expect(chargesInsertSpy).toHaveBeenCalledWith(
-      expect.objectContaining({ idempotency_key: `cam_true_up:${LEASE_ID}:${YEAR}` })
+      expect.objectContaining({ idempotency_key: `cam_true_up:${TENANT_LEASE_ID}:${YEAR}` })
     )
   })
 
   it('applies the same conditional-update guard to the negative (credit) branch — no double-billing race', async () => {
-    state.rec = freshRec({ true_up_amount: -75 })
+    // $575 of estimates paid against $500 owed: a $75 credit that matches the live recompute.
+    state.camEstimateCharges = [{ amount: 575 }]
+    state.rec = freshRec({ lease_id: TENANT_LEASE_ID, true_up_amount: -75, estimated_cam_paid: 575 })
 
     const res1 = await approve(REC_ID)
     expect(res1.status).toBe(200)
@@ -1096,6 +1153,7 @@ describe('POST /api/cam/:id/approve: pre-0021 drafts (leased-SF basis) are not b
   })
 
   it('a recalculated draft (share_basis set) still approves normally', async () => {
+    approveFixture()
     const res = await approve(REC_ID)
     expect(res.status).toBe(200)
     expect(chargesInsertSpy).toHaveBeenCalledTimes(1)
@@ -1259,5 +1317,102 @@ describe('a refused recalculation invalidates the previous draft (REFUTE H2)', (
     const res = await calculate(BODY)
     expect(res.status).toBe(500)
     expect(await res.text()).not.toContain('boom update')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// REFUTE follow-ups (2026-11-10): D1 approve race, D2 stale drafts, L1 string amounts, L3 base year,
+// M6 generic-error invalidation.
+// ---------------------------------------------------------------------------
+describe('POST /api/cam/:id/approve recomputes before posting (REFUTE D1/D2)', () => {
+  beforeEach(approveFixture)
+
+  it('an expense posted after the draft was calculated: 409 stale, nothing posted, row stays a draft', async () => {
+    state.expenses.push({ id: 'e_2', property_id: PROPERTY_ID, expense_date: '2025-11-01', amount: 5000, recoverable: true })
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: string }).error).toMatch(/stale.*true_up_amount 500 -> 600/)
+    expect(chargesInsertSpy).not.toHaveBeenCalled()
+    expect(state.rec?.status).toBe('draft')
+  })
+
+  it('a lease edited to a base year with no amount after the draft: 409 (recalculation now refused), nothing posted', async () => {
+    state.leaseBaseYear = 2024
+    state.leaseBaseAmount = null
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: string }).error).toMatch(/stale: recalculating it now is refused/)
+    expect(chargesInsertSpy).not.toHaveBeenCalled()
+  })
+
+  it('the property RSF corrected after the draft: 409 on the changed share, nothing posted', async () => {
+    state.denominatorRSF = 100000 // 1,000 / 100,000 = 1%, not the draft's 2%
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(409)
+    expect(chargesInsertSpy).not.toHaveBeenCalled()
+  })
+
+  it('a concurrent write between the recompute and the post (D1): 409, nothing posted', async () => {
+    // Read 1 = approve's initial read; read 2 = the pre-post re-read. A refused recalculation lands
+    // in between and strips share_basis (REFUTE H2's invalidation).
+    state.afterRecRead = (n) => { if (n === 1) (state.rec as Row).share_basis = null }
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: string }).error).toMatch(/changed while it was being approved.*share_basis/)
+    expect(chargesInsertSpy).not.toHaveBeenCalled()
+  })
+
+  it('crash recovery: the true-up is already posted, so the data drift is not re-checked and the status completes', async () => {
+    state.charges = [{ idempotency_key: `cam_true_up:${TENANT_LEASE_ID}:${YEAR}`, type: 'cam_true_up', amount: 500 }]
+    state.expenses.push({ id: 'e_2', property_id: PROPERTY_ID, expense_date: '2025-11-01', amount: 5000, recoverable: true })
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(200)
+    expect(state.rec?.status).toBe('billed')
+    expect(state.charges.filter((ch) => ch.type === 'cam_true_up')).toHaveLength(1)
+  })
+
+  it('fails closed (500, nothing posted) when the already-posted check errors', async () => {
+    state.chargesSelectError = { message: 'boom charges select' }
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(500)
+    expect(await res.text()).not.toContain('boom charges select')
+    expect(chargesInsertSpy).not.toHaveBeenCalled()
+  })
+
+  it('a current draft still approves (control)', async () => {
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(200)
+    expect(state.charges.filter((ch) => ch.type === 'cam_true_up')).toEqual([expect.objectContaining({ amount: 500 })])
+  })
+})
+
+describe('POST /api/cam/calculate: type and error-path hardening (REFUTE L1, L3, M6)', () => {
+  const BODY = { lease_id: TENANT_LEASE_ID, reconciliation_year: 2025 }
+
+  it('L1: CAM estimate amounts arriving as NUMERIC strings are summed as money, not concatenated', async () => {
+    state.camEstimateCharges = [{ amount: '60.10' as unknown as number }, { amount: '39.90' as unknown as number }]
+    const res = await calculate(BODY)
+    expect(res.status).toBe(200)
+    const json = await res.json() as { data: Row }
+    expect(json.data.estimated_cam_paid).toBe(100)
+    expect(json.data.true_up_amount).toBe(100) // $200 owed - $100 paid
+  })
+
+  it('L3: a base year that is not an integer year is refused (422), not billed as already passed', async () => {
+    state.leaseBaseYear = 'abc' as unknown as number
+    state.leaseBaseAmount = 9000
+    const res = await calculate(BODY)
+    expect(res.status).toBe(422)
+    expect(((await res.json()) as { error: string }).error).toMatch(/not a calendar year/)
+    expectRefusedNotPriced()
+  })
+
+  it('M6: a plain Error from the true-up math is a 400 that still invalidates the existing draft', async () => {
+    state.rec = freshRec({ lease_id: TENANT_LEASE_ID })
+    faults.trueUpThrowsPlainError = true
+    const res = await calculate(BODY)
+    expect(res.status).toBe(400)
+    expectRefusedNotPriced()
+    expect(state.rec?.share_basis).toBeNull()
   })
 })
