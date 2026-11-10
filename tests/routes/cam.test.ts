@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { createApp } from '../../server/index'
 import { pgTable } from '../fixtures/pg-table'
+import type * as CamLib from '../../server/lib/cam'
 
 // ---------------------------------------------------------------------------
 // Bypass admin auth (same pattern as tests/routes/notices.test.ts) — this
@@ -31,6 +32,21 @@ vi.mock('../../server/middleware/admin-auth', () => ({
 // ---------------------------------------------------------------------------
 const mockFrom = vi.hoisted(() => vi.fn())
 vi.mock('@supabase/supabase-js', () => ({ createClient: () => ({ from: mockFrom }) }))
+
+// REFUTE M6 (2026-11-10): calculateCAMTrueUp's plain-Error throws (share outside 0-1, negative SF)
+// are guarded upstream and unreachable with valid mock data, so this flag forces one to prove the
+// generic-error path in /calculate still invalidates the stale draft.
+const faults = vi.hoisted(() => ({ trueUpThrowsPlainError: false }))
+vi.mock('../../server/lib/cam', async (importOriginal) => {
+  const actual = await importOriginal<typeof CamLib>()
+  return {
+    ...actual,
+    calculateCAMTrueUp: (...args: Parameters<typeof actual.calculateCAMTrueUp>) => {
+      if (faults.trueUpThrowsPlainError) throw new Error('tenant share must be a fraction between 0 and 1')
+      return actual.calculateCAMTrueUp(...args)
+    },
+  }
+})
 
 type Row = Record<string, unknown>
 type PgError = { code?: string; message: string }
@@ -79,6 +95,9 @@ const state = {
   leaseSelectError: null as PgError | null,
   charges: [] as Row[],
   chargesInsertError: null as PgError | null,
+  chargesSelectError: null as PgError | null,
+  recReads: 0,
+  afterRecRead: null as ((n: number) => void) | null,
   reconciliationUpdateError: null as PgError | null,
   camInsertError: null as PgError | null,
   listReconciliations: [] as Row[],
@@ -137,7 +156,13 @@ function installDbMock() {
                 if (!matchesAll(state.rec, predicates)) {
                   return { data: null, error: { message: 'not found', code: 'PGRST116' } }
                 }
-                return { data: state.rec, error: null }
+                // A COPY, like a real query result: approve's first read and its pre-post re-read
+                // (REFUTE D1) must be able to differ. afterRecRead simulates a concurrent write
+                // landing between the two reads.
+                const snapshot = { ...(state.rec as Row) }
+                state.recReads += 1
+                state.afterRecRead?.(state.recReads)
+                return { data: snapshot, error: null }
               }),
               maybeSingle: vi.fn().mockImplementation(async () => {
                 if (state.recSelectError) return { data: null, error: state.recSelectError }
@@ -224,7 +249,16 @@ function installDbMock() {
         // OI-278 / migration 0016: the `.is('voided_at', null)` link is applied for real — a voided
         // estimate row must not count as CAM already paid (it would understate the true-up).
         select: vi.fn().mockReturnValue({
-          eq: vi.fn().mockReturnValue({
+          eq: vi.fn().mockImplementation((firstCol: string, firstVal: unknown) => firstCol === 'idempotency_key'
+            // /:id/approve's already-posted check (REFUTE D1/D2 crash-recovery path).
+            ? {
+                limit: vi.fn().mockImplementation(async () => (
+                  state.chargesSelectError
+                    ? { data: null, error: state.chargesSelectError }
+                    : { data: state.charges.filter((ch) => ch.idempotency_key === firstVal).map((ch) => ({ amount: ch.amount, voided_at: ch.voided_at ?? null, type: ch.type, lease_id: ch.lease_id })), error: null }
+                )),
+              }
+            : {
             eq: vi.fn().mockReturnValue({
               is: vi.fn().mockImplementation((col: string, val: unknown) => ({
                 gte: vi.fn().mockReturnValue({
@@ -294,6 +328,12 @@ function freshRec(overrides: Partial<Row> = {}): Row {
     status: 'draft',
     // 0021: drafts priced on the building-RSF basis carry a share_basis (a NULL one is pre-0021).
     share_basis: 'premises_rsf_over_denominator',
+    // What /approve's recompute yields under APPROVE_FIXTURE: 2% of a $25,000 pool, nothing paid.
+    total_property_recoverable_expenses: 25000,
+    tenant_pro_rata_share_pct: 0.02,
+    estimated_cam_paid: 0,
+    actual_cam_owed: 500,
+    recovery_basis: 'full_pro_rata',
     ...overrides,
   }
 }
@@ -325,6 +365,10 @@ beforeEach(() => {
   state.leaseSelectError = null
   state.charges = []
   state.chargesInsertError = null
+  state.chargesSelectError = null
+  state.recReads = 0
+  state.afterRecRead = null
+  faults.trueUpThrowsPlainError = false
   state.reconciliationUpdateError = null
   state.camInsertError = null
   state.listReconciliations = []
@@ -345,7 +389,18 @@ function expectRefusedNotPriced() {
 // ---------------------------------------------------------------------------
 // POST /api/cam/:id/approve — atomic approval (OI-046)
 // ---------------------------------------------------------------------------
+// /approve recomputes before posting (REFUTE D1/D2): a $25,000 2025 pool makes the tenant's 2% share
+// $500, so the default freshRec() draft is current.
+// The default draft belongs to a dummy lease (so /calculate tests see "no existing row"); approve
+// tests re-point it at TENANT_LEASE_ID, the lease the mocked DB can actually price.
+function approveFixture() {
+  state.expenses = [{ id: 'e_1', property_id: PROPERTY_ID, expense_date: '2025-06-01', amount: 25000, recoverable: true }]
+  state.rec = freshRec({ lease_id: TENANT_LEASE_ID })
+}
+
 describe('POST /api/cam/:id/approve', () => {
+  beforeEach(approveFixture)
+
   it('returns 404 when the reconciliation does not exist', async () => {
     state.rec = null
     const res = await approve('nope')
@@ -385,7 +440,12 @@ describe('POST /api/cam/:id/approve', () => {
   // that won the race) is an idempotent no-op, not an error: the status
   // update still runs and the call still reports success.
   it('treats a 23505 on the true-up insert as an idempotent no-op, not an error', async () => {
-    state.chargesInsertError = { code: '23505', message: 'duplicate key value violates unique constraint "charges_idempotency_key_key"' }
+    // A concurrent approve posts the same true-up after this request's already-posted check (read 2 =
+    // the pre-post re-read), so this request's insert genuinely hits the unique key (23505). REFUTE
+    // F2: the status completes because the stored charge equals this draft's true-up.
+    state.afterRecRead = (n) => {
+      if (n === 2) state.charges.push({ idempotency_key: `cam_true_up:${TENANT_LEASE_ID}:${YEAR}`, type: 'cam_true_up', lease_id: TENANT_LEASE_ID, amount: 500 })
+    }
 
     const res = await approve(REC_ID)
     expect(res.status).toBe(200)
@@ -401,12 +461,14 @@ describe('POST /api/cam/:id/approve', () => {
     const res = await approve(REC_ID)
     expect(res.status).toBe(200)
     expect(chargesInsertSpy).toHaveBeenCalledWith(
-      expect.objectContaining({ idempotency_key: `cam_true_up:${LEASE_ID}:${YEAR}` })
+      expect.objectContaining({ idempotency_key: `cam_true_up:${TENANT_LEASE_ID}:${YEAR}` })
     )
   })
 
   it('applies the same conditional-update guard to the negative (credit) branch — no double-billing race', async () => {
-    state.rec = freshRec({ true_up_amount: -75 })
+    // $575 of estimates paid against $500 owed: a $75 credit that matches the live recompute.
+    state.camEstimateCharges = [{ amount: 575 }]
+    state.rec = freshRec({ lease_id: TENANT_LEASE_ID, true_up_amount: -75, estimated_cam_paid: 575 })
 
     const res1 = await approve(REC_ID)
     expect(res1.status).toBe(200)
@@ -1096,6 +1158,7 @@ describe('POST /api/cam/:id/approve: pre-0021 drafts (leased-SF basis) are not b
   })
 
   it('a recalculated draft (share_basis set) still approves normally', async () => {
+    approveFixture()
     const res = await approve(REC_ID)
     expect(res.status).toBe(200)
     expect(chargesInsertSpy).toHaveBeenCalledTimes(1)
@@ -1259,5 +1322,273 @@ describe('a refused recalculation invalidates the previous draft (REFUTE H2)', (
     const res = await calculate(BODY)
     expect(res.status).toBe(500)
     expect(await res.text()).not.toContain('boom update')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// REFUTE follow-ups (2026-11-10): D1 approve race, D2 stale drafts, L1 string amounts, L3 base year,
+// M6 generic-error invalidation.
+// ---------------------------------------------------------------------------
+describe('POST /api/cam/:id/approve recomputes before posting (REFUTE D1/D2)', () => {
+  beforeEach(approveFixture)
+
+  it('an expense posted after the draft was calculated: 409 stale, nothing posted, row stays a draft', async () => {
+    state.expenses.push({ id: 'e_2', property_id: PROPERTY_ID, expense_date: '2025-11-01', amount: 5000, recoverable: true })
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: string }).error).toMatch(/stale.*true_up_amount 500 -> 600/)
+    expect(chargesInsertSpy).not.toHaveBeenCalled()
+    expect(state.rec?.status).toBe('draft')
+  })
+
+  it('a lease edited to a base year with no amount after the draft: 409 (recalculation now refused), nothing posted', async () => {
+    state.leaseBaseYear = 2024
+    state.leaseBaseAmount = null
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: string }).error).toMatch(/stale: recalculating it now is refused/)
+    expect(chargesInsertSpy).not.toHaveBeenCalled()
+  })
+
+  it('the property RSF corrected after the draft: 409 on the changed share, nothing posted', async () => {
+    state.denominatorRSF = 100000 // 1,000 / 100,000 = 1%, not the draft's 2%
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(409)
+    expect(chargesInsertSpy).not.toHaveBeenCalled()
+  })
+
+  it('a concurrent write between the recompute and the post (D1): 409, nothing posted', async () => {
+    // Read 1 = approve's initial read; read 2 = the pre-post re-read. A refused recalculation lands
+    // in between and strips share_basis (REFUTE H2's invalidation).
+    state.afterRecRead = (n) => { if (n === 1) (state.rec as Row).share_basis = null }
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: string }).error).toMatch(/changed while it was being approved.*share_basis/)
+    expect(chargesInsertSpy).not.toHaveBeenCalled()
+  })
+
+  it('crash recovery: the true-up is already posted, so the data drift is not re-checked and the status completes', async () => {
+    state.charges = [{ idempotency_key: `cam_true_up:${TENANT_LEASE_ID}:${YEAR}`, type: 'cam_true_up', lease_id: TENANT_LEASE_ID, amount: 500 }]
+    state.expenses.push({ id: 'e_2', property_id: PROPERTY_ID, expense_date: '2025-11-01', amount: 5000, recoverable: true })
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(200)
+    expect(state.rec?.status).toBe('billed')
+    expect(state.charges.filter((ch) => ch.type === 'cam_true_up')).toHaveLength(1)
+  })
+
+  it('fails closed (500, nothing posted) when the already-posted check errors', async () => {
+    state.chargesSelectError = { message: 'boom charges select' }
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(500)
+    expect(await res.text()).not.toContain('boom charges select')
+    expect(chargesInsertSpy).not.toHaveBeenCalled()
+  })
+
+  it('a current draft still approves (control)', async () => {
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(200)
+    expect(state.charges.filter((ch) => ch.type === 'cam_true_up')).toEqual([expect.objectContaining({ amount: 500 })])
+  })
+})
+
+describe('POST /api/cam/calculate: type and error-path hardening (REFUTE L1, L3, M6)', () => {
+  const BODY = { lease_id: TENANT_LEASE_ID, reconciliation_year: 2025 }
+
+  it('L1: CAM estimate amounts arriving as NUMERIC strings are summed as money, not concatenated', async () => {
+    state.camEstimateCharges = [{ amount: '60.10' as unknown as number }, { amount: '39.90' as unknown as number }]
+    const res = await calculate(BODY)
+    expect(res.status).toBe(200)
+    const json = await res.json() as { data: Row }
+    expect(json.data.estimated_cam_paid).toBe(100)
+    expect(json.data.true_up_amount).toBe(100) // $200 owed - $100 paid
+  })
+
+  it('L3: a base year that is not an integer year is refused (422), not billed as already passed', async () => {
+    state.leaseBaseYear = 'abc' as unknown as number
+    state.leaseBaseAmount = 9000
+    const res = await calculate(BODY)
+    expect(res.status).toBe(422)
+    expect(((await res.json()) as { error: string }).error).toMatch(/not a calendar year/)
+    expectRefusedNotPriced()
+  })
+
+  it('M6: a plain Error from the true-up math is a 400 that still invalidates the existing draft', async () => {
+    state.rec = freshRec({ lease_id: TENANT_LEASE_ID })
+    faults.trueUpThrowsPlainError = true
+    const res = await calculate(BODY)
+    expect(res.status).toBe(400)
+    expectRefusedNotPriced()
+    expect(state.rec?.share_basis).toBeNull()
+  })
+})
+
+describe('approve gate, REFUTE round 2 (2026-11-10): isolated drift, billed rows, compare-and-swap', () => {
+  beforeEach(approveFixture)
+
+  it('D3: a share-only change (true-up unchanged) is still refused', async () => {
+    // Empty pool: owed is $0 whatever the share, so the true-up stays -$100 while the share moves.
+    state.expenses = []
+    state.camEstimateCharges = [{ amount: 100 }]
+    state.rec = freshRec({
+      lease_id: TENANT_LEASE_ID, total_property_recoverable_expenses: 0, estimated_cam_paid: 100,
+      actual_cam_owed: 0, true_up_amount: -100,
+    })
+    state.denominatorRSF = 100000 // 2% -> 1%
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: string }).error).toMatch(/tenant_pro_rata_share_pct 0\.02 -> 0\.01/)
+    expect(state.rec?.status).toBe('draft')
+  })
+
+  it('D3: owed and paid moving together (true-up unchanged) is still refused', async () => {
+    state.expenses.push({ id: 'e_2', property_id: PROPERTY_ID, expense_date: '2025-11-01', amount: 5000, recoverable: true })
+    state.camEstimateCharges = [{ amount: 100 }] // +$100 owed, +$100 paid: true-up still $500
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: string }).error).toMatch(/actual_cam_owed 500 -> 600/)
+    expect(chargesInsertSpy).not.toHaveBeenCalled()
+  })
+
+  it('D2: a billed row posts nothing, even after its charge was deleted', async () => {
+    state.rec = freshRec({ lease_id: TENANT_LEASE_ID, status: 'billed' })
+    state.charges = [] // the true-up charge was deleted via DELETE /charges/:id
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(400)
+    expect(((await res.json()) as { error: string }).error).toBe('already billed')
+    expect(chargesInsertSpy).not.toHaveBeenCalled()
+  })
+
+  it('D1: a change landing after the pre-post re-read is caught by the status compare-and-swap, loudly', async () => {
+    // Read 1 = initial, read 2 = pre-post re-read; the invalidation lands right after read 2.
+    state.afterRecRead = (n) => { if (n === 2) (state.rec as Row).share_basis = null }
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: string }).error).toMatch(/NOT marked billed.*true-up charge of 500\.00 is posted.*delete it/)
+    expect(state.rec?.status).toBe('draft')
+  })
+
+  it('D1 (credit): the same compare-and-swap guards the credit branch; nothing was posted', async () => {
+    state.camEstimateCharges = [{ amount: 575 }]
+    state.rec = freshRec({ lease_id: TENANT_LEASE_ID, true_up_amount: -75, estimated_cam_paid: 575 })
+    state.afterRecRead = (n) => { if (n === 2) (state.rec as Row).true_up_amount = -80 }
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: string }).error).toMatch(/No charge was posted/)
+    expect(state.rec?.status).toBe('draft')
+  })
+})
+
+describe('approve with a true-up already on the ledger (REFUTE F2, 2026-11-10)', () => {
+  beforeEach(approveFixture)
+  const KEY = () => `cam_true_up:${TENANT_LEASE_ID}:${YEAR}`
+
+  it('crash, then a recalculation to a DIFFERENT figure: 409 naming both, not billed, no second charge', async () => {
+    state.charges = [{ idempotency_key: KEY(), type: 'cam_true_up', lease_id: TENANT_LEASE_ID, amount: 500 }]
+    state.rec = freshRec({ lease_id: TENANT_LEASE_ID, true_up_amount: 600, actual_cam_owed: 600, total_property_recoverable_expenses: 30000 })
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: string }).error).toMatch(/charge of 500\.00 is already posted.*now says 600\.00.*NOT marked billed/)
+    expect(state.rec?.status).toBe('draft')
+    expect(state.charges).toHaveLength(1)
+  })
+
+  it('a +500 charge is live and the draft became a credit: 409, never billed as "credit, not auto-posted"', async () => {
+    state.charges = [{ idempotency_key: KEY(), type: 'cam_true_up', lease_id: TENANT_LEASE_ID, amount: 500 }]
+    state.camEstimateCharges = [{ amount: 575 }]
+    state.rec = freshRec({ lease_id: TENANT_LEASE_ID, true_up_amount: -75, estimated_cam_paid: 575 })
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: string }).error).toMatch(/500\.00 is already posted.*-75\.00 \(a credit\)/)
+    expect(state.rec?.status).toBe('draft')
+  })
+
+  it('the 409 -> approve-again path from the old D1 fix no longer bills a mismatch', async () => {
+    // First approve: a change after the pre-post re-read -> 409, charge for 500 posted.
+    state.afterRecRead = (n) => { if (n === 2) (state.rec as Row).true_up_amount = 600 }
+    expect((await approve(REC_ID)).status).toBe(409)
+    state.afterRecRead = null
+    // Second approve on the 600 row: must not complete against the 500 charge.
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(409)
+    expect(state.rec?.status).toBe('draft')
+    expect(state.charges.filter((ch) => ch.type === 'cam_true_up')).toEqual([expect.objectContaining({ amount: 500 })])
+  })
+
+  it('a concurrent approval posted a DIFFERENT amount (insert hits 23505): 409, not billed', async () => {
+    state.afterRecRead = (n) => {
+      if (n === 2) state.charges.push({ idempotency_key: KEY(), type: 'cam_true_up', lease_id: TENANT_LEASE_ID, amount: 450 })
+    }
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: string }).error).toMatch(/concurrent approval posted.*does not match.*500\.00/)
+    expect(state.rec?.status).toBe('draft')
+    expect(state.charges).toEqual([expect.objectContaining({ amount: 450 })])
+  })
+
+  it('a voided true-up still holding the key: 409, nothing posted, not billed', async () => {
+    state.charges = [{ idempotency_key: KEY(), type: 'cam_true_up', lease_id: TENANT_LEASE_ID, amount: 500, voided_at: '2026-11-01T00:00:00Z' }]
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: string }).error).toMatch(/voided/)
+    expect(chargesInsertSpy).not.toHaveBeenCalled()
+    expect(state.rec?.status).toBe('draft')
+  })
+
+  it('crash recovery still completes when the posted charge equals the draft to the cent (string NUMERIC)', async () => {
+    state.charges = [{ idempotency_key: KEY(), type: 'cam_true_up', lease_id: TENANT_LEASE_ID, amount: '500.00' }]
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(200)
+    expect(state.rec?.status).toBe('billed')
+    expect(state.charges).toHaveLength(1)
+  })
+})
+
+describe('approve, REFUTE F3 (2026-11-10): balanced drafts, foreign key holders, the credit race', () => {
+  beforeEach(approveFixture)
+  const KEY = () => `cam_true_up:${TENANT_LEASE_ID}:${YEAR}`
+
+  it('a balanced draft with a live true-up charge on the ledger: 409 naming it, not "no true-up required"', async () => {
+    state.charges = [{ idempotency_key: KEY(), type: 'cam_true_up', lease_id: TENANT_LEASE_ID, amount: 500 }]
+    state.rec = freshRec({ lease_id: TENANT_LEASE_ID, true_up_amount: 0 })
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: string }).error).toMatch(/now balanced.*500\.00 is posted.*Delete/)
+  })
+
+  it('a balanced draft with nothing posted is still "no true-up required" (control)', async () => {
+    state.rec = freshRec({ lease_id: TENANT_LEASE_ID, true_up_amount: 0 })
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as { message: string }).message).toMatch(/No true-up required/)
+  })
+
+  it('a charge of another type (or lease) holding the true-up key is not accepted as the posted true-up', async () => {
+    state.charges = [{ idempotency_key: KEY(), type: 'other', lease_id: TENANT_LEASE_ID, amount: 500 }]
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: string }).error).toMatch(/Another charge already uses/)
+    expect(state.rec?.status).toBe('draft')
+  })
+
+  it('credit race: a positive true-up posted while the credit was being billed -> the row goes back to draft, 409', async () => {
+    state.camEstimateCharges = [{ amount: 575 }]
+    state.rec = freshRec({ lease_id: TENANT_LEASE_ID, true_up_amount: -75, estimated_cam_paid: 575 })
+    // A concurrent approval of the earlier +500 figures posts its charge right after this request's
+    // pre-post re-read (read 2), i.e. after its already-posted lookup.
+    state.afterRecRead = (n) => {
+      if (n === 2) state.charges.push({ idempotency_key: KEY(), type: 'cam_true_up', lease_id: TENANT_LEASE_ID, amount: 500 })
+    }
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: string }).error).toMatch(/credit was NOT kept as billed/)
+    expect(state.rec?.status).toBe('draft')
+  })
+
+  it('this request posted, but a concurrent approval billed the row first: 409 reporting OUR posting, not a bare 400', async () => {
+    // The row is billed by someone else between this request's re-read (read 2) and its status update.
+    state.afterRecRead = (n) => { if (n === 2) (state.rec as Row).status = 'billed' }
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: string }).error).toMatch(/This request posted a true-up charge of 500\.00/)
   })
 })
