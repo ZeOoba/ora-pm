@@ -1,4 +1,4 @@
--- 0024: B8 slice 1 — record each ledger account's QuickBooks Desktop account type.
+-- 0025: B8 slice 1 — record each ledger account's QuickBooks Desktop account type.
 --
 -- The chart-of-accounts importer (server/lib/qb-iif-accounts.ts, POST /api/gl/entities/:id/
 -- accounts/qb-iif) reads each LLC's QB chart from an IIF export. QB's type (BANK, AR, OCASSET,
@@ -10,7 +10,7 @@
 -- account_type, so an account can never be filed as a QB bank account yet post as an expense.
 -- NULL stays allowed for accounts created before this slice or by the JSON accounts API.
 --
--- ORDERING: purely additive (one nullable column + one CHECK). Requires 0023. Re-runnable:
+-- ORDERING: purely additive (one nullable column + one CHECK). Requires 0023 (independent of 0024). Re-runnable:
 -- ADD COLUMN IF NOT EXISTS, and DROP CONSTRAINT IF EXISTS + ADD for the check.
 -- Privileges: unchanged (column privileges follow 0023's table grants and revokes).
 

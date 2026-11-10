@@ -44,6 +44,17 @@ chargesRouter.post('/', async (c) => {
   const raw = await c.req.json()
   const parsed = ChargeInsertSchema.safeParse({ ...raw, source: 'manual' })
   if (!parsed.success) return c.json({ error: parsed.error.flatten().fieldErrors }, 422)
+  // CAM true-ups are posted ONLY by POST /cam/:id/approve, through approve_cam_reconciliation()
+  // (migration 0024), which keys them cam_true_up:<lease>:<year> and bills the reconciliation in the
+  // same transaction. A hand-posted cam_true_up (any key) is invisible to that check, so approving the
+  // draft would post a second true-up (a double charge) or bill a credit while it is live; a charge
+  // holding a reserved cam_true_up: key blocks the real one. Refuse both (REFUTE 0024, C1b).
+  if (parsed.data.type === 'cam_true_up' || parsed.data.idempotency_key?.startsWith('cam_true_up:')) {
+    return c.json({
+      error: 'CAM true-up charges are posted only by approving the CAM reconciliation (CAM page, Approve & Bill). '
+        + 'Post an adjustment as type "other" instead.',
+    }, 422)
+  }
   const idempotencyKey = parsed.data.idempotency_key ?? `manual:${crypto.randomUUID()}`
   const { data, error } = await db
     .from('charges')

@@ -31,7 +31,7 @@ ALTER ROLE service_role BYPASSRLS;
 SQL
 
 # Apply twice: the migration must be re-runnable.
-for m in supabase/migrations/0023_gl_core.sql supabase/migrations/0024_gl_qb_account_type.sql; do
+for m in supabase/migrations/0023_gl_core.sql supabase/migrations/0025_gl_qb_account_type.sql; do
   psql "$GL_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f "$m"
   psql "$GL_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f "$m"
 done

@@ -1,14 +1,14 @@
-// B8 slice 1 (supabase/migrations/0024_gl_qb_account_type.sql): QB account type on gl_accounts,
+// B8 slice 1 (supabase/migrations/0025_gl_qb_account_type.sql): QB account type on gl_accounts,
 // with a CHECK that it agrees with the ledger account_type. Runs on the real migration chain.
 import { describe, it, expect, beforeEach } from 'vitest'
 import { freshMigratedDb, migrationFiles, readMigration, type MigratedDb } from '../fixtures/pg-migrations'
 import { migrationTouchesFinancialTables } from '../../scripts/check-refute-required'
 import { QB_ACCOUNT_TYPES } from '../../server/lib/qb-iif-accounts'
 
-const FILE = '0024_gl_qb_account_type.sql'
+const FILE = '0025_gl_qb_account_type.sql'
 const E1 = '00000000-0000-4000-8000-0000000000e1'
 
-describe('migration 0024 — gl_accounts.qb_account_type', () => {
+describe('migration 0025 — gl_accounts.qb_account_type', () => {
   let db: MigratedDb
   beforeEach(() => {
     db = freshMigratedDb()
@@ -17,8 +17,8 @@ describe('migration 0024 — gl_accounts.qb_account_type', () => {
   const ins = (name: string, type: string, qb: string | null) =>
     db.none(`INSERT INTO gl_accounts (entity_id, qb_name, account_type, qb_account_type) VALUES ('${E1}', '${name}', '${type}', ${qb === null ? 'NULL' : `'${qb}'`})`)
 
-  it('ships as the only 0024 migration', () => {
-    expect(migrationFiles().filter((f) => f.startsWith('0024_'))).toEqual([FILE])
+  it('ships as the only 0025 migration', () => {
+    expect(migrationFiles().filter((f) => f.startsWith('0025_'))).toEqual([FILE])
   })
 
   it('accepts every QB type with its matching ledger type, and NULL', () => {
