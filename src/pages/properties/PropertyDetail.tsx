@@ -142,6 +142,7 @@ export function PropertyDetail() {
                       <span className="capitalize">{data.property_type}</span>
                     </DetailRow>
                     <DetailRow label="Total SF">{formatSF(data.total_sf)}</DetailRow>
+                    <DetailRow label="CAM Denominator (RSF)">{data.cam_denominator_rsf != null ? formatSF(data.cam_denominator_rsf) : '— (not entered)'}</DetailRow>
                     <DetailRow label="Entity LLC">{data.entity_llc ?? '—'}</DetailRow>
                     <DetailRow label="Units">{units.length}</DetailRow>
                     <DetailRow label="Occupied">{occupiedCount} of {units.length}</DetailRow>

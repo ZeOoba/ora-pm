@@ -17,6 +17,7 @@ interface FormState {
   zip: string
   property_type: PropertyType
   total_sf: string
+  cam_denominator_rsf: string
   entity_llc: string
   notes: string
 }
@@ -29,6 +30,7 @@ const EMPTY: FormState = {
   zip: '',
   property_type: 'industrial',
   total_sf: '',
+  cam_denominator_rsf: '',
   entity_llc: '',
   notes: '',
 }
@@ -80,6 +82,7 @@ export function PropertyForm() {
         zip: data.zip ?? '',
         property_type: data.property_type ?? 'industrial',
         total_sf: data.total_sf != null ? String(data.total_sf) : '',
+        cam_denominator_rsf: data.cam_denominator_rsf != null ? String(data.cam_denominator_rsf) : '',
         entity_llc: data.entity_llc ?? '',
         notes: data.notes ?? '',
       })
@@ -118,6 +121,7 @@ export function PropertyForm() {
       zip: form.zip.trim() || null,
       property_type: form.property_type,
       total_sf: form.total_sf === '' ? null : Number(form.total_sf),
+      cam_denominator_rsf: form.cam_denominator_rsf === '' ? null : Number(form.cam_denominator_rsf),
       entity_llc: form.entity_llc.trim() || null,
       notes: form.notes.trim() || null,
     })
@@ -203,6 +207,20 @@ export function PropertyForm() {
               value={form.total_sf}
               onChange={e => set('total_sf', e.target.value)}
               placeholder="e.g. 24000"
+              min={0}
+            />
+          </Field>
+
+          <Field
+            label="CAM Denominator (rentable SF)"
+            htmlFor="cam_denominator_rsf"
+            hint="Building or project rentable SF exactly as the lease form names it (Tenant's Proportionate Share denominator). Not the sum of unit SF."
+          >
+            <NumberInput
+              id="cam_denominator_rsf"
+              value={form.cam_denominator_rsf}
+              onChange={e => set('cam_denominator_rsf', e.target.value)}
+              placeholder="e.g. 31200"
               min={0}
             />
           </Field>
