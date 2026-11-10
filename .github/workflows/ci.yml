@@ -35,6 +35,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Invariant 3 pre-push gate (scripts/prepush_confidential_scan.py): end-to-end tests that
+      # run real `git push`es through the shipped shim. Stdlib Python only.
+      - name: Pre-push confidentiality gate tests
+        run: python3 scripts/test_prepush_confidential_scan.py
+
       - name: Type check
         run: npm run typecheck
 
