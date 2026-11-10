@@ -317,6 +317,21 @@ describe('POST /api/charges — idempotency_key gap closure (OI-046)', () => {
     expect(inserted.idempotency_key).toBe('manual:client-retry-token-1')
   })
 
+  // REFUTE 0022 (C1b): a hand-posted cam_true_up is invisible to approve_cam_reconciliation(), which
+  // only sees the reserved cam_true_up:<lease>:<year> key: approving the draft would double-charge.
+  it.each([
+    ['type cam_true_up with a generated key', { ...VALID, type: 'cam_true_up' }],
+    ['type cam_true_up with a manual key', { ...VALID, type: 'cam_true_up', idempotency_key: 'manual:x' }],
+    ['a reserved cam_true_up: key on another type', { ...VALID, idempotency_key: `cam_true_up:${UUID_1}:2025` }],
+  ])('refuses %s (422, nothing inserted)', async (_name, body) => {
+    const spy = vi.fn()
+    mockFrom.mockReturnValue(tableMock(spy, VALID))
+    const res = await post('/api/charges', body)
+    expect(res.status).toBe(422)
+    expect(((await res.json()) as { error: string }).error).toMatch(/only by approving the CAM reconciliation/)
+    expect(spy).not.toHaveBeenCalled()
+  })
+
   it('two calls without a client key each get a distinct generated key (no accidental collision)', async () => {
     const spy = vi.fn()
     mockFrom.mockReturnValue(tableMock(spy, VALID))

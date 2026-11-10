@@ -621,59 +621,10 @@ camRouter.post('/calculate', async (c) => {
   return c.json({ data: retried[0], warnings })
 })
 
-// Approve CAM reconciliation — posts true-up charge to tenant ledger.
-//
-// OI-046 fix: this used to be a read-check-act sequence (select status, check
-// it's 'draft', insert the true-up charge, then update status) — two
-// concurrent approve calls could both observe 'draft' and both post a
-// true-up charge, double-billing the tenant. Both branches below now use an
-// insert-first, conditional-update-second pattern instead:
-//   1. Insert (idempotency-keyed per lease+year) — a concurrent/retried
-//      request collides on the unique key (23505) instead of posting twice.
-//   2. Conditionally transition status with `.eq('status', 'draft')` — an
-//      atomic compare-and-swap. Zero rows back means someone else already
-//      billed it; return 400 rather than treating that as an error.
-// Crash-safety: crash after insert but before the update leaves a posted
-// charge + status still 'draft' — safe to retry (insert hits 23505, update
-// completes). Crash before insert leaves nothing — safe to retry from
-// scratch. The ordering is load-bearing; do not swap it.
-/**
- * The approve status update matched zero rows. Either the row is no longer a draft (a concurrent
- * approve billed it: the existing 'already billed' answer) or it is still a draft whose figures
- * changed under this request (REFUTE D1). In the second case the true-up charge may already be
- * posted for the OLD amount, so say so loudly (409) instead of reporting success or a plain 400.
- */
-async function approveLostRace(
-  db: Db, c: Parameters<typeof dbError>[0], id: string, leaseId: string, idempotencyKey: string,
-  /** Amount THIS request inserted, when its own insert succeeded (REFUTE F3). */
-  postedByThisRequest: number | null,
-) {
-  const { data: now, error } = await db.from('cam_reconciliations').select('*').eq('id', id).single()
-  if (error || !now) return dbError(c, error ?? { message: 'reconciliation vanished' }, 'Failed to re-read the CAM reconciliation')
-  if ((now as { status?: string }).status !== 'draft') {
-    if (postedByThisRequest === null) return c.json({ error: 'already billed' }, 400)
-    // REFUTE F3: never hide our own posting behind a bare 'already billed'.
-    return c.json({
-      error: `This request posted a true-up charge of ${postedByThisRequest.toFixed(2)}, but a concurrent approval had `
-        + 'already billed the reconciliation. Review the lease ledger for a duplicate or mismatched true-up and delete '
-        + 'the wrong charge.',
-    }, 409)
-  }
-  // Report what is actually on the ledger, not what this request meant to post (REFUTE F2).
-  const posted = await loadPostedTrueUp(db, leaseId, idempotencyKey)
-  if (posted.kind === 'db_error') return dbError(c, posted.error, 'Failed to check for an already-posted true-up')
-  return c.json({
-    error: 'This draft was recalculated or invalidated while it was being approved, so it was NOT marked billed. '
-      + (posted.kind === 'live'
-        ? `A true-up charge of ${Number(posted.amount).toFixed(2)} is posted from the previous figures: delete it if the `
-          + 'new figures differ, then recalculate and approve again.'
-        : 'No charge was posted. Recalculate and approve again.'),
-  }, 409)
-}
-
 
 /** The true-up charge already holding this lease/year's idempotency key, if any. The key is unique
- *  across voided and live charges alike, so a voided one still blocks a new insert. */
+ *  across voided and live charges alike, so a voided one still blocks a new insert. Advisory here:
+ *  approve_cam_reconciliation() (migration 0022) re-reads and locks the holder before it bills. */
 async function loadPostedTrueUp(db: Db, leaseId: string, idempotencyKey: string): Promise<
   { kind: 'none' } | { kind: 'live'; amount: number | string } | { kind: 'voided' } | { kind: 'foreign' } | { kind: 'db_error'; error: PgErr }
 > {
@@ -691,6 +642,103 @@ async function loadPostedTrueUp(db: Db, leaseId: string, idempotencyKey: string)
   return row.voided_at ? { kind: 'voided' } : { kind: 'live', amount: row.amount }
 }
 
+/** What approve_cam_reconciliation() (migration 0022) returns. NUMERIC fields may arrive as strings. */
+type ApproveOutcome =
+  | { outcome: 'billed'; inserted: boolean; true_up_amount: number | string }
+  | { outcome: 'billed_credit'; true_up_amount: number | string }
+  | { outcome: 'balanced' }
+  | { outcome: 'not_found' }
+  | { outcome: 'not_draft'; status: string }
+  | { outcome: 'no_basis'; status: string }
+  | { outcome: 'changed'; true_up_amount: number | string; share_basis: string | null }
+  | { outcome: 'live_mismatch'; charge_amount: number | string; true_up_amount?: number | string }
+  | { outcome: 'voided' }
+  | { outcome: 'foreign' }
+
+type ApproveRefusal = Extract<ApproveOutcome, { outcome: 'not_found' | 'not_draft' | 'no_basis' | 'changed' | 'live_mismatch' | 'voided' | 'foreign' }>
+
+// CAM ruling 2026-11-08: a draft with no share_basis is not billable. Either it was saved before
+// migration 0021 (priced on the superseded leased-SF basis) or its last recalculation was refused and
+// /calculate invalidated it (REFUTE H2).
+const NO_BASIS_ERROR = 'This draft has no valid Proportionate Share basis: it was calculated on the superseded '
+  + 'leased-SF basis, or its last recalculation was refused. Fix the lease/property data and '
+  + 'recalculate it before approving.'
+
+/**
+ * The HTTP answer for every approve refusal, whether the route's advisory pre-check or the
+ * function's locked re-check found it. One table, so both stages say the same thing. Nothing was
+ * posted and the row was not billed in any of these cases.
+ */
+function approveRefusal(c: Parameters<typeof dbError>[0], o: ApproveRefusal, r: { true_up_amount: number | string; share_basis?: string | null; reconciliation_year: number }) {
+  const trueUp = Number(r.true_up_amount)
+  const year = r.reconciliation_year
+  switch (o.outcome) {
+    case 'not_found':
+      return c.json({ error: 'Not found' }, 404)
+    case 'not_draft':
+      return c.json({ error: 'already billed' }, 400)
+    case 'no_basis':
+      return c.json({ error: NO_BASIS_ERROR }, 409)
+    case 'changed': {
+      const drift = [
+        cents(o.true_up_amount) !== cents(r.true_up_amount) ? `true_up_amount ${String(r.true_up_amount)} -> ${String(o.true_up_amount)}` : null,
+        (o.share_basis ?? null) !== (r.share_basis ?? null) ? `share_basis ${String(r.share_basis)} -> ${String(o.share_basis)}` : null,
+      ].filter(Boolean).join(', ')
+      return c.json({
+        error: `This draft changed while it was being approved (${drift || 'figures'}). It was NOT marked billed. `
+          + 'No charge was posted. Reload and try again.',
+      }, 409)
+    }
+    case 'foreign':
+      return c.json({
+        error: `Another charge already uses this lease's ${year} CAM true-up key, so the true-up cannot `
+          + 'be posted. Resolve it manually before approving.',
+      }, 409)
+    case 'voided':
+      return c.json({
+        error: `A voided ${year} CAM true-up charge already holds this lease's true-up key, so a new one `
+          + 'cannot be posted. Resolve it manually before approving.',
+      }, 409)
+    case 'live_mismatch': {
+      const amount = Number(o.charge_amount).toFixed(2)
+      // REFUTE F3: a balanced draft never answers "no true-up required" over a live charge.
+      if (trueUp === 0) {
+        return c.json({
+          error: `This draft is now balanced, but a ${year} CAM true-up charge of ${amount} is posted from earlier `
+            + 'figures. Delete that charge.',
+        }, 409)
+      }
+      // REFUTE F2: never bill at figures that differ from the charge on the tenant's ledger, and never
+      // bill a credit while a +charge is live.
+      return c.json({
+        error: `A ${year} CAM true-up charge of ${amount} is already posted, but this `
+          + `draft now says ${trueUp.toFixed(2)}${trueUp < 0 ? ' (a credit)' : ''}. It was NOT marked billed. `
+          + (trueUp < 0
+            ? 'Delete that charge before approving the credit.'
+            : 'Delete that charge (or, if it is right, correct the data and recalculate) before approving.'),
+      }, 409)
+    }
+  }
+}
+
+// Approve CAM reconciliation: posts the true-up charge to the tenant ledger and marks the row billed.
+//
+// Two stages.
+//  1. The recompute-and-compare gate (REFUTE D1/D2, 2026-11-10). A draft is a snapshot: a lease,
+//     property, unit or expense edit after it was calculated leaves it priced on data that no longer
+//     holds. Before anything posts, the reconciliation is recomputed from the DB as it is NOW and the
+//     approval refused (409) unless it still matches the draft.
+//  2. approve_cam_reconciliation() (migration 0022): ONE Postgres transaction that locks the row,
+//     re-checks status / share_basis / the figures stage 1 priced, classifies whatever charge holds
+//     cam_true_up:<lease>:<year> (locking it), inserts the charge only for a positive true-up and sets
+//     the row billed. It replaced the insert-then-compare-and-swap sequence and its compensation
+//     (OI-046, REFUTE D1-F4): those were separate PostgREST calls, so two overlapping approves plus a
+//     recalculation could leave a credit billed while a +true-up was live, and a cancelled request,
+//     a DB error or a charge deleted mid-approve could leave that state silently. Every refusal from
+//     the function means nothing was posted and nothing changed. An RPC error is all-or-nothing but
+//     not necessarily nothing: an error raised in the function rolled everything back, while a
+//     connection lost after PostgREST committed means the row IS billed with its charge posted. The
+//     500 says the result is unknown; reloading shows which (a retry answers "already billed").
 camRouter.post('/:id/approve', async (c) => {
   const db = getDb(c.env)
   const id = c.req.param('id')
@@ -702,78 +750,29 @@ camRouter.post('/:id/approve', async (c) => {
 
   if (recErr || !rec) return c.json({ error: 'Not found' }, 404)
 
-  const r = rec as { true_up_amount: number; lease_id: string; reconciliation_year: number; share_basis?: string | null; status?: string }
-  // CAM ruling 2026-11-08: a draft with no share_basis is not billable. Either it was saved before
-  // migration 0021 (priced on the superseded leased-SF denominator) or its last recalculation was
-  // refused and /calculate invalidated it (REFUTE H2). Billed/collected rows are unaffected (the
-  // conditional update below rejects them).
-  if (r.status === 'draft' && (r.share_basis === null || r.share_basis === undefined)) {
-    return c.json({
-      error: 'This draft has no valid Proportionate Share basis: it was calculated on the superseded '
-        + 'leased-SF basis, or its last recalculation was refused. Fix the lease/property data and '
-        + 'recalculate it before approving.',
-    }, 409)
-  }
-  // REFUTE D2 (2026-11-10, pre-existing): a billed/collected row used to reach the charge insert
-  // before the conditional update rejected it. A cam_true_up charge is source 'manual' and can be
-  // deleted through DELETE /charges/:id, after which a repeat approve on the billed row re-posted a
-  // fresh charge and then answered "already billed". Only a draft may post anything.
-  if (r.status !== undefined && r.status !== 'draft') return c.json({ error: 'already billed' }, 400)
+  const r = rec as { true_up_amount: number | string; lease_id: string; reconciliation_year: number; share_basis?: string | null; status?: string }
+  // Cheap early answers; the function re-checks both under the row lock.
+  if (r.status === 'draft' && (r.share_basis === null || r.share_basis === undefined)) return approveRefusal(c, { outcome: 'no_basis', status: 'draft' }, r)
+  // REFUTE D2: only a draft may post anything (a billed row whose charge was deleted must not re-post).
+  if (r.status !== undefined && r.status !== 'draft') return approveRefusal(c, { outcome: 'not_draft', status: r.status }, r)
   const trueUp = Number(r.true_up_amount)
 
-  // REFUTE D1/D2 (2026-11-10): a draft is a snapshot. A lease, property, unit or expense edit after
-  // it was calculated (base year added, RSF corrected, an expense posted late) leaves it priced on
-  // data that no longer holds, and nothing else invalidates it. Before posting anything, recompute
-  // the reconciliation from the DB as it is NOW and refuse (409) unless it still matches the draft.
-  // Crash recovery: if this draft's true-up charge is already posted (a crash after the insert,
-  // before the status update), skip the recompute and only complete the status transition — the
-  // money already moved, and the documented retry path must not get stuck on later data edits.
+  // Advisory look at the key holder (the function repeats it under lock): refuse early with the
+  // specific reason, and recognise crash recovery. A live charge equal to this draft's positive
+  // true-up was posted by the pre-0022 two-call code path, which could crash between the insert and
+  // the status update; the money already moved, so the recompute is skipped and the function only
+  // completes the status (after verifying that charge again under the lock).
   const idempotencyKey = `cam_true_up:${r.lease_id}:${r.reconciliation_year}`
   const posted = await loadPostedTrueUp(db, r.lease_id, idempotencyKey)
   if (posted.kind === 'db_error') return dbError(c, posted.error, 'Failed to check for an already-posted true-up')
-  if (posted.kind === 'foreign') {
-    return c.json({
-      error: `Another charge already uses this lease's ${r.reconciliation_year} CAM true-up key, so the true-up cannot `
-        + 'be posted. Resolve it manually before approving.',
-    }, 409)
+  if (posted.kind === 'foreign') return approveRefusal(c, { outcome: 'foreign' }, r)
+  if (posted.kind === 'voided') return approveRefusal(c, { outcome: 'voided' }, r)
+  if (posted.kind === 'live' && !(trueUp > 0 && cents(posted.amount) === cents(trueUp))) {
+    return approveRefusal(c, { outcome: 'live_mismatch', charge_amount: posted.amount }, r)
   }
-  // REFUTE F3: a balanced draft used to answer "no true-up required" before this lookup, hiding a
-  // live charge posted from earlier figures. Only a balanced draft with nothing posted is balanced.
-  if (trueUp === 0) {
-    if (posted.kind === 'live') {
-      return c.json({
-        error: `This draft is now balanced, but a ${r.reconciliation_year} CAM true-up charge of `
-          + `${Number(posted.amount).toFixed(2)} is posted from earlier figures. Delete that charge.`,
-      }, 409)
-    }
-    return c.json({ message: 'No true-up required (balanced)', true_up_amount: 0 })
-  }
-  // REFUTE F2 (2026-11-10): an already-posted charge used to skip every check, so a retry (or a
-  // recalculation between a crash and the retry) marked the row billed at figures that differ from
-  // the charge on the tenant's ledger, even a "credit, not auto-posted" while a +charge was live.
-  // Crash recovery now completes ONLY when the posted charge is live and equals this draft's
-  // true-up to the cent; anything else is a 409 naming both figures for a human to resolve.
-  if (posted.kind === 'voided') {
-    return c.json({
-      error: `A voided ${r.reconciliation_year} CAM true-up charge already holds this lease's true-up key, so a new one `
-        + 'cannot be posted. Resolve it manually before approving.',
-    }, 409)
-  }
-  if (posted.kind === 'live') {
-    if (!(trueUp > 0 && cents(posted.amount) === cents(trueUp))) {
-      return c.json({
-        error: `A ${r.reconciliation_year} CAM true-up charge of ${Number(posted.amount).toFixed(2)} is already posted, but this `
-          + `draft now says ${trueUp.toFixed(2)}${trueUp < 0 ? ' (a credit)' : ''}. It was NOT marked billed. `
-          + (trueUp < 0
-            ? 'Delete that charge before approving the credit.'
-            : 'Delete that charge (or, if it is right, correct the data and recalculate) before approving.'),
-      }, 409)
-    }
-  }
-  const alreadyPosted = posted.kind === 'live'
 
-  // Non-drafts were refused above (D2), so everything reaching here is a draft.
-  if (!alreadyPosted) {
+  // Stage 1. A balanced draft posts nothing and bills nothing, so it needs no recompute.
+  if (trueUp !== 0 && posted.kind === 'none') {
     const now = await computeReconciliation(db, r.lease_id, r.reconciliation_year)
     if (now.kind === 'db_error') return dbError(c, now.error, now.label)
     if (now.kind !== 'ok') {
@@ -784,128 +783,42 @@ camRouter.post('/:id/approve', async (c) => {
     if (mismatch) {
       return c.json({ error: `This draft is stale: the lease, property or expense data changed since it was calculated (${mismatch}). Recalculate it before approving.` }, 409)
     }
-    // D1: re-read the row immediately before posting, so a recalculation or a refused-recalculation
-    // invalidation that landed while the recompute ran is not billed on the old figures.
-    const { data: fresh, error: freshErr } = await db
-      .from('cam_reconciliations')
-      .select('*')
-      .eq('id', id)
-      .single()
-    if (freshErr || !fresh) return dbError(c, freshErr ?? { message: 'reconciliation vanished' }, 'Failed to re-read the CAM reconciliation')
-    const drift = draftMismatch(fresh as Record<string, unknown>, rec as Record<string, unknown>)
-    if (drift || (fresh as { status?: string }).status !== 'draft') {
-      return c.json({ error: `This draft changed while it was being approved (${drift ?? 'status'}). Reload and try again.` }, 409)
-    }
   }
 
-  const today = new Date().toISOString().slice(0, 10)
-
-  // KNOWN LIMITATION (Phase 1): A negative true-up (credit owed to tenant) is not
-  // auto-posted as a charge, because charges.amount has CHECK (amount >= 0) and the
-  // ar_ledger view would treat a posted "credit" charge as a DEBIT, overstating
-  // tenant AR. Credits must be reconciled manually until Phase 1.1 adds a proper
-  // credit mechanism (credit_amount column or separate credits table). This branch
-  // only transitions status — mirrored via the same conditional-update guard as the
-  // positive-true-up path below (no insert, so no idempotency key needed here).
-  if (trueUp < 0) {
-    const { data: updated, error: updateErr } = await db
-      .from('cam_reconciliations')
-      .update({
-        status: 'billed',
-        billed_date: today,
-        notes: `Credit of ${Math.abs(trueUp).toFixed(2)} owed to tenant — handle manually (Phase 1 limitation)`,
-      })
-      .eq('id', id)
-      .eq('status', 'draft')
-      // REFUTE D1: compare-and-swap on the figures this approval priced (see the positive path).
-      .eq('true_up_amount', r.true_up_amount)
-      .eq('share_basis', r.share_basis as string)
-      .select()
-
-    if (updateErr) return dbError(c, updateErr, 'Failed to approve CAM reconciliation')
-    if (!updated || updated.length === 0) return approveLostRace(db, c, id, r.lease_id, idempotencyKey, null)
-
-    // REFUTE F3: a concurrent approval of the row's earlier POSITIVE figures can post its charge after
-    // this request's lookup. Re-check now that the row is billed; if a charge appeared, put the row
-    // back to draft (only if it is still exactly what this request billed) and say so.
-    const after = await loadPostedTrueUp(db, r.lease_id, idempotencyKey)
-    if (after.kind === 'db_error') return dbError(c, after.error, 'Failed to re-check for a posted true-up')
-    if (after.kind !== 'none') {
-      const { error: revertErr } = await db
-        .from('cam_reconciliations')
-        .update({ status: 'draft', billed_date: null, notes: null })
-        .eq('id', id)
-        .eq('status', 'billed')
-        .eq('true_up_amount', r.true_up_amount)
-        .select()
-      if (revertErr) return dbError(c, revertErr, 'Failed to revert the CAM reconciliation to draft')
-      return c.json({
-        // REFUTE F4 (C7): only a live true-up can be deleted from the app; a voided or foreign key
-        // holder needs manual resolution.
-        error: after.kind === 'live'
-          ? `A true-up charge of ${Number(after.amount).toFixed(2)} was posted for this lease and year by a concurrent `
-            + 'approval while this credit was being approved. The credit was NOT kept as billed. Delete that charge, '
-            + 'then approve the credit again.'
-          : 'Another charge now holds this lease\'s CAM true-up key (it appeared while this credit was being approved). '
-            + 'The credit was NOT kept as billed. Resolve that charge manually before approving the credit.',
-      }, 409)
-    }
-
-    return c.json({
-      success: true,
-      true_up_amount: trueUp,
-      message: 'Credit owed to tenant — flagged for manual handling (not auto-posted)',
-    })
-  }
-
-  const { error: insertErr } = await db.from('charges').insert({
-    lease_id: r.lease_id,
-    charge_date: today,
-    due_date: today,
-    period_start: `${r.reconciliation_year}-01-01`,
-    period_end: `${r.reconciliation_year}-12-31`,
-    type: 'cam_true_up',
-    amount: Math.abs(trueUp),
-    description: `${r.reconciliation_year} CAM True-Up`,
-    source: 'manual',
-    idempotency_key: idempotencyKey,
+  // Stage 2. p_true_up_amount / p_share_basis are the figures stage 1 validated: a recalculation or
+  // invalidation that lands after the read above makes the function answer 'changed', not bill.
+  const { data, error } = await db.rpc('approve_cam_reconciliation', {
+    p_id: id,
+    p_true_up_amount: r.true_up_amount,
+    p_share_basis: r.share_basis,
+    p_today: new Date().toISOString().slice(0, 10),
   })
-
-  // 23505 = unique-constraint conflict on idempotency_key: this true-up was
-  // already posted by a concurrent/earlier approve call. Treat as an already-
-  // posted no-op and continue to the status update — do not re-insert, do not error.
-  if (insertErr && insertErr.code !== '23505') {
-    return dbError(c, insertErr, 'Failed to post CAM true-up charge')
+  if (error || !data) {
+    return dbError(c, error ?? { message: 'approve_cam_reconciliation returned no result' },
+      'Failed to approve CAM reconciliation: the result is unknown. Reload to see whether it was billed before retrying.')
   }
-  if (insertErr) {
-    // 23505: a concurrent approve posted it first. Same rule as crash recovery: only a live charge
-    // equal to this draft's true-up lets the status complete (REFUTE F2).
-    const raced = await loadPostedTrueUp(db, r.lease_id, idempotencyKey)
-    if (raced.kind === 'db_error') return dbError(c, raced.error, 'Failed to re-check the posted true-up')
-    if (raced.kind !== 'live' || cents(raced.amount) !== cents(trueUp)) {
-      return c.json({
-        error: `A concurrent approval posted a ${r.reconciliation_year} CAM true-up that does not match this draft's `
-          + `${trueUp.toFixed(2)}. It was NOT marked billed. Review the charge before approving again.`,
-      }, 409)
-    }
+  const o = data as ApproveOutcome
+  switch (o.outcome) {
+    case 'billed':
+      return c.json({ success: true, true_up_amount: trueUp })
+    case 'billed_credit':
+      // KNOWN LIMITATION (Phase 1): a negative true-up (credit owed to the tenant) is not posted as a
+      // charge (charges.amount CHECK >= 0, and ar_ledger would read a "credit" charge as a debit). The
+      // function bills the row with a "handle manually" note.
+      return c.json({ success: true, true_up_amount: trueUp, message: 'Credit owed to tenant — flagged for manual handling (not auto-posted)' })
+    case 'balanced':
+      return c.json({ message: 'No true-up required (balanced)', true_up_amount: 0 })
+    case 'not_found':
+    case 'not_draft':
+    case 'no_basis':
+    case 'changed':
+    case 'live_mismatch':
+    case 'voided':
+    case 'foreign':
+      return approveRefusal(c, o, r)
+    default:
+      // An outcome this code does not know (function and route out of step): the function has
+      // already committed whatever it did, so say it failed loudly rather than claim success.
+      return dbError(c, { message: `approve_cam_reconciliation returned unknown outcome ${String((o as { outcome?: unknown }).outcome)}` }, 'Failed to approve CAM reconciliation')
   }
-
-  const { data: updated, error: updateErr } = await db
-    .from('cam_reconciliations')
-    .update({ status: 'billed', billed_date: today })
-    .eq('id', id)
-    .eq('status', 'draft')
-    // REFUTE D1: compare-and-swap on the figures the posted charge was priced from. A recalculation
-    // or a refused-recalculation invalidation that lands between the pre-post re-read and here makes
-    // this match zero rows instead of marking billed a row whose figures no longer match the charge.
-    .eq('true_up_amount', r.true_up_amount)
-    .eq('share_basis', r.share_basis as string)
-    .select()
-
-  if (updateErr) return dbError(c, updateErr, 'Failed to approve CAM reconciliation')
-  if (!updated || updated.length === 0) {
-    return approveLostRace(db, c, id, r.lease_id, idempotencyKey, insertErr || alreadyPosted ? null : Math.abs(trueUp))
-  }
-
-  return c.json({ success: true, true_up_amount: trueUp })
 })
