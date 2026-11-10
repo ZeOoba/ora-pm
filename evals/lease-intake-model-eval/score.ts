@@ -37,11 +37,12 @@ function numericMatch(expected: number, got: unknown): boolean {
 }
 
 /** Score one model's extraction against one fixture's ground truth. Pure function. */
-export function scoreExtraction(fixture: LeaseFixture, extracted: ExtractedFields): FixtureScore {
+export function scoreExtraction(fixture: LeaseFixture, extracted: ExtractedFields, skip: readonly string[] = []): FixtureScore {
   const outcomes: FieldOutcome[] = []
   const scoredFields = [...EXACT_MATCH_FIELDS, ...NUMERIC_FIELDS] as const
 
   for (const field of scoredFields) {
+    if (skip.includes(field)) continue // not producible by this extractor (abstract mode: ti_allowance)
     const expected = fixture.groundTruth[field]
     const got = extracted[field]
     const expectedPresent = expected !== undefined

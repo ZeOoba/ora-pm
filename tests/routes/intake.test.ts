@@ -445,3 +445,100 @@ describe('egress is exactly the scanned text (REFUTE C1b, round 2)', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 })
+
+// ---------------------------------------------------------------------------
+// Lease abstraction v2 (mode: 'abstract') — same guards, structured-output egress, deep post-egress scrub.
+// ---------------------------------------------------------------------------
+describe("mode: 'abstract' (lease abstraction v2)", () => {
+  const LEASE_TEXT = 'Industrial lease. Tenant: Acme Logistics LLC. Base rent $4,500.00 per month. Renewal option on notice.'
+  const post = (pdfBytes: Uint8Array, extra: object = {}) => app().request('/intake/lease',
+    body({ filename: 'acme-lease.pdf', pdfBase64: toBase64(pdfBytes), tenant_id: 't', unit_id: 'u', mode: 'abstract', ...extra }), env)
+  // WIRE form (lease-abstract.ts: fact list, zero-or-more lists, 0 / "" sentinels).
+  const modelJson = (over: Record<string, unknown> = {}) => ({
+    facts: [{ field: 'tenant_legal_name', value: 'Acme Logistics LLC', page: 1, quote: 'Tenant: Acme Logistics LLC', confidence: 0.9 }],
+    rent_schedule: [], escalations: [], concessions: [], recurring_charges: [], late_fees: [], provisions: [],
+    ...over,
+  })
+  const abstractFetch = (payload: object, stop = 'end_turn') => vi.fn().mockResolvedValue({
+    ok: true,
+    json: async () => ({ stop_reason: stop, content: [{ type: 'text', text: JSON.stringify(payload) }] }),
+  })
+
+  it('rejects an unknown mode before any egress', async () => {
+    const fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock)
+    const res = await post(await buildTextPdf(LEASE_TEXT), { mode: 'full' })
+    expect(res.status).toBe(400)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('the PDF content confidentiality scan still blocks with NO egress', async () => {
+    const fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock)
+    const res = await post(await buildTextPdf('Confidential lease for the Zeta acquisition'))
+    expect(res.status).toBe(422)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('an image-only PDF still blocks with NO egress', async () => {
+    const fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock)
+    const res = await post(await buildImageOnlyPdf())
+    expect(res.status).toBe(422)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('egress is scanned text with structured outputs (no forced tool_choice, no PDF), and returns abstract + flags', async () => {
+    const fetchMock = abstractFetch(modelJson()); vi.stubGlobal('fetch', fetchMock)
+    const pdf = await buildTextPdf(LEASE_TEXT)
+    const res = await post(pdf)
+    expect(res.status).toBe(200)
+    const { raw } = sentBody(fetchMock)
+    const sent = JSON.parse(raw) as { output_config?: { format?: { type?: string } }; tool_choice?: unknown; messages: Array<{ content: Array<{ type: string }> }> }
+    expect(sent.output_config?.format?.type).toBe('json_schema')
+    expect(sent.tool_choice).toBeUndefined()
+    expect(sent.messages[0].content.every((b) => b.type === 'text')).toBe(true)
+    expect(raw).not.toContain(toBase64(pdf).slice(0, 40))
+    expect(raw).not.toMatch(/application\/pdf|"base64"/)
+    const json = await res.json() as { abstract: { tenant_legal_name: { value: string } }; flags: Array<{ severity: string }> }
+    expect(json.abstract.tenant_legal_name.value).toBe('Acme Logistics LLC')
+    expect(json.flags.some((f) => f.severity === 'block')).toBe(true) // no schedule/dates in this tiny lease
+  })
+
+  it('post-egress: any string anywhere in the abstract that hits the denylist is nulled and reported by path', async () => {
+    const leak = { category: 'other', summary: 'Tenant is an affiliate of Zeta Partners', notice_deadline: '',
+      exercise_window_start: '', exercise_window_end: '', page: 1, quote: 'Renewal option on notice', confidence: 0.5 }
+    vi.stubGlobal('fetch', abstractFetch(modelJson({ provisions: [leak] })))
+    const res = await post(await buildTextPdf(LEASE_TEXT))
+    expect(res.status).toBe(200)
+    const json = await res.json() as { abstract: { provisions: Array<{ summary: string | null }> }; warnings: string[] }
+    expect(json.abstract.provisions[0].summary).toBeNull()
+    expect(JSON.stringify(json)).not.toMatch(/zeta/i)
+    expect(json.warnings).toContain('"provisions[0].summary" was withheld by the confidentiality guard.')
+  })
+
+  it('a billing value withheld by the guard becomes a blocking flag (the earlier checks never saw the hole)', async () => {
+    const cam = { type: 'other', description: 'Zeta escrow', amount_monthly: 4500, effective_start: '2026-01-01', effective_end: '2026-12-31',
+      page: 1, quote: 'Base rent $4,500.00 per month', confidence: 0.5 }
+    vi.stubGlobal('fetch', abstractFetch(modelJson({ recurring_charges: [cam] })))
+    const res = await post(await buildTextPdf(LEASE_TEXT))
+    const json = await res.json() as { abstract: { recurring_charges: Array<{ description: string | null }> }; flags: Array<{ severity: string; path: string; message: string }> }
+    expect(json.abstract.recurring_charges[0].description).toBeNull()
+    expect(json.flags).toContainEqual(expect.objectContaining({ severity: 'block', path: 'recurring_charges[0].description' }))
+    expect(JSON.stringify(json)).not.toMatch(/zeta/i)
+  })
+
+  it('a refusal or truncated output is a 502 manual-entry error, never a partial abstract', async () => {
+    vi.stubGlobal('fetch', abstractFetch(modelJson(), 'refusal'))
+    expect((await post(await buildTextPdf(LEASE_TEXT))).status).toBe(502)
+    vi.stubGlobal('fetch', abstractFetch(modelJson(), 'max_tokens'))
+    const res = await post(await buildTextPdf(LEASE_TEXT))
+    expect(res.status).toBe(502)
+    expect(((await res.json()) as { error: string }).error).toMatch(/too long/)
+  })
+
+  it('omitting mode keeps the original 9-field response shape', async () => {
+    vi.stubGlobal('fetch', okFetch())
+    const res = await app().request('/intake/lease',
+      body({ filename: 'a.pdf', pdfBase64: toBase64(await buildTextPdf(LEASE_TEXT)), tenant_id: 't', unit_id: 'u' }), env)
+    expect(res.status).toBe(200)
+    expect(Object.keys(await res.json() as object).sort()).toEqual(['confidence', 'fields', 'warnings'])
+  })
+})

@@ -70,7 +70,7 @@ describe('check-refute-required — financial-source classification', () => {
   })
 
   it('exposes the financial path set with the expected membership', () => {
-    expect(FINANCIAL_SOURCE_PATHS.size).toBe(20)
+    expect(FINANCIAL_SOURCE_PATHS.size).toBe(21)
     for (const p of [
       'server/routes/cron.ts',
       'server/routes/stripe.ts',
@@ -83,6 +83,7 @@ describe('check-refute-required — financial-source classification', () => {
       'server/lib/cam.ts',
       'server/lib/billing.ts',
       'server/lib/rent-schedule.ts',
+      'server/lib/lease-abstract.ts',
       'scripts/backfill-rent-schedule.ts',
       'server/lib/schemas.ts',
       'server/lib/postgrest-paging.ts',

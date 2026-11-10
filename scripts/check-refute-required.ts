@@ -60,6 +60,9 @@ export const FINANCIAL_SOURCE_PATHS: ReadonlySet<string> = new Set([
   // Rent-schedule engine (lease abstraction Phase 2): per-day rent steps, concessions/waivers,
   // recurring lines and the CAM source rule that billing.ts posts from; escalation expansion.
   'server/lib/rent-schedule.ts',
+  // Lease abstraction v2 (Phase 3): the money/date fields and cross-checks a human approves into the
+  // rent schedule, plus the billing-engine dry run that gates approval.
+  'server/lib/lease-abstract.ts',
   // Backfill: writes the one-row rent schedule that moves an existing lease onto the engine.
   'scripts/backfill-rent-schedule.ts',
   // Zod schemas bounding charge / payment inserts and the payment-intent request id — a contract
