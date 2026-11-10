@@ -255,7 +255,7 @@ function installDbMock() {
                 limit: vi.fn().mockImplementation(async () => (
                   state.chargesSelectError
                     ? { data: null, error: state.chargesSelectError }
-                    : { data: state.charges.filter((ch) => ch.idempotency_key === firstVal).map((ch) => ({ amount: ch.amount, voided_at: ch.voided_at ?? null })), error: null }
+                    : { data: state.charges.filter((ch) => ch.idempotency_key === firstVal).map((ch) => ({ amount: ch.amount, voided_at: ch.voided_at ?? null, type: ch.type, lease_id: ch.lease_id })), error: null }
                 )),
               }
             : {
@@ -444,7 +444,7 @@ describe('POST /api/cam/:id/approve', () => {
     // the pre-post re-read), so this request's insert genuinely hits the unique key (23505). REFUTE
     // F2: the status completes because the stored charge equals this draft's true-up.
     state.afterRecRead = (n) => {
-      if (n === 2) state.charges.push({ idempotency_key: `cam_true_up:${TENANT_LEASE_ID}:${YEAR}`, type: 'cam_true_up', amount: 500 })
+      if (n === 2) state.charges.push({ idempotency_key: `cam_true_up:${TENANT_LEASE_ID}:${YEAR}`, type: 'cam_true_up', lease_id: TENANT_LEASE_ID, amount: 500 })
     }
 
     const res = await approve(REC_ID)
@@ -1368,7 +1368,7 @@ describe('POST /api/cam/:id/approve recomputes before posting (REFUTE D1/D2)', (
   })
 
   it('crash recovery: the true-up is already posted, so the data drift is not re-checked and the status completes', async () => {
-    state.charges = [{ idempotency_key: `cam_true_up:${TENANT_LEASE_ID}:${YEAR}`, type: 'cam_true_up', amount: 500 }]
+    state.charges = [{ idempotency_key: `cam_true_up:${TENANT_LEASE_ID}:${YEAR}`, type: 'cam_true_up', lease_id: TENANT_LEASE_ID, amount: 500 }]
     state.expenses.push({ id: 'e_2', property_id: PROPERTY_ID, expense_date: '2025-11-01', amount: 5000, recoverable: true })
     const res = await approve(REC_ID)
     expect(res.status).toBe(200)
@@ -1483,7 +1483,7 @@ describe('approve with a true-up already on the ledger (REFUTE F2, 2026-11-10)',
   const KEY = () => `cam_true_up:${TENANT_LEASE_ID}:${YEAR}`
 
   it('crash, then a recalculation to a DIFFERENT figure: 409 naming both, not billed, no second charge', async () => {
-    state.charges = [{ idempotency_key: KEY(), type: 'cam_true_up', amount: 500 }]
+    state.charges = [{ idempotency_key: KEY(), type: 'cam_true_up', lease_id: TENANT_LEASE_ID, amount: 500 }]
     state.rec = freshRec({ lease_id: TENANT_LEASE_ID, true_up_amount: 600, actual_cam_owed: 600, total_property_recoverable_expenses: 30000 })
     const res = await approve(REC_ID)
     expect(res.status).toBe(409)
@@ -1493,7 +1493,7 @@ describe('approve with a true-up already on the ledger (REFUTE F2, 2026-11-10)',
   })
 
   it('a +500 charge is live and the draft became a credit: 409, never billed as "credit, not auto-posted"', async () => {
-    state.charges = [{ idempotency_key: KEY(), type: 'cam_true_up', amount: 500 }]
+    state.charges = [{ idempotency_key: KEY(), type: 'cam_true_up', lease_id: TENANT_LEASE_ID, amount: 500 }]
     state.camEstimateCharges = [{ amount: 575 }]
     state.rec = freshRec({ lease_id: TENANT_LEASE_ID, true_up_amount: -75, estimated_cam_paid: 575 })
     const res = await approve(REC_ID)
@@ -1516,7 +1516,7 @@ describe('approve with a true-up already on the ledger (REFUTE F2, 2026-11-10)',
 
   it('a concurrent approval posted a DIFFERENT amount (insert hits 23505): 409, not billed', async () => {
     state.afterRecRead = (n) => {
-      if (n === 2) state.charges.push({ idempotency_key: KEY(), type: 'cam_true_up', amount: 450 })
+      if (n === 2) state.charges.push({ idempotency_key: KEY(), type: 'cam_true_up', lease_id: TENANT_LEASE_ID, amount: 450 })
     }
     const res = await approve(REC_ID)
     expect(res.status).toBe(409)
@@ -1526,7 +1526,7 @@ describe('approve with a true-up already on the ledger (REFUTE F2, 2026-11-10)',
   })
 
   it('a voided true-up still holding the key: 409, nothing posted, not billed', async () => {
-    state.charges = [{ idempotency_key: KEY(), type: 'cam_true_up', amount: 500, voided_at: '2026-11-01T00:00:00Z' }]
+    state.charges = [{ idempotency_key: KEY(), type: 'cam_true_up', lease_id: TENANT_LEASE_ID, amount: 500, voided_at: '2026-11-01T00:00:00Z' }]
     const res = await approve(REC_ID)
     expect(res.status).toBe(409)
     expect(((await res.json()) as { error: string }).error).toMatch(/voided/)
@@ -1535,10 +1535,60 @@ describe('approve with a true-up already on the ledger (REFUTE F2, 2026-11-10)',
   })
 
   it('crash recovery still completes when the posted charge equals the draft to the cent (string NUMERIC)', async () => {
-    state.charges = [{ idempotency_key: KEY(), type: 'cam_true_up', amount: '500.00' }]
+    state.charges = [{ idempotency_key: KEY(), type: 'cam_true_up', lease_id: TENANT_LEASE_ID, amount: '500.00' }]
     const res = await approve(REC_ID)
     expect(res.status).toBe(200)
     expect(state.rec?.status).toBe('billed')
     expect(state.charges).toHaveLength(1)
+  })
+})
+
+describe('approve, REFUTE F3 (2026-11-10): balanced drafts, foreign key holders, the credit race', () => {
+  beforeEach(approveFixture)
+  const KEY = () => `cam_true_up:${TENANT_LEASE_ID}:${YEAR}`
+
+  it('a balanced draft with a live true-up charge on the ledger: 409 naming it, not "no true-up required"', async () => {
+    state.charges = [{ idempotency_key: KEY(), type: 'cam_true_up', lease_id: TENANT_LEASE_ID, amount: 500 }]
+    state.rec = freshRec({ lease_id: TENANT_LEASE_ID, true_up_amount: 0 })
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: string }).error).toMatch(/now balanced.*500\.00 is posted.*Delete/)
+  })
+
+  it('a balanced draft with nothing posted is still "no true-up required" (control)', async () => {
+    state.rec = freshRec({ lease_id: TENANT_LEASE_ID, true_up_amount: 0 })
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as { message: string }).message).toMatch(/No true-up required/)
+  })
+
+  it('a charge of another type (or lease) holding the true-up key is not accepted as the posted true-up', async () => {
+    state.charges = [{ idempotency_key: KEY(), type: 'other', lease_id: TENANT_LEASE_ID, amount: 500 }]
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: string }).error).toMatch(/Another charge already uses/)
+    expect(state.rec?.status).toBe('draft')
+  })
+
+  it('credit race: a positive true-up posted while the credit was being billed -> the row goes back to draft, 409', async () => {
+    state.camEstimateCharges = [{ amount: 575 }]
+    state.rec = freshRec({ lease_id: TENANT_LEASE_ID, true_up_amount: -75, estimated_cam_paid: 575 })
+    // A concurrent approval of the earlier +500 figures posts its charge right after this request's
+    // pre-post re-read (read 2), i.e. after its already-posted lookup.
+    state.afterRecRead = (n) => {
+      if (n === 2) state.charges.push({ idempotency_key: KEY(), type: 'cam_true_up', lease_id: TENANT_LEASE_ID, amount: 500 })
+    }
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: string }).error).toMatch(/credit was NOT kept as billed/)
+    expect(state.rec?.status).toBe('draft')
+  })
+
+  it('this request posted, but a concurrent approval billed the row first: 409 reporting OUR posting, not a bare 400', async () => {
+    // The row is billed by someone else between this request's re-read (read 2) and its status update.
+    state.afterRecRead = (n) => { if (n === 2) (state.rec as Row).status = 'billed' }
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: string }).error).toMatch(/This request posted a true-up charge of 500\.00/)
   })
 })
