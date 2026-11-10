@@ -162,6 +162,10 @@ describe('GET /api/gl/trial-balance', () => {
   it('validates params', async () => {
     expect((await get('/api/gl/trial-balance?entity_id=x')).status).toBe(422)
     expect((await get(`/api/gl/trial-balance?entity_id=${E}&as_of=10/31/2026`)).status).toBe(422)
+    // impossible dates stop at the API instead of reaching Postgres as a 500 (REFUTE-2 N5)
+    expect((await get(`/api/gl/trial-balance?entity_id=${E}&as_of=2026-02-31`)).status).toBe(422)
+    expect((await get(`/api/gl/journal?entity_id=${E}&from=2026-02-30`)).status).toBe(422)
+    expect((await get(`/api/gl/journal?entity_id=${E}&to=2026-13-01`)).status).toBe(422)
   })
 })
 

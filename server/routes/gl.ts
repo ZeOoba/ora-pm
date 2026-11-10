@@ -14,7 +14,9 @@ import {
   PeriodLockSchema,
   canLockPeriods,
   glRuleMessage,
+  isRealIsoDate,
   isUuid,
+  ledgerToday,
   trialBalance,
   validateEntryLines,
   type TbAccount,
@@ -26,7 +28,6 @@ type Ctx = Context<{ Bindings: Env }>
 
 export const glRouter = new Hono<{ Bindings: Env }>()
 
-const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
 
 async function body(c: Ctx): Promise<unknown> {
   try {
@@ -131,7 +132,7 @@ glRouter.get('/journal', async (c) => {
   const from = c.req.query('from') ?? ''
   const to = c.req.query('to') ?? ''
   if (!isUuid(entityId)) return c.json({ error: 'entity_id must be a uuid' }, 422)
-  if ((from && !ISO_DATE.test(from)) || (to && !ISO_DATE.test(to))) return c.json({ error: 'from/to must be YYYY-MM-DD' }, 422)
+  if ((from && !isRealIsoDate(from)) || (to && !isRealIsoDate(to))) return c.json({ error: 'from/to must be real YYYY-MM-DD dates' }, 422)
   let q = getDb(c.env).from('gl_journal_entries')
     .select('*, gl_journal_lines(line_no, account_id, debit_cents, credit_cents, memo)')
     .eq('entity_id', entityId)
@@ -148,9 +149,9 @@ glRouter.get('/journal', async (c) => {
 // make impossible, so seeing one means a bad read).
 glRouter.get('/trial-balance', async (c) => {
   const entityId = c.req.query('entity_id') ?? ''
-  const asOf = c.req.query('as_of') ?? new Date().toISOString().slice(0, 10)
+  const asOf = c.req.query('as_of') ?? ledgerToday()
   if (!isUuid(entityId)) return c.json({ error: 'entity_id must be a uuid' }, 422)
-  if (!ISO_DATE.test(asOf)) return c.json({ error: 'as_of must be YYYY-MM-DD' }, 422)
+  if (!isRealIsoDate(asOf)) return c.json({ error: 'as_of must be a real YYYY-MM-DD date' }, 422)
   const db = getDb(c.env)
   const accounts = await fetchAllPages<TbAccount>((after) => {
     let q = db.from('gl_accounts').select('id, number, qb_name, account_type, is_active').eq('entity_id', entityId)

@@ -101,7 +101,8 @@ CREATE TABLE IF NOT EXISTS gl_periods (
 CREATE TABLE IF NOT EXISTS gl_journal_entries (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   entity_id UUID NOT NULL REFERENCES gl_entities(id),
-  entry_date DATE NOT NULL,
+  entry_date DATE NOT NULL
+    CONSTRAINT gl_journal_entries_date_range CHECK (entry_date BETWEEN DATE '2000-01-01' AND DATE '2100-12-31'),
   memo TEXT NOT NULL
     CONSTRAINT gl_journal_entries_memo_nonempty CHECK (btrim(memo) <> ''),
   source TEXT NOT NULL
@@ -213,6 +214,14 @@ CREATE TRIGGER gl_journal_lines_no_truncate
 -- does not exist yet. gl_lock_period takes the same row FOR UPDATE, so a lock and ANY insert into
 -- that month (function or direct SQL) serialize. Period rows are never deleted (gl_periods_guard),
 -- so the row is always found after the upsert.
+-- The ledger's calendar day: US Central, the latest of ORA's operating time zones, so a month is
+-- never treated as ended anywhere before it has ended everywhere ORA operates (REFUTE-2 N2; the
+-- session TimeZone, UTC on Supabase, would end a month around 7 pm Central).
+CREATE OR REPLACE FUNCTION gl_today() RETURNS date
+LANGUAGE sql STABLE
+SET search_path = public
+AS $$ SELECT (now() AT TIME ZONE 'America/Chicago')::date $$;
+
 CREATE OR REPLACE FUNCTION gl_hold_open_period(p_entity_id UUID, p_date DATE) RETURNS void
 LANGUAGE plpgsql
 SET search_path = public
@@ -242,6 +251,9 @@ AS $$
 DECLARE
   v_ref_source TEXT;
 BEGIN
+  -- Rule 6: hold the entity row so its accounting basis cannot change concurrently with the first
+  -- posting (the FK's KEY SHARE lock does not conflict with that UPDATE — REFUTE-2 S3).
+  PERFORM 1 FROM gl_entities WHERE id = NEW.entity_id FOR SHARE;
   -- Rule 7: the posting transaction and time are the database's, never the caller's. The top-level
   -- transaction id is the same inside savepoints and unique per transaction (unlike now(), which
   -- every transaction in one multi-statement message shares — REFUTE D1).
@@ -267,26 +279,56 @@ CREATE TRIGGER gl_journal_entries_insert_guard
   BEFORE INSERT ON gl_journal_entries
   FOR EACH ROW EXECUTE FUNCTION gl_assert_entry_insert();
 
--- Rule 4 at commit: a reversal's lines are exactly its original's lines with debit and credit
--- swapped (same line numbers, accounts and amounts; nothing extra, nothing missing).
+-- Rule 4 at commit: a reversal reverses a non-reversal, and its lines are exactly its original's
+-- lines with debit and credit swapped (same line numbers, accounts and amounts; nothing extra,
+-- nothing missing). Checked from BOTH tables (REFUTE-2 B1): an entry-level event alone is consumed
+-- by gl_reverse_entry's IMMEDIATE check, and lines added to the reversal (or its original) later
+-- in the same transaction would never be re-checked. Re-checking the target's source here, where
+-- every row of a multi-row INSERT is visible, closes reversal-of-a-reversal (REFUTE-2 S1).
+CREATE OR REPLACE FUNCTION gl_check_reversal(p_reversal_id UUID) RETURNS void
+LANGUAGE plpgsql
+SET search_path = public
+AS $$
+DECLARE
+  v_target UUID;
+BEGIN
+  SELECT reverses_entry_id INTO v_target FROM gl_journal_entries WHERE id = p_reversal_id;
+  IF v_target IS NULL THEN
+    RETURN;
+  END IF;
+  IF EXISTS (SELECT 1 FROM gl_journal_entries WHERE id = v_target AND source = 'reversal') THEN
+    RAISE EXCEPTION 'gl: a reversal cannot itself be reversed; post a new entry' USING ERRCODE = 'check_violation';
+  END IF;
+  IF EXISTS (
+    (SELECT line_no, account_id, credit_cents AS d, debit_cents AS c FROM gl_journal_lines WHERE entry_id = v_target
+     EXCEPT
+     SELECT line_no, account_id, debit_cents, credit_cents FROM gl_journal_lines WHERE entry_id = p_reversal_id)
+    UNION ALL
+    (SELECT line_no, account_id, debit_cents, credit_cents FROM gl_journal_lines WHERE entry_id = p_reversal_id
+     EXCEPT
+     SELECT line_no, account_id, credit_cents, debit_cents FROM gl_journal_lines WHERE entry_id = v_target)
+  ) THEN
+    RAISE EXCEPTION 'gl: reversal % does not exactly mirror entry %', p_reversal_id, v_target USING ERRCODE = 'check_violation';
+  END IF;
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION gl_assert_reversal_mirror() RETURNS trigger
 LANGUAGE plpgsql
 SET search_path = public
 AS $$
+DECLARE
+  v_rev UUID;
 BEGIN
-  IF NEW.reverses_entry_id IS NULL THEN
+  IF TG_TABLE_NAME = 'gl_journal_entries' THEN
+    PERFORM gl_check_reversal(NEW.id);
     RETURN NULL;
   END IF;
-  IF EXISTS (
-    (SELECT line_no, account_id, credit_cents AS d, debit_cents AS c FROM gl_journal_lines WHERE entry_id = NEW.reverses_entry_id
-     EXCEPT
-     SELECT line_no, account_id, debit_cents, credit_cents FROM gl_journal_lines WHERE entry_id = NEW.id)
-    UNION ALL
-    (SELECT line_no, account_id, debit_cents, credit_cents FROM gl_journal_lines WHERE entry_id = NEW.id
-     EXCEPT
-     SELECT line_no, account_id, credit_cents, debit_cents FROM gl_journal_lines WHERE entry_id = NEW.reverses_entry_id)
-  ) THEN
-    RAISE EXCEPTION 'gl: reversal % does not exactly mirror entry %', NEW.id, NEW.reverses_entry_id USING ERRCODE = 'check_violation';
+  -- a line: re-check its entry if that is a reversal, and the reversal of its entry if one exists
+  PERFORM gl_check_reversal(NEW.entry_id);
+  SELECT id INTO v_rev FROM gl_journal_entries WHERE reverses_entry_id = NEW.entry_id;
+  IF v_rev IS NOT NULL THEN
+    PERFORM gl_check_reversal(v_rev);
   END IF;
   RETURN NULL;
 END;
@@ -295,6 +337,11 @@ $$;
 DROP TRIGGER IF EXISTS gl_journal_entries_reversal_mirror ON gl_journal_entries;
 CREATE CONSTRAINT TRIGGER gl_journal_entries_reversal_mirror
   AFTER INSERT ON gl_journal_entries
+  DEFERRABLE INITIALLY DEFERRED
+  FOR EACH ROW EXECUTE FUNCTION gl_assert_reversal_mirror();
+DROP TRIGGER IF EXISTS gl_journal_lines_reversal_mirror ON gl_journal_lines;
+CREATE CONSTRAINT TRIGGER gl_journal_lines_reversal_mirror
+  AFTER INSERT ON gl_journal_lines
   DEFERRABLE INITIALLY DEFERRED
   FOR EACH ROW EXECUTE FUNCTION gl_assert_reversal_mirror();
 
@@ -309,6 +356,7 @@ SET search_path = public
 AS $$
 DECLARE
   v_entry gl_journal_entries%ROWTYPE;
+  v_active BOOLEAN;
 BEGIN
   SELECT * INTO v_entry FROM gl_journal_entries WHERE id = NEW.entry_id;
   IF NOT FOUND OR v_entry.posted_txid IS DISTINCT FROM pg_current_xact_id()::text::bigint THEN
@@ -316,8 +364,10 @@ BEGIN
       USING ERRCODE = 'restrict_violation';
   END IF;
   PERFORM gl_hold_open_period(v_entry.entity_id, v_entry.entry_date);
-  IF v_entry.source <> 'reversal'
-     AND NOT EXISTS (SELECT 1 FROM gl_accounts WHERE id = NEW.account_id AND entity_id = NEW.entity_id AND is_active) THEN
+  -- Hold the account row (REFUTE-2 S3): deactivation or a type/entity change cannot race this
+  -- line; such an UPDATE waits and its guard then sees the committed line.
+  SELECT is_active INTO v_active FROM gl_accounts WHERE id = NEW.account_id AND entity_id = NEW.entity_id FOR SHARE;
+  IF v_entry.source <> 'reversal' AND v_active IS NOT TRUE THEN
     RAISE EXCEPTION 'gl: account % is inactive or not in entity %', NEW.account_id, NEW.entity_id
       USING ERRCODE = 'check_violation';
   END IF;
@@ -341,11 +391,27 @@ BEGIN
   IF TG_OP = 'DELETE' THEN
     RAISE EXCEPTION 'gl: period rows cannot be deleted' USING ERRCODE = 'restrict_violation';
   END IF;
+  -- A period is born open; the only way to lock is the open → locked transition below, which holds
+  -- for direct SQL too (REFUTE-2 S2), not just gl_lock_period.
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.status <> 'open' THEN
+      RAISE EXCEPTION 'gl: a period row is created open; lock it with gl_lock_period' USING ERRCODE = 'check_violation';
+    END IF;
+    RETURN NEW;
+  END IF;
   IF OLD.status = 'locked' THEN
     RAISE EXCEPTION 'gl: a locked period cannot be changed or unlocked' USING ERRCODE = 'restrict_violation';
   END IF;
   IF NEW.entity_id <> OLD.entity_id OR NEW.period_start <> OLD.period_start THEN
     RAISE EXCEPTION 'gl: a period''s entity and month cannot change' USING ERRCODE = 'restrict_violation';
+  END IF;
+  IF NEW.status = 'locked' THEN
+    IF NEW.period_start >= date_trunc('month', gl_today())::date THEN
+      RAISE EXCEPTION 'gl: only a month that has ended can be locked (% has not)', NEW.period_start USING ERRCODE = 'check_violation';
+    END IF;
+    IF NEW.locked_by IS NULL OR btrim(NEW.locked_by) = '' THEN
+      RAISE EXCEPTION 'gl: locked_by is required' USING ERRCODE = 'check_violation';
+    END IF;
   END IF;
   RETURN NEW;
 END;
@@ -353,7 +419,7 @@ $$;
 
 DROP TRIGGER IF EXISTS gl_periods_guard ON gl_periods;
 CREATE TRIGGER gl_periods_guard
-  BEFORE UPDATE OR DELETE ON gl_periods
+  BEFORE INSERT OR UPDATE OR DELETE ON gl_periods
   FOR EACH ROW EXECUTE FUNCTION gl_guard_period_change();
 
 CREATE OR REPLACE FUNCTION gl_reject_truncate() RETURNS trigger
@@ -441,7 +507,7 @@ BEGIN
 
   -- The caller may have left these IMMEDIATE (SET CONSTRAINTS persists for the transaction); the
   -- header goes in before its lines, so defer them here and check them explicitly below.
-  SET CONSTRAINTS gl_journal_entries_balanced, gl_journal_lines_balanced, gl_journal_entries_reversal_mirror DEFERRED;
+  SET CONSTRAINTS gl_journal_entries_balanced, gl_journal_lines_balanced, gl_journal_entries_reversal_mirror, gl_journal_lines_reversal_mirror DEFERRED;
   INSERT INTO gl_journal_entries (entity_id, entry_date, memo, source, posted_by)
     VALUES (p_entity_id, p_entry_date, p_memo, p_source, p_posted_by)
     RETURNING id INTO v_entry;
@@ -485,7 +551,7 @@ BEGIN
 
   -- The caller may have left these IMMEDIATE (SET CONSTRAINTS persists for the transaction); the
   -- header goes in before its lines, so defer them here and check them explicitly below.
-  SET CONSTRAINTS gl_journal_entries_balanced, gl_journal_lines_balanced, gl_journal_entries_reversal_mirror DEFERRED;
+  SET CONSTRAINTS gl_journal_entries_balanced, gl_journal_lines_balanced, gl_journal_entries_reversal_mirror, gl_journal_lines_reversal_mirror DEFERRED;
   INSERT INTO gl_journal_entries (entity_id, entry_date, memo, source, reverses_entry_id, posted_by)
     VALUES (v_orig.entity_id, p_entry_date, p_memo, 'reversal', v_orig.id, p_posted_by)
     RETURNING id INTO v_entry;
@@ -494,8 +560,8 @@ BEGIN
     SELECT v_entry, entity_id, account_id, line_no, credit_cents, debit_cents, memo
       FROM gl_journal_lines WHERE entry_id = v_orig.id;
 
-  SET CONSTRAINTS gl_journal_entries_balanced, gl_journal_lines_balanced, gl_journal_entries_reversal_mirror IMMEDIATE;
-  SET CONSTRAINTS gl_journal_entries_balanced, gl_journal_lines_balanced, gl_journal_entries_reversal_mirror DEFERRED;
+  SET CONSTRAINTS gl_journal_entries_balanced, gl_journal_lines_balanced, gl_journal_entries_reversal_mirror, gl_journal_lines_reversal_mirror IMMEDIATE;
+  SET CONSTRAINTS gl_journal_entries_balanced, gl_journal_lines_balanced, gl_journal_entries_reversal_mirror, gl_journal_lines_reversal_mirror DEFERRED;
   RETURN v_entry;
 END;
 $$;
@@ -512,7 +578,7 @@ BEGIN
   IF p_period_start <> date_trunc('month', p_period_start)::date THEN
     RAISE EXCEPTION 'gl: period_start must be the first day of a month' USING ERRCODE = 'check_violation';
   END IF;
-  IF p_period_start >= date_trunc('month', current_date)::date THEN
+  IF p_period_start >= date_trunc('month', gl_today())::date THEN
     RAISE EXCEPTION 'gl: only a month that has ended can be locked (% has not)', p_period_start USING ERRCODE = 'check_violation';
   END IF;
   IF p_locked_by IS NULL OR btrim(p_locked_by) = '' THEN
@@ -546,6 +612,11 @@ GRANT EXECUTE ON FUNCTION gl_post_entry(UUID, DATE, TEXT, TEXT, TEXT, JSONB) TO 
 GRANT EXECUTE ON FUNCTION gl_reverse_entry(UUID, DATE, TEXT, TEXT) TO service_role;
 GRANT EXECUTE ON FUNCTION gl_lock_period(UUID, DATE, TEXT) TO service_role;
 GRANT EXECUTE ON FUNCTION gl_hold_open_period(UUID, DATE) TO service_role;
+-- Helpers the triggers call in the caller's (service_role's) privilege context.
+REVOKE EXECUTE ON FUNCTION gl_check_reversal(UUID) FROM PUBLIC, anon, authenticated;
+REVOKE EXECUTE ON FUNCTION gl_today() FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION gl_check_reversal(UUID) TO service_role;
+GRANT EXECUTE ON FUNCTION gl_today() TO service_role;
 
 COMMENT ON TABLE gl_entities IS 'B8 ledger core: one row per LLC. accounting_basis copied from that LLC''s QuickBooks file for the parallel run.';
 COMMENT ON TABLE gl_accounts IS 'B8 ledger core: chart of accounts mirroring each LLC''s QuickBooks chart (qb_name = QB full name).';

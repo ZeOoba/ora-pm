@@ -100,7 +100,18 @@ describe('migration 0023 — money-rule triggers, functions and access (textual 
     has(/^CREATE TRIGGER gl_journal_entries_insert_guard\s+BEFORE INSERT ON gl_journal_entries/)
     has(/^CREATE TRIGGER gl_journal_lines_insert_guard\s+BEFORE INSERT ON gl_journal_lines/)
     has(/^CREATE CONSTRAINT TRIGGER gl_journal_entries_reversal_mirror\s+AFTER INSERT ON gl_journal_entries\s+DEFERRABLE INITIALLY DEFERRED/)
-    has(/^CREATE TRIGGER gl_periods_guard\s+BEFORE UPDATE OR DELETE ON gl_periods/)
+    has(/^CREATE TRIGGER gl_periods_guard\s+BEFORE INSERT OR UPDATE OR DELETE ON gl_periods/)
+    // the mirror is checked from the lines too (REFUTE-2 B1), and re-checks the target's source (S1)
+    has(/^CREATE CONSTRAINT TRIGGER gl_journal_lines_reversal_mirror\s+AFTER INSERT ON gl_journal_lines\s+DEFERRABLE INITIALLY DEFERRED/)
+    expect(sql).toMatch(/WHERE id = v_target AND source = 'reversal'/)
+    // account and entity rows held against concurrent reclassification (REFUTE-2 S3)
+    expect(sql).toMatch(/FROM gl_accounts WHERE id = NEW\.account_id AND entity_id = NEW\.entity_id FOR SHARE;/)
+    expect(sql).toMatch(/FROM gl_entities WHERE id = NEW\.entity_id FOR SHARE;/)
+    // periods are born open; the lock transition checks the month and the locker (REFUTE-2 S2)
+    expect(sql).toMatch(/a period row is created open/)
+    expect(sql).toMatch(/NEW\.period_start >= date_trunc\('month', gl_today\(\)\)::date/)
+    expect(sql).toMatch(/now\(\) AT TIME ZONE 'America\/Chicago'/)
+    expect(sql).toMatch(/CONSTRAINT gl_journal_entries_date_range CHECK/)
     for (const t of ['gl_periods', 'gl_accounts', 'gl_entities']) {
       has(new RegExp(`^CREATE TRIGGER ${t}_no_truncate BEFORE TRUNCATE ON ${t}`))
     }
@@ -112,13 +123,14 @@ describe('migration 0023 — money-rule triggers, functions and access (textual 
     expect(sql).toMatch(/posted_txid IS DISTINCT FROM pg_current_xact_id\(\)::text::bigint/)
     expect(sql).not.toMatch(/e\.posted_at = now\(\)/)
     // only ended months lock
-    expect(sql).toMatch(/p_period_start >= date_trunc\('month', current_date\)::date/)
+    expect(sql).toMatch(/p_period_start >= date_trunc\('month', gl_today\(\)\)::date/)
+    expect(sql).not.toMatch(/current_date/)
   })
 
   it('write functions: post and lock serialize on the period row', () => {
     expect(sql).toMatch(/FROM gl_periods[\s\S]{0,200}FOR SHARE;/)
     expect(sql).toMatch(/FROM gl_periods[\s\S]{0,200}FOR UPDATE;/)
-    for (const fn of ['gl_post_entry', 'gl_reverse_entry', 'gl_lock_period', 'gl_hold_open_period']) {
+    for (const fn of ['gl_post_entry', 'gl_reverse_entry', 'gl_lock_period', 'gl_hold_open_period', 'gl_check_reversal', 'gl_today']) {
       has(new RegExp(`^CREATE OR REPLACE FUNCTION ${fn}\\(`))
       has(new RegExp(`^REVOKE EXECUTE ON FUNCTION ${fn}\\([^)]*\\) FROM PUBLIC, anon, authenticated$`))
       has(new RegExp(`^GRANT EXECUTE ON FUNCTION ${fn}\\([^)]*\\) TO service_role$`))

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { MAX_LINE_CENTS, canLockPeriods, formatCents, glRuleMessage, parseCents, trialBalance, validateEntryLines } from '../../server/lib/gl'
+import { MAX_LINE_CENTS, canLockPeriods, formatCents, glRuleMessage, isRealIsoDate, ledgerToday, parseCents, trialBalance, validateEntryLines } from '../../server/lib/gl'
 
 describe('parseCents', () => {
   it('parses exact dollar strings to integer cents', () => {
@@ -99,5 +99,17 @@ describe('glRuleMessage', () => {
     expect(glRuleMessage({ message: 'connection to server at 10.0.0.5 failed: password authentication failed' })).toBeNull()
     expect(glRuleMessage({ message: 'violates check constraint "charges_amount_check"' })).toBeNull()
     expect(glRuleMessage(null)).toBeNull()
+  })
+})
+
+describe('ledger dates', () => {
+  it('isRealIsoDate rejects impossible calendar dates', () => {
+    expect(isRealIsoDate('2026-10-31')).toBe(true)
+    expect(isRealIsoDate('2028-02-29')).toBe(true)
+    for (const d of ['2026-02-31', '2026-02-29', '2026-13-01', '2026-1-01', 'infinity', '']) expect(isRealIsoDate(d)).toBe(false)
+  })
+  it('ledgerToday is the US Central date (a month ends at Central midnight, not UTC)', () => {
+    expect(ledgerToday(new Date('2026-11-01T03:00:00Z'))).toBe('2026-10-31')
+    expect(ledgerToday(new Date('2026-11-01T06:00:00Z'))).toBe('2026-11-01')
   })
 })

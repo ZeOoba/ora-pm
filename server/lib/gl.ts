@@ -8,11 +8,20 @@ import { z } from 'zod'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const uuid = z.string().regex(UUID_RE, 'Must be a uuid')
+/** A real calendar date in YYYY-MM-DD form (rejects 2026-02-31, which Postgres would 500 on). */
+export function isRealIsoDate(s: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false
+  const d = new Date(`${s}T00:00:00Z`)
+  return !Number.isNaN(d.getTime()) && d.toISOString().startsWith(s)
+}
+
+/** The ledger's calendar day: US Central, matching gl_today() in migration 0023. */
+export function ledgerToday(now: Date = new Date()): string {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit' }).format(now)
+}
+
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Must be YYYY-MM-DD')
-  .refine((s) => {
-    const d = new Date(`${s}T00:00:00Z`)
-    return !Number.isNaN(d.getTime()) && d.toISOString().startsWith(s)
-  }, 'Must be a real date')
+  .refine(isRealIsoDate, 'Must be a real date')
 
 /** Largest amount accepted on one line: $1 trillion (1e14 cents), far inside Number.MAX_SAFE_INTEGER. */
 export const MAX_LINE_CENTS = 1_000_000_000_000_00

@@ -266,6 +266,67 @@ BEGIN
   RAISE NOTICE 'ok: retired accounts stay reversible; type/basis frozen once used; only ended months lock';
 END $$;
 
+-- ── REFUTE pass 2 regressions ─────────────────────────────────────────────────────────────────
+-- B1: lines added to a reversal AFTER gl_reverse_entry's immediate check are still mirror-checked
+-- (here: a $999,999 pair on a retired account).
+DO $$
+DECLARE v UUID; r UUID;
+BEGIN
+  BEGIN
+    v := gl_post_entry('e0000000-0000-4000-8000-000000000001', '2026-11-08', 'B1 original', 'manual', 'tester',
+      '[{"account_id":"a0000000-0000-4000-8000-000000000001","debit_cents":500},{"account_id":"a0000000-0000-4000-8000-000000000002","credit_cents":500}]');
+    r := gl_reverse_entry(v, '2026-11-09', 'B1 reversal', 'tester');
+    INSERT INTO gl_journal_lines (entry_id, entity_id, account_id, line_no, debit_cents, credit_cents) VALUES
+      (r, 'e0000000-0000-4000-8000-000000000001', 'a0000000-0000-4000-8000-000000000003', 10, 99999900, 0),
+      (r, 'e0000000-0000-4000-8000-000000000001', 'a0000000-0000-4000-8000-000000000003', 11, 0, 99999900);
+    SET CONSTRAINTS ALL IMMEDIATE;
+    RAISE EXCEPTION 'B1: extra lines on a reversal were accepted';
+  EXCEPTION WHEN check_violation THEN
+    IF SQLERRM NOT LIKE '%does not exactly mirror%' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok: B1 lines added to a reversal after its check are re-checked at commit';
+END $$;
+
+-- S1: reversal of a reversal hidden in one multi-row INSERT (B listed before the A it reverses).
+DO $$
+DECLARE y UUID;
+BEGIN
+  BEGIN
+    y := gl_post_entry('e0000000-0000-4000-8000-000000000001', '2026-11-08', 'S1 Y', 'manual', 'tester',
+      '[{"account_id":"a0000000-0000-4000-8000-000000000001","debit_cents":800},{"account_id":"a0000000-0000-4000-8000-000000000002","credit_cents":800}]');
+    INSERT INTO gl_journal_entries (id, entity_id, entry_date, memo, source, reverses_entry_id, posted_by) VALUES
+      ('5e000000-0000-4000-8000-00000000000b', 'e0000000-0000-4000-8000-000000000001', '2026-11-09', 'S1 B', 'reversal', '5e000000-0000-4000-8000-00000000000a', 't'),
+      ('5e000000-0000-4000-8000-00000000000a', 'e0000000-0000-4000-8000-000000000001', '2026-11-09', 'S1 A', 'reversal', y, 't');
+    INSERT INTO gl_journal_lines (entry_id, entity_id, account_id, line_no, debit_cents, credit_cents)
+      SELECT '5e000000-0000-4000-8000-00000000000a'::uuid, entity_id, account_id, line_no, credit_cents, debit_cents FROM gl_journal_lines WHERE entry_id = y
+      UNION ALL
+      SELECT '5e000000-0000-4000-8000-00000000000b'::uuid, entity_id, account_id, line_no, debit_cents, credit_cents FROM gl_journal_lines WHERE entry_id = y;
+    SET CONSTRAINTS ALL IMMEDIATE;
+    RAISE EXCEPTION 'S1: a reversal of a reversal was accepted';
+  EXCEPTION WHEN check_violation THEN
+    IF SQLERRM NOT LIKE '%cannot itself be reversed%' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok: S1 reversal-of-reversal rejected even within one multi-row INSERT';
+END $$;
+
+-- S2: locking rules hold for direct SQL on gl_periods, not only through gl_lock_period.
+DO $$ BEGIN
+  PERFORM pg_temp.expect_error($q$INSERT INTO gl_periods (entity_id, period_start, status, locked_at, locked_by) VALUES ('e0000000-0000-4000-8000-000000000001', '2027-06-01', 'locked', now(), ' ')$q$, 'created open');
+  PERFORM pg_temp.expect_error($q$UPDATE gl_periods SET status = 'locked', locked_at = now(), locked_by = 'x' WHERE entity_id = 'e0000000-0000-4000-8000-000000000001' AND period_start = '2026-11-01'$q$, 'has ended');
+  INSERT INTO gl_periods (entity_id, period_start) VALUES ('e0000000-0000-4000-8000-000000000001', '2026-07-01');
+  PERFORM pg_temp.expect_error($q$UPDATE gl_periods SET status = 'locked', locked_at = now(), locked_by = '  ' WHERE entity_id = 'e0000000-0000-4000-8000-000000000001' AND period_start = '2026-07-01'$q$, 'locked_by is required');
+  IF gl_today() <> (now() AT TIME ZONE 'America/Chicago')::date THEN
+    RAISE EXCEPTION 'S2/N2: gl_today must be the US Central date';
+  END IF;
+  RAISE NOTICE 'ok: S2 periods are born open; direct-SQL locks need an ended month (US Central) and a locker';
+END $$;
+
+-- N1: no infinite or absurd entry dates.
+DO $$ BEGIN
+  PERFORM pg_temp.expect_error($q$SELECT gl_post_entry('e0000000-0000-4000-8000-000000000001', 'infinity', 'N1', 'manual', 'tester', '[{"account_id":"a0000000-0000-4000-8000-000000000001","debit_cents":1},{"account_id":"a0000000-0000-4000-8000-000000000002","credit_cents":1}]')$q$, 'gl_journal_entries_date_range');
+  RAISE NOTICE 'ok: N1 entry dates must fall in 2000–2100';
+END $$;
+
 -- ── Privileges ────────────────────────────────────────────────────────────────────────────────
 DO $$ BEGIN
   IF has_function_privilege('anon', 'gl_post_entry(uuid, date, text, text, text, jsonb)', 'EXECUTE')
