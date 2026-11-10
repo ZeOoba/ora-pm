@@ -6,7 +6,7 @@ describe('domain types', () => {
     const p: Property = {
       id: 'uuid', name: 'REDACTED-020', address: 'REDACTED-010',
       city: 'Columbia', state: 'MD', zip: '21045',
-      total_sf: 20000, property_type: 'industrial', entity_llc: 'ORA LLC',
+      total_sf: 20000, cam_denominator_rsf: null, property_type: 'industrial', entity_llc: 'ORA LLC',
       notes: null, created_at: '2026-01-01T00:00:00Z',
     }
     expect(p.name).toBe('REDACTED-020')
@@ -36,6 +36,7 @@ describe('domain types', () => {
       status: 'active', rent_type: 'nnn',
       base_rent_monthly: 3000, cam_estimate_monthly: 300, security_deposit: 6000,
       expense_stop_amount: null, ti_allowance: null, ti_reimbursement_schedule: null,
+      proportionate_share_pct: null, base_year: null, base_year_expense_amount: null,
       percentage_rent_terms: null, options: null, notes: null,
       created_at: '2026-01-01T00:00:00Z',
       autopay_enabled: false, autopay_payment_method_id: null,
