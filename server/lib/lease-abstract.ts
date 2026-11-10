@@ -282,6 +282,16 @@ export interface Confirmation {
   as_written: string
   period: string
   monthly: number | null
+  /** The billing window this value applies to (rent period, charge or concession dates); null if none. */
+  start: string | null
+  end: string | null
+  /** Which charges it applies to: 'rent', a recurring type, or a concession class ('rent' / 'cam_estimate' / 'all'). */
+  charge: string | null
+  /** For per-square-foot amounts: the RSF the monthly figure was computed with (merge gate R3-01). */
+  rsf: number | null
+  /** For escalations: when adjustments start and how often (merge gate R3-03). */
+  first_adjustment_date: string | null
+  cadence_months: number | null
   page: number
   quote: string
 }
@@ -461,14 +471,14 @@ export function dateInQuote(iso: string, quote: string): boolean {
   if (!m) return false
   const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])]
   const q = quote.toLowerCase().replace(/\s+/g, ' ')
-  if (q.includes(iso)) return true
+  if (new RegExp(`(?<![\\d-])${iso}(?![\\d])`).test(q)) return true
   const full = MONTH_NAMES[mo - 1]
   const month = `(?:${full}|${full.slice(0, 3)}\\.?)`
   const ord = `0?${d}(?:st|nd|rd|th)?`
   const dayToken = `(?:${ord}|${ORDINAL_WORDS[d - 1]})(?: ?\\( ?${ord} ?\\))?`
   const patterns = [
     `\\b${month} ${ord},? ${y}\\b`,
-    `\\b${dayToken} (?:day of )?${month},? ${y}\\b`,
+    `\\b${dayToken} (?:(?:day )?of )?${month},? ${y}\\b`,
     `(?<![\\d/-])0?${mo}[/-]0?${d}[/-](?:${y}|${String(y).slice(2)})(?![\\d/-])`,
   ]
   return patterns.some((p) => new RegExp(p).test(q))
@@ -521,14 +531,32 @@ export function periodWordingMismatch(written: string, period: string, quote: st
  */
 function resolveAmounts(a: LeaseAbstract, flags: AbstractFlag[]): Confirmation[] {
   const block = (path: string, message: string) => flags.push({ severity: 'block', path, message })
+  const warn = (path: string, message: string) => flags.push({ severity: 'warn', path, message })
   const confirmations: Confirmation[] = []
-  const confirm = (path: string, as_written: string, period: string, monthly: number | null, s: Source) =>
-    confirmations.push({ path, as_written, period, monthly, page: s.page, quote: s.quote })
+  type Ctx = Partial<Pick<Confirmation, 'start' | 'end' | 'charge' | 'rsf' | 'first_adjustment_date' | 'cadence_months'>>
+  // Merge gate round 3: every confirmation carries the whole context a human needs to check it against its
+  // quote: the billing window, which charges it covers, the RSF behind a per-square-foot figure, and the
+  // escalation timing. A value whose inputs are hidden cannot be confirmed.
+  const confirm = (path: string, as_written: string, period: string, monthly: number | null, s: Source, ctx: Ctx = {}) =>
+    confirmations.push({
+      path, as_written, period, monthly,
+      start: ctx.start ?? null, end: ctx.end ?? null, charge: ctx.charge ?? null, rsf: ctx.rsf ?? null,
+      first_adjustment_date: ctx.first_adjustment_date ?? null, cadence_months: ctx.cadence_months ?? null,
+      page: s.page, quote: s.quote,
+    })
+
+  // The term dates bound everything billed: each is confirmed against its own quote.
+  for (const k of ['commencement_date', 'rent_commencement_date', 'expiration_date'] as const) {
+    const v = a[k]
+    if (v) confirm(k, v.value, 'date', null, v)
+  }
 
   // RSF is billing input once anything is quoted per square foot: it must be printed in its own quote.
   const rsfFact = a.premises_rsf
   const rsf = rsfFact && amountInQuote(rsfFact.value, rsfFact.quote) && rsfFact.confidence > 0 ? rsfFact.value : null
+  let rsfUsed = false
   const needRsf = (path: string) => {
+    rsfUsed = true
     if (!rsfFact) block(path, 'This amount is quoted per square foot, but the lease abstract has no rentable square footage.')
     else if (rsf === null) block(path, `The rentable square footage ${rsfFact.value} is not printed in its own quote; confirm it.`)
   }
@@ -549,6 +577,7 @@ function resolveAmounts(a: LeaseAbstract, flags: AbstractFlag[]): Confirmation[]
   // Escalation first: derived rent periods depend on it.
   const e = a.escalation
   if (e) {
+    const timing: Ctx = { charge: 'rent', first_adjustment_date: e.first_adjustment_date, cadence_months: e.cadence_months }
     if (e.kind === 'cpi') {
       e.value = null
       if (e.value_as_written.trim()) block('escalation', 'A CPI escalation has no fixed value.')
@@ -557,11 +586,25 @@ function resolveAmounts(a: LeaseAbstract, flags: AbstractFlag[]): Confirmation[]
       if (v === null) block('escalation', `"${e.value_as_written}" is not a percentage as printed (e.g. "3%").`)
       else if (!writtenInQuote(e.value_as_written, e.quote)) block('escalation', `"${e.value_as_written}" is not written in its quote.`)
       e.value = v
-      confirm('escalation', e.value_as_written, 'per adjustment', null, e)
+      confirm('escalation', e.value_as_written, 'per adjustment', null, e, timing)
     } else {
       e.value = e.value_period === 'none' ? null : money('escalation', e.value_as_written, e.value_period, e)
       if (e.value_period === 'none') block('escalation', 'A fixed-dollar escalation needs the period its amount is quoted in.')
-      confirm('escalation', e.value_as_written, e.value_period, e.value, e)
+      confirm('escalation', e.value_as_written, e.value_period, e.value, e, { ...timing, rsf: e.value_period === 'psf_year' ? rsf : null })
+    }
+    // Merge gate R3-03 (triage): the first adjustment should be printed in the quote or fall on an
+    // anniversary of the commencement / rent commencement date at the stated cadence.
+    if (e.cadence_months > 0 && !dateInQuote(e.first_adjustment_date, e.quote)) {
+      const starts = [a.commencement_date?.value, a.rent_commencement_date?.value].filter((x): x is string => !!x)
+      const onAnniversary = starts.some((s) => {
+        for (let k = 1; k <= 1200 / e.cadence_months; k++) {
+          const d = addMonthsIso(s, k * e.cadence_months)
+          if (d === e.first_adjustment_date) return true
+          if (d > e.first_adjustment_date) return false
+        }
+        return false
+      })
+      if (!onAnniversary) warn('escalation', `The first adjustment ${e.first_adjustment_date} is neither printed in the quote nor an anniversary of the commencement date; confirm when rent first increases.`)
     }
   }
 
@@ -572,7 +615,8 @@ function resolveAmounts(a: LeaseAbstract, flags: AbstractFlag[]): Confirmation[]
     if (!r.amount_as_written.trim()) continue
     r.base_rent_monthly = money(path, r.amount_as_written, r.amount_period, r)
     if (r.amount_period === 'psf_year') r.rent_psf_annual = parseWrittenCurrency(r.amount_as_written)
-    confirm(path, r.amount_as_written, r.amount_period, r.base_rent_monthly, r)
+    confirm(path, r.amount_as_written, r.amount_period, r.base_rent_monthly, r,
+      { start: r.start, end: r.end, charge: 'rent', rsf: r.amount_period === 'psf_year' ? rsf : null })
   }
   // Rent periods not printed: derived from the stated fixed escalation off the first printed period.
   const derived = rows.filter((r) => !r.amount_as_written.trim())
@@ -594,7 +638,7 @@ function resolveAmounts(a: LeaseAbstract, flags: AbstractFlag[]): Confirmation[]
         const match = 'needsReview' in expected ? undefined : expected.find((x) => x.effective_start === r.start)
         if (!match) { block(path, `No escalation step starts on ${r.start}; this period cannot be derived.`); continue }
         r.base_rent_monthly = match.base_rent_monthly
-        confirm(path, '(derived from the escalation)', 'month', r.base_rent_monthly, r)
+        confirm(path, '(derived from the escalation)', 'month', r.base_rent_monthly, r, { start: r.start, end: r.end, charge: 'rent' })
       }
     }
   }
@@ -602,7 +646,8 @@ function resolveAmounts(a: LeaseAbstract, flags: AbstractFlag[]): Confirmation[]
   a.recurring_charges.forEach((r, i) => {
     const path = `recurring_charges[${i}]`
     r.amount_monthly = money(path, r.amount_as_written, r.amount_period, r)
-    confirm(path, r.amount_as_written, r.amount_period, r.amount_monthly, r)
+    confirm(path, r.amount_as_written, r.amount_period, r.amount_monthly, r,
+      { start: r.effective_start, end: r.effective_end, charge: r.type })
   })
 
   a.concessions.forEach((c, i) => {
@@ -623,14 +668,45 @@ function resolveAmounts(a: LeaseAbstract, flags: AbstractFlag[]): Confirmation[]
       c.value = c.value_period === 'none' ? null : money(path, c.value_as_written, c.value_period, c)
       if (c.value_period === 'none') block(path, 'A fixed-dollar waiver needs the period its amount is quoted in.')
     }
-    // Merge gate R2-04: "all" waives CAM too, so the quote must say so.
-    if (c.charge_type === 'all' && !/\b(cam|common area|operating (?:expenses|costs)|additional rent|all rent|all (?:monetary|amounts))\b/i.test(c.quote)) {
-      block(path, 'The waiver is marked as covering rent AND CAM, but its quote does not mention CAM or operating expenses.')
+    // Triage (merge gate R3-02: wording cannot prove coverage; "continue to pay all Additional Rent" names
+    // CAM too). "all" waives CAM as well, so any 'all' waiver is flagged for the human, who sees the
+    // charge class on its confirmation entry.
+    if (c.charge_type === 'all') {
+      warn(path, 'This waiver is marked as covering rent AND CAM; confirm the lease waives CAM / operating expenses for this period.')
     }
-    confirm(path, c.value_as_written || '(full waiver)', c.kind, c.value, c)
+    confirm(path, c.value_as_written || '(full waiver)', c.kind, c.value, c, { start: c.period_start, end: c.period_end, charge: c.charge_type })
   })
 
+  // The RSF behind any per-square-foot figure is itself a billing value to confirm (merge gate R3-01).
+  if (rsfUsed && rsfFact) {
+    confirm('premises_rsf', String(rsfFact.value), 'rentable square feet', null, rsfFact)
+    const others = numbersInQuote(rsfFact.quote).filter((n) => n >= 100 && Math.abs(n - rsfFact.value) >= 0.005)
+    if (others.length > 0) warn('premises_rsf', `The square-footage quote also prints ${others.join(', ')}; confirm ${rsfFact.value} is the Premises, not the building or another area.`)
+  }
+
   return confirmations
+}
+
+/**
+ * Month numbers (1-12) a quote names. A range — two months joined by "through", "thru", "to", "until" or a
+ * dash, each optionally followed by a day and year ("January 1, 2027 through March 31, 2027") — names every
+ * month it spans, wrapping at December (merge gate R3-04).
+ */
+export function namedMonths(quote: string): Set<number> {
+  const alt = MONTH_NAMES.map((n) => `${n}|${n.slice(0, 3)}\\.?`).join('|')
+  const monthOf = (word: string) => MONTH_NAMES.findIndex((n) => word.toLowerCase().replace('.', '').startsWith(n.slice(0, 3))) + 1
+  const named = new Set<number>()
+  for (const m of quote.matchAll(new RegExp(`\\b(${alt})\\b`, 'gi'))) named.add(monthOf(m[1]))
+  const range = new RegExp(`\\b(${alt})\\b(?:\\s+\\d{1,2}(?:st|nd|rd|th)?)?,?(?:\\s+\\d{4})?\\s*(?:through|thru|to|until|-|–|—)\\s*(?:the\\s+month\\s+of\\s+)?\\b(${alt})\\b`, 'gi')
+  for (const m of quote.matchAll(range)) {
+    const from = monthOf(m[1])
+    const to = monthOf(m[2])
+    for (let k = from, n = 0; n < 12; k = (k % 12) + 1, n++) {
+      named.add(k)
+      if (k === to) break
+    }
+  }
+  return named
 }
 
 function verifyCitations(a: LeaseAbstract, pages: readonly string[], flags: AbstractFlag[]): void {
@@ -660,14 +736,16 @@ function verifyCitations(a: LeaseAbstract, pages: readonly string[], flags: Abst
   a.concessions.forEach((c, i) => {
     const path = `concessions[${i}]`
     if (!check(path, c)) return
-    // Years: when the quote names any year, the concession's start year must be one of them.
+    // Triage only (merge gate R3-04: wording heuristics must never block a correct lease; the human sees
+    // the concession's start/end on its confirmation entry).
+    // Years: when the quote names any year, the concession's start year should be one of them.
     const years = new Set((c.quote.match(/\b(?:19|20)\d{2}\b/g) ?? []).map(Number))
     if (years.size > 0 && !years.has(Number(c.period_start.slice(0, 4)))) {
-      push('block', path, `The concession starts in ${c.period_start.slice(0, 4)}, but its quote names ${[...years].join(', ')}; confirm the period.`)
+      push('warn', path, `The concession starts in ${c.period_start.slice(0, 4)}, but its quote names ${[...years].join(', ')}; confirm the period.`)
     }
-    // Months: the months a concession covers must match the months its quote names (when it names any).
-    const named = new Set(MONTH_NAMES.flatMap((name, idx) =>
-      new RegExp(`\\b(${name}|${name.slice(0, 3)}\\.?)\\b`, 'i').test(c.quote) ? [idx + 1] : []))
+    // Months: the months a concession covers should match the months its quote names (when it names any).
+    // A range ("January through March", "January 1, 2027 to March 31, 2027") names every month it spans.
+    const named = namedMonths(c.quote)
     if (named.size === 0) {
       push('warn', path, `Confirm the concession period ${c.period_start} to ${c.period_end} against the lease.`)
       return
@@ -681,7 +759,7 @@ function verifyCitations(a: LeaseAbstract, pages: readonly string[], flags: Abst
     const missing = [...named].filter((mo) => !covered.has(mo))
     const extra = [...covered].filter((mo) => !named.has(mo))
     if (covered.size <= 12 && (missing.length > 0 || extra.length > 0)) {
-      push('block', path, `The concession covers ${c.period_start} to ${c.period_end}, but its quote names other months; confirm the period.`)
+      push('warn', path, `The concession covers ${c.period_start} to ${c.period_end}, but its quote names other months; confirm the period.`)
     }
   })
 

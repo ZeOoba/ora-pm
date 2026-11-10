@@ -591,6 +591,40 @@ describe("mode: 'abstract' (lease abstraction v2)", () => {
     expect(json.confirmations).toContainEqual(expect.objectContaining({ path: 'rent_schedule[0]', as_written: '$4,500.00', period: 'month', monthly: 4500 }))
   })
 
+  // Merge gate PR #69 round 3: R3-06 (the confirmation scrub nulled `path`), IS4/IS7/IS9 survivors.
+  it('a denylist term that is a schema word never nulls a confirmation path; a withheld quote blocks that path', async () => {
+    const row = { start: '2026-01-01', end: '2026-12-31', amount_as_written: '$4,500.00', amount_period: 'month',
+      page: 1, quote: 'Base rent $4,500.00 per month', confidence: 0.9 }
+    vi.stubGlobal('fetch', abstractFetch(modelJson({ rent_schedule: [row] })))
+    const res = await app().request('/intake/lease',
+      body({ filename: 'acme-lease.pdf', pdfBase64: toBase64(await buildTextPdf(LEASE_TEXT)), tenant_id: 't', unit_id: 'u', mode: 'abstract' }),
+      { ...env, CONFIDENTIAL_TERMS: 'zeta,schedule,month' })
+    const json = await res.json() as { confirmations: Array<{ path: unknown; period: unknown; quote: unknown }>; flags: Array<{ severity: string; path: string; message: string }>; warnings: string[] }
+    const cf = json.confirmations.find((c) => c.path === 'rent_schedule[0]')
+    expect(cf).toBeDefined()
+    expect(cf!.period).toBe('month') // the computed period label is not a document field and is not scrubbed
+    expect(cf!.quote).toBeNull() // the document quote contains "month"
+    expect(json.flags).toContainEqual(expect.objectContaining({ severity: 'block', path: 'rent_schedule[0]', message: expect.stringMatching(/confirmation was withheld/) }))
+    expect(json.warnings).toContain('"confirmations[0].quote" was withheld by the confidentiality guard.') // IS7: reported
+  })
+
+  it('IS4: a flag message withheld by the guard is replaced by a fixed notice, never null', async () => {
+    const row = { start: '2026-01-01', end: '2026-12-31', amount_as_written: '$99999', amount_period: 'month',
+      page: 1, quote: 'Base rent $4,500.00 per month', confidence: 0.9 }
+    vi.stubGlobal('fetch', abstractFetch(modelJson({ rent_schedule: [row] })))
+    const json = await (await post(await buildTextPdf(LEASE_TEXT))).json() as { flags: Array<{ message: unknown }> }
+    expect(json.flags.every((f) => typeof f.message === 'string')).toBe(true)
+    expect(json.flags.some((f) => f.message === 'Withheld by the confidentiality guard.')).toBe(true)
+  })
+
+  it('IS9: content that was not sent (an embedded image) is reported in abstract mode', async () => {
+    vi.stubGlobal('fetch', abstractFetch(modelJson()))
+    const res = await post(await buildImagePlusFooterPdf('CONFIDENTIAL  ORA-000123  Page 3 of 20'))
+    expect(res.status).toBe(200)
+    const json = await res.json() as { warnings: string[] }
+    expect(json.warnings.join(' ')).toMatch(/embedded images on page\(s\) 1 were not/)
+  })
+
   // Merge gate R2-09 (IN13/IN14): the shared pre-egress guards are exercised in abstract mode too.
   it('abstract mode fails closed with no denylist configured (503, no egress)', async () => {
     const fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock)

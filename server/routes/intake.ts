@@ -181,8 +181,22 @@ intakeRouter.post('/lease', async (c) => {
       ...f,
       message: scrubConfidential(f.message, terms, `flags[${i}].message`, scrubbed) ?? 'Withheld by the confidentiality guard.',
     }))
-    // Phase 4 confirmation list: what the lease prints, the period, the computed monthly amount, the quote.
-    const confirmations = scrubConfidential(abs.confirmations, terms, 'confirmations', scrubbed)
+    // Phase 4 confirmation list. Only the lease-derived fields are scrubbed (as written, quote, amounts,
+    // dates, RSF); path, period, charge class, cadence and page are server values, and nulling them (as a
+    // term like "schedule" did to path, merge gate R3-06) would orphan the entry. A withheld field blocks
+    // the billing value the entry belongs to.
+    const DOC_FIELDS = ['as_written', 'quote', 'monthly', 'start', 'end', 'rsf', 'first_adjustment_date'] as const
+    const confirmations = abs.confirmations.map((cf, i) => {
+      const out = { ...cf }
+      for (const k of DOC_FIELDS) {
+        const before = scrubbed.length
+        ;(out as Record<string, unknown>)[k] = scrubConfidential(cf[k], terms, `confirmations[${i}].${k}`, scrubbed)
+        if (scrubbed.length > before) {
+          flags.push({ severity: 'block', path: cf.path, message: 'A value in this item\'s confirmation was withheld by the confidentiality guard; enter it manually.' })
+        }
+      }
+      return out
+    })
     // A withheld value on a billing path leaves a hole the earlier checks never saw, so it blocks
     // approval until re-entered by hand.
     for (const w of scrubbed) {

@@ -34,7 +34,14 @@ describe('abstractToLegacyFields', () => {
     ]
     expect(abstractToLegacyFields(a).cam_estimate_monthly).toBe(600)
   })
-  // AD04/AD05: an unresolved (null) amount is omitted, never reported as a value.
+  // AD05 (round-3 survivor): the legacy start_date is the lease commencement, not the rent commencement.
+  it('start_date is the commencement date even when rent commences later', () => {
+    const a = emptyAbstract()
+    a.commencement_date = { value: '2026-03-01', ...src }
+    a.rent_commencement_date = { value: '2026-06-01', ...src }
+    expect(abstractToLegacyFields(a).start_date).toBe('2026-03-01')
+  })
+  // AD04: an unresolved (null) amount is omitted, never reported as a value.
   it('omits unresolved amounts and fields the abstract left null', () => {
     const a = emptyAbstract()
     a.rent_schedule = [rentRow('2026-03-01', '2027-02-28', null)]
