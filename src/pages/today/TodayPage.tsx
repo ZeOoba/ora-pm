@@ -125,7 +125,7 @@ export function TodayPage() {
       </div>
 
       <QueryState query={[rentRoll, arAging, critDates, financials]}>
-        <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] border-y border-b-border border-t-navy">
+        <div className="grid grid-cols-2 gap-x-4 border-y border-b-border border-t-navy sm:grid-cols-[repeat(auto-fit,minmax(180px,1fr))] sm:gap-x-0">
           <Vital to="/ar" label="Collected, month to date" value={pct(collectedPct)} tone="neutral"
             sub={`${compactMoney(received)} of ${compactMoney(billed)} billed (incl. deposits)`} />
           <Vital to="/rent-roll" label="Leased, by SF" value={pct(vitals.sfOccupancyPct)} tone="neutral"
@@ -211,9 +211,9 @@ export function TodayPage() {
 
 function Vital({ to, label, value, sub, tone }: { to: string; label: string; value: string; sub: string; tone: 'neutral' | 'danger' }) {
   return (
-    <Link to={to} className="mr-4.5 flex flex-col gap-1.5 border-r border-border py-4 pr-4.5 hover:bg-muted/40">
+    <Link to={to} className="flex min-w-0 flex-col gap-1.5 py-3 hover:bg-muted/40 sm:mr-4.5 sm:border-r sm:border-border sm:py-4 sm:pr-4.5">
       <span className="text-xs text-muted-foreground">{label}</span>
-      <span className={cn('font-display text-[34px] leading-none', tone === 'danger' ? 'text-status-danger' : 'text-navy')}>{value}</span>
+      <span className={cn('font-display text-[28px] leading-none sm:text-[34px]', tone === 'danger' ? 'text-status-danger' : 'text-navy')}>{value}</span>
       <span className="text-xs text-muted-foreground">{sub}</span>
     </Link>
   )
