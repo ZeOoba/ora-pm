@@ -208,17 +208,31 @@ export function renewalBoard(lanes: Lane[], renewals: RenewalRecord[], rr: RentR
 
 // ── Collections ──────────────────────────────────────────────────────────────────────────────
 
-export type CollectionsTab = 'over30' | 'pastDue' | 'all'
+export type CollectionsTab = 'over30' | 'pastDue' | 'promised' | 'disputed' | 'all'
 
 export const COLLECTIONS_TABS: { key: CollectionsTab; label: string }[] = [
   { key: 'over30', label: 'Over 30 days' },
   { key: 'pastDue', label: 'Past due' },
+  { key: 'promised', label: 'Promised' },
+  { key: 'disputed', label: 'Disputed' },
   { key: 'all', label: 'All balances' },
 ]
 
-export function collectionsFilter(rows: ArAgingLeaseRow[], tab: CollectionsTab): ArAgingLeaseRow[] {
-  const keep = tab === 'all' ? () => true : tab === 'pastDue' ? (r: ArAgingLeaseRow) => pastDue(r.buckets) > 0 : (r: ArAgingLeaseRow) => over30(r.buckets) > 0
-  return rows.filter(keep).sort((a, b) => over30(b.buckets) - over30(a.buckets) || pastDue(b.buckets) - pastDue(a.buckets) || b.balance - a.balance)
+/** Open promise / dispute per lease (B1 work log); see collections-records.ts. */
+export type RecordsByLease = Map<string, { promise: { lapsed: boolean } | null; dispute: unknown | null }>
+
+export function collectionsFilter(rows: ArAgingLeaseRow[], tab: CollectionsTab, records: RecordsByLease = new Map()): ArAgingLeaseRow[] {
+  const keep: Record<CollectionsTab, (r: ArAgingLeaseRow) => boolean> = {
+    all: () => true,
+    pastDue: (r) => pastDue(r.buckets) > 0,
+    over30: (r) => over30(r.buckets) > 0,
+    promised: (r) => !!records.get(r.lease_id)?.promise,
+    disputed: (r) => !!records.get(r.lease_id)?.dispute,
+  }
+  // A lapsed promise jumps the queue: it is the most concrete broken commitment on the list.
+  const lapsed = (r: ArAgingLeaseRow) => (records.get(r.lease_id)?.promise?.lapsed ? 1 : 0)
+  return rows.filter(keep[tab]).sort((a, b) =>
+    lapsed(b) - lapsed(a) || over30(b.buckets) - over30(a.buckets) || pastDue(b.buckets) - pastDue(a.buckets) || b.balance - a.balance)
 }
 
 export function collectionsSummary(rows: ArAgingLeaseRow[]): { balance: number; over30: number; tenants: number; tenantsOver30: number } {

@@ -24,6 +24,7 @@ import { intakeRouter } from './routes/intake'
 import { searchRouter } from './routes/search'
 import { statementsRouter } from './routes/statements'
 import { glRouter } from './routes/gl'
+import { collectionsRouter } from './routes/collections'
 import { errorHandlerMiddleware } from './middleware/error-handler'
 import { checkRateLimit } from './lib/rate-limit'
 
@@ -153,6 +154,7 @@ export function createApp() {
   app.route('/api/search', searchRouter)
   app.route('/api/statements', statementsRouter)
   app.route('/api/gl', glRouter)
+  app.route('/api/collections', collectionsRouter)
   app.route('/api/stripe', stripeRouter)
   app.route('/api/admin', portalAuthRouter)
   app.route('/api/portal', portalRouter)

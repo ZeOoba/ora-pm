@@ -119,7 +119,7 @@ describe('entity detail pages', () => {
   })
 
   it('TenantDetail leads with the balance and the ledger, newest line first', () => {
-    results.current = { tenant: ok(tenant), 'ar-aging': ok({ data: [arRow], totals: {} }), statement: ok(statement) }
+    results.current = { tenant: ok(tenant), 'ar-aging': ok({ data: [arRow], totals: {} }), statement: ok(statement), collections: ok([]) }
     const html = render('/tenants/t1', '/tenants/:id', TenantDetail)
     expect(html).toContain('Balance due')
     expect(html).toContain('$200.00 past due')
@@ -139,7 +139,7 @@ describe('entity detail pages', () => {
   })
 
   it('TenantDetail renders its five tabs and the correspondence timeline newest first', () => {
-    results.current = { tenant: ok(tenant), 'ar-aging': ok({ data: [], totals: {} }), statement: ok(statement) }
+    results.current = { tenant: ok(tenant), 'ar-aging': ok({ data: [], totals: {} }), statement: ok(statement), collections: ok([]) }
     const html = render('/tenants/t1', '/tenants/:id', TenantDetail)
     for (const t of ['Overview', 'Leases', 'Insurance', 'Correspondence', 'Portal']) expect(html).toContain(`>${t}</button>`)
     expect(html.indexOf('Newer email')).toBeGreaterThan(-1)

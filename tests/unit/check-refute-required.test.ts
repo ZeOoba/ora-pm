@@ -67,13 +67,14 @@ describe('check-refute-required — financial-source classification', () => {
     expect(isFinancialSourcePath('server/routes/exports.ts')).toBe(true)
     expect(isFinancialSourcePath('server/lib/iif-export.ts')).toBe(true)
     expect(isFinancialSourcePath('server/lib/ar-aging.ts')).toBe(true)
+    expect(isFinancialSourcePath('server/lib/ar-aging-report.ts')).toBe(true)
     // B8 general ledger core.
     expect(isFinancialSourcePath('server/lib/gl.ts')).toBe(true)
     expect(isFinancialSourcePath('server/routes/gl.ts')).toBe(true)
   })
 
   it('exposes the financial path set with the expected membership', () => {
-    expect(FINANCIAL_SOURCE_PATHS.size).toBe(22)
+    expect(FINANCIAL_SOURCE_PATHS.size).toBe(23)
     for (const p of [
       'server/routes/cron.ts',
       'server/routes/stripe.ts',
