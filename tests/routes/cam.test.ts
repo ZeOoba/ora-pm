@@ -297,8 +297,8 @@ function installDbMock() {
     return { select: vi.fn() }
   })
 
-  // approve_cam_reconciliation() (migration 0022), modelled on state.rec / state.charges with the same
-  // contract the real function has (tests/db/cam-approve-atomic-0022.test.ts runs the real one on
+  // approve_cam_reconciliation() (migration 0023), modelled on state.rec / state.charges with the same
+  // contract the real function has (tests/db/cam-approve-atomic-0023.test.ts runs the real one on
   // PGlite). One synchronous body = one transaction: nothing interleaves inside it. state.beforeRpc
   // models a concurrent write that committed before the function took its row lock.
   mockRpc.mockImplementation(async (fn: string, args: Row) => {
@@ -1536,7 +1536,7 @@ describe('approve gate, REFUTE round 2 (2026-11-10): isolated drift, billed rows
   })
 
   it('D1: a recalculation landing after the recompute gate is refused by the function, and NOTHING is posted', async () => {
-    // Before 0022 this posted the 500 charge and then 409'd on the status compare-and-swap.
+    // Before 0023 this posted the 500 charge and then 409'd on the status compare-and-swap.
     state.beforeRpc = () => { (state.rec as Row).true_up_amount = 600 }
     const res = await approve(REC_ID)
     expect(res.status).toBe(409)
@@ -1589,7 +1589,7 @@ describe('approve with a true-up already on the ledger (REFUTE F2, 2026-11-10)',
   })
 
   it('the 409 -> approve-again path from the old D1 fix no longer bills a mismatch', async () => {
-    // First approve: a recalculation after the gate -> 409. With 0022 nothing is posted at all.
+    // First approve: a recalculation after the gate -> 409. With 0023 nothing is posted at all.
     state.beforeRpc = () => { (state.rec as Row).true_up_amount = 600 }
     expect((await approve(REC_ID)).status).toBe(409)
     state.beforeRpc = null
@@ -1661,7 +1661,7 @@ describe('approve, REFUTE F3 (2026-11-10): balanced drafts, foreign key holders,
     state.camEstimateCharges = [{ amount: 575 }]
     state.rec = freshRec({ lease_id: TENANT_LEASE_ID, true_up_amount: -75, estimated_cam_paid: 575 })
     // A concurrent approval of the earlier +500 figures commits its charge after this request's
-    // advisory lookup and before its function call. Before 0022 the credit was billed first and then
+    // advisory lookup and before its function call. Before 0023 the credit was billed first and then
     // compensated back to draft; now the function refuses before billing anything.
     state.beforeRpc = () => {
       state.charges.push({ idempotency_key: KEY(), type: 'cam_true_up', lease_id: TENANT_LEASE_ID, amount: 500 })
@@ -1674,7 +1674,7 @@ describe('approve, REFUTE F3 (2026-11-10): balanced drafts, foreign key holders,
   })
 
   it('a concurrent approval billed the row first: 400 already billed, and this request posted nothing', async () => {
-    // Before 0022 this request's insert had already run, so it answered 409 "This request posted...".
+    // Before 0023 this request's insert had already run, so it answered 409 "This request posted...".
     state.beforeRpc = () => { (state.rec as Row).status = 'billed' }
     const res = await approve(REC_ID)
     expect(res.status).toBe(400)

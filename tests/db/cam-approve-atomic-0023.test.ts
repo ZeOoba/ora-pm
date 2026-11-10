@@ -1,7 +1,7 @@
 /// <reference types="node" />
-// tests/db/cam-approve-atomic-0022.test.ts
+// tests/db/cam-approve-atomic-0023.test.ts
 //
-// approve_cam_reconciliation() (migration 0022) on real PostgreSQL 17 (PGlite). pg-mem has no plpgsql,
+// approve_cam_reconciliation() (migration 0023) on real PostgreSQL 17 (PGlite). pg-mem has no plpgsql,
 // so this is the only test that executes the function body. Every migration is applied in order on
 // one PGlite instance with the same Supabase stubs as tests/db/real-postgres-migrations.test.ts; each
 // test runs inside BEGIN ... ROLLBACK so they cannot leak state into each other.
@@ -19,7 +19,7 @@ import { btree_gist } from '@electric-sql/pglite/contrib/btree_gist'
 
 const DIR = join(__dirname, '../../supabase/migrations')
 const FILES = readdirSync(DIR).filter((f) => f.endsWith('.sql')).sort()
-const FILE = '0022_cam_approve_atomic.sql'
+const FILE = '0023_cam_approve_atomic.sql'
 
 const STUBS = `
   CREATE ROLE anon NOLOGIN; CREATE ROLE authenticated NOLOGIN; CREATE ROLE service_role NOLOGIN BYPASSRLS;
@@ -107,11 +107,11 @@ async function keyCharges() {
   )).rows
 }
 
-describe('migration 0022 — shape', () => {
+describe('migration 0023 — shape', () => {
   const sql = readFileSync(join(DIR, FILE), 'utf8')
 
-  it('ships as the only 0022 migration file', () => {
-    expect(FILES.filter((f) => f.startsWith('0022_'))).toEqual([FILE])
+  it('ships as the only 0023 migration file', () => {
+    expect(FILES.filter((f) => f.startsWith('0023_'))).toEqual([FILE])
   })
 
   it('locks the reconciliation row and the key holder FOR UPDATE', () => {
@@ -256,9 +256,9 @@ describe('approve_cam_reconciliation — refusals change nothing', () => {
   })
 })
 
-// The pre-deploy DATA CHECK in the 0022 header / README: must flag every live true-up the function
+// The pre-deploy DATA CHECK in the 0023 header / README: must flag every live true-up the function
 // cannot see, and none of the function's own postings. Read from the migration text so it cannot drift.
-describe('0022 pre-flight data check query', () => {
+describe('0023 pre-flight data check query', () => {
   const sql = readFileSync(join(DIR, FILE), 'utf8')
   const query = (/-- {3}(SELECT id, lease_id, period_start, amount FROM charges\r?\n(?:-- {3}.*\r?\n)+)/.exec(sql)?.[1] ?? '')
     .replace(/^--\s+/gm, '').trim().replace(/;$/, '')

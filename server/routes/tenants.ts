@@ -3,6 +3,7 @@ import { getDb } from '../db/client'
 import { TenantInsertSchema, TenantUpdateSchema, TenantCorrespondenceInsertSchema } from '../lib/schemas'
 import { dbError } from '../lib/api-error'
 import { parseListQuery, listErrorResponse } from '../lib/list-query'
+import { PORTAL_TENANT_SELECT, portalAging, portalBalance, portalCharges, portalLeases, portalPayments } from '../lib/portal-data'
 
 type Env = { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string }
 
@@ -78,4 +79,39 @@ tenantsRouter.post('/:id/correspondence', async (c) => {
     .single()
   if (error) return dbError(c, error, 'Failed to create correspondence entry')
   return c.json({ data }, 201)
+})
+
+// GET /api/tenants/:id/portal-preview — B13 "View as tenant". Admin-only (this router sits behind
+// adminAuthMiddleware). Returns the exact payloads the tenant's own portal endpoints return, built
+// by the same functions (server/lib/portal-data.ts), so the preview can never show a different
+// balance or a field the tenant cannot see. Read-only. Fails as a whole: a partial preview would
+// misrepresent what the tenant sees.
+const PREVIEW_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+tenantsRouter.get('/:id/portal-preview', async (c) => {
+  const id = c.req.param('id')
+  if (!PREVIEW_UUID_RE.test(id)) return c.json({ error: 'id must be a uuid' }, 422)
+  const db = getDb(c.env)
+  const { data: tenant, error } = await db.from('tenants').select(PORTAL_TENANT_SELECT).eq('id', id).maybeSingle()
+  if (error) return dbError(c, error, 'Failed to load tenant')
+  if (!tenant) return c.json({ error: 'Tenant not found' }, 404)
+
+  const [balance, charges, payments, leases, aging] = await Promise.all([
+    portalBalance(db, id), portalCharges(db, id), portalPayments(db, id), portalLeases(db, id), portalAging(db, id),
+  ])
+  for (const r of [balance, charges, payments, leases, aging]) {
+    if (!r.ok) {
+      return r.kind === 'raw'
+        ? dbError(c, { message: r.text }, 'Failed to load tenant portal preview')
+        : dbError(c, r.error, 'Failed to load tenant portal preview')
+    }
+  }
+  if (!balance.ok || !charges.ok || !payments.ok || !leases.ok || !aging.ok) return c.json({ error: 'unreachable' }, 500)
+  return c.json({
+    me: { tenant, total_balance: balance.data },
+    charges: { data: charges.data },
+    payments: { data: payments.data },
+    lease: { data: leases.data },
+    aging: aging.data,
+  })
 })

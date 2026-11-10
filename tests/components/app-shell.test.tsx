@@ -90,3 +90,15 @@ describe('AppShell collapsed rail (first render)', () => {
     })
   })
 })
+
+describe('AppShell mobile tab bar', () => {
+  const html = render('/ar')
+  it('renders a < md bottom tab bar with Today, Collections, Rent roll and Search', () => {
+    expect(html).toMatch(/<nav aria-label="Quick" class="[^"]*md:hidden/)
+    for (const t of ['Today', 'Collections', 'Rent roll', 'Search']) expect(html).toContain(t)
+    expect(html).toMatch(/aria-current="page"[^>]*href="\/ar"|href="\/ar"[^>]*aria-current="page"/)
+  })
+  it('pads main so content clears the bar on phones', () => {
+    expect(html).toContain('pb-24 md:pb-8')
+  })
+})

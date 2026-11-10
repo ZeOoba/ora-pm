@@ -9,6 +9,7 @@ import { formatCurrency } from '../../lib/format'
 import type { ARLedgerRow } from '../../types'
 import { AGING_COLUMNS, UNALLOCATED_COLUMN, hasUnallocated, type AgingBuckets, type AgingTotals } from './ar-aging-view'
 import { CollectionsQueue } from '../money/CollectionsQueue'
+import { indexByLease, useOpenCollectionsRecords } from '../money/collections-records'
 import { collectionsSummary } from '../money/money-derive'
 import { compactMoney } from '../today/today-queue'
 
@@ -25,6 +26,10 @@ export function ARDashboard() {
   const rows = query.data?.data ?? []
   const totals = query.data?.totals
   const summary = collectionsSummary(rows)
+  // Promise/dispute work log (B1). A failed read never blocks the money figures above it.
+  const { promises, disputes } = useOpenCollectionsRecords()
+  const records = indexByLease(promises.data, disputes.data)
+  const recordsFailed = promises.isError || disputes.isError
 
   const totalCharged = rows.reduce((s, r) => s + r.total_charged, 0)
   const totalPaid = rows.reduce((s, r) => s + r.total_paid, 0)
@@ -63,7 +68,12 @@ export function ARDashboard() {
               </div>
             </div>
 
-            <CollectionsQueue rows={rows} />
+            {recordsFailed && (
+              <p role="status" className="mb-3 rounded-md border border-status-warning/30 bg-status-warning/5 px-3 py-2 text-xs text-status-warning">
+                Couldn't load promises and disputes; the queue below shows balances only.
+              </p>
+            )}
+            <CollectionsQueue rows={rows} records={records} />
 
             <h2 className="mb-3 mt-10 font-display text-2xl text-navy">Aging detail</h2>
             <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-3">

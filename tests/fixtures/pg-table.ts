@@ -29,8 +29,17 @@ export function pgTable(rows: Row[], opts: { insert?: ReturnType<typeof vi.fn>; 
       // `.single()`: exactly one row, else PostgREST's PGRST116 error (as supabase-js surfaces it).
       let single = false
       b.single = () => { single = true; return b }
+      // `.maybeSingle()`: zero rows → data null (no error); one row → that row; more → error.
+      let maybe = false
+      b.maybeSingle = () => { maybe = true; return b }
       b.then = (resolve: (v: unknown) => void) => {
         if (opts.error) return resolve({ data: null, error: opts.error })
+        if (maybe) {
+          const all = (b as { _rows: () => Row[] })._rows()
+          return resolve(all.length <= 1
+            ? { data: all[0] ?? null, error: null }
+            : { data: null, error: { code: 'PGRST116', message: 'JSON object requested, multiple rows returned' } })
+        }
         if (single) {
           const all = (b as { _rows: () => Row[] })._rows()
           return resolve(all.length === 1

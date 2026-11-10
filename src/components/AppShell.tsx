@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router'
-import { ChevronRight, LogOut, Menu, PanelLeftClose, PanelLeftOpen, Search, User } from 'lucide-react'
+import { ChevronRight, HandCoins, Home, LogOut, Menu, PanelLeftClose, PanelLeftOpen, ScrollText, Search, User } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from '@/components/ui/sheet'
 import {
@@ -14,7 +14,7 @@ import {
 import { cn } from '@/lib/utils'
 import { NavList } from './NavList'
 import { CommandMenu } from './CommandMenu'
-import { breadcrumbFor } from './nav-config'
+import { breadcrumbFor, isNavActive } from './nav-config'
 
 const RAIL_KEY = 'ora-pm.nav-collapsed'
 
@@ -186,9 +186,38 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </DropdownMenu>
           </div>
         </header>
-        <main className="flex-1 overflow-y-auto bg-background p-4 md:p-8">{children}</main>
+        <main className="flex-1 overflow-y-auto bg-background p-4 md:p-8 pb-24 md:pb-8">{children}</main>
+        <MobileTabBar pathname={pathname} onSearch={() => setSearchOpen(true)} />
       </div>
       <CommandMenu open={searchOpen} onOpenChange={setSearchOpen} />
     </div>
+  )
+}
+
+const MOBILE_TABS = [
+  { to: '/', label: 'Today', icon: Home },
+  { to: '/ar', label: 'Collections', icon: HandCoins },
+  { to: '/rent-roll', label: 'Rent roll', icon: ScrollText },
+]
+
+/** < md only: thumb-reach tab bar (prototype mobile screen), 44px+ targets, safe-area aware. */
+function MobileTabBar({ pathname, onSearch }: { pathname: string; onSearch: () => void }) {
+  return (
+    <nav aria-label="Quick" className="fixed inset-x-0 bottom-0 z-40 grid grid-cols-4 border-t border-border bg-card pb-[env(safe-area-inset-bottom)] md:hidden">
+      {MOBILE_TABS.map(({ to, label, icon: Icon }) => {
+        const active = isNavActive(pathname, to)
+        return (
+          <Link key={to} to={to} aria-current={active ? 'page' : undefined}
+            className={cn('flex min-h-14 flex-col items-center justify-center gap-1 text-[11px]', active ? 'font-semibold text-navy' : 'text-muted-foreground')}>
+            <Icon className="size-5" aria-hidden="true" />
+            {label}
+          </Link>
+        )
+      })}
+      <button type="button" onClick={onSearch} className="flex min-h-14 flex-col items-center justify-center gap-1 text-[11px] text-muted-foreground">
+        <Search className="size-5" aria-hidden="true" />
+        Search
+      </button>
+    </nav>
   )
 }

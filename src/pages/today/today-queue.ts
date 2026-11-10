@@ -84,19 +84,35 @@ function usd(v: number): string {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(v)
 }
 
-function collectItems(ar: ArAgingLeaseRow[]): QueueItem[] {
+/** B1 work-log state per lease (collections-records.ts); only the fields the queue reads. */
+export type QueueRecords = Map<string, {
+  promise: { lapsed: boolean; amount: number; promised_date: string } | null
+  dispute: { reason: string } | null
+}>
+
+function shortDate(iso: string): string {
+  return `${iso.slice(5, 7)}/${iso.slice(8, 10)}`
+}
+
+function collectItems(ar: ArAgingLeaseRow[], records: QueueRecords): QueueItem[] {
   return ar
     .filter((r) => pastDue(r.buckets) > 0)
     .map((r) => {
       const oldest = oldestBucketLabel(r.buckets)
+      const rec = records.get(r.lease_id)
+      const p = rec?.promise
+      const notes = [
+        p && `${p.lapsed ? 'promise lapsed' : 'promised'} ${usd(p.amount)} by ${shortDate(p.promised_date)}`,
+        rec?.dispute && 'disputed',
+      ].filter(Boolean)
       return {
         key: `collect:${r.lease_id}`,
         kind: 'Collect' as const,
-        title: `${r.tenant_name}: ${oldest} past due`,
-        context: `${r.property_name} · Suite ${r.suite} · total balance ${usd(r.balance)}`,
+        title: p?.lapsed ? `${r.tenant_name}: promise to pay lapsed` : `${r.tenant_name}: ${oldest} past due`,
+        context: [`${r.property_name} · Suite ${r.suite} · total balance ${usd(r.balance)}`, ...notes].join(' · '),
         amount: pastDue(r.buckets),
-        due: oldest,
-        urgent: over30(r.buckets) > 0,
+        due: p?.lapsed ? `${oldest} late` : oldest,
+        urgent: over30(r.buckets) > 0 || !!p?.lapsed,
         action: 'Open ledger',
         to: `/tenants/${r.tenant_id}`,
       }
@@ -142,8 +158,8 @@ function complyItems(dates: CriticalDateRow[]): QueueItem[] {
  * The whole queue, ranked: urgent items first, then by dollars at stake (largest first); items
  * with no dollar figure sort last within their urgency band.
  */
-export function buildQueue(input: { ar: ArAgingLeaseRow[]; rentRoll: RentRollRow[]; dates: CriticalDateRow[]; today: string }): QueueItem[] {
-  const all = [...collectItems(input.ar), ...renewItems(input.rentRoll, input.today), ...complyItems(input.dates)]
+export function buildQueue(input: { ar: ArAgingLeaseRow[]; rentRoll: RentRollRow[]; dates: CriticalDateRow[]; today: string; records?: QueueRecords }): QueueItem[] {
+  const all = [...collectItems(input.ar, input.records ?? new Map()), ...renewItems(input.rentRoll, input.today), ...complyItems(input.dates)]
   return all.sort((a, b) => {
     if (a.urgent !== b.urgent) return a.urgent ? -1 : 1
     return (b.amount ?? -1) - (a.amount ?? -1)

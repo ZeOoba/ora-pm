@@ -93,7 +93,7 @@ describe('Renewals (timeline and board)', () => {
 
 describe('Collections', () => {
   it('leads with the amount owed, then the work queue (over-30 tab), then aging detail', () => {
-    results.current = { 'ar-aging': ok({ data: arRows, totals }) }
+    results.current = { 'ar-aging': ok({ data: arRows, totals }), collections: ok([]) }
     const html = render(ARDashboard, '/ar')
     expect(html).toContain('$31,712.51 owed by 2 tenants')
     expect(html).toContain('$6,340.18 is over 30 days, across 1 tenant')
