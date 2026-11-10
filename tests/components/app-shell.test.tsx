@@ -35,7 +35,7 @@ describe('AppShell', () => {
   })
 
   it('renders group headings', () => {
-    for (const h of ['Portfolio', 'Leasing', 'Accounting', 'Reports']) expect(html).toContain(h)
+    for (const h of ['Portfolio', 'Leasing', 'Money', 'Books']) expect(html).toContain(h)
   })
 
   it('uses md: responsive classes (rail >= md, top bar < md)', () => {
