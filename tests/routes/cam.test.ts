@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { createApp } from '../../server/index'
 import { pgTable } from '../fixtures/pg-table'
 
@@ -59,6 +59,8 @@ const state = {
   tenantLeaseStart: '2020-01-01',
   tenantLeaseEnd: '2030-12-31',
   tenantLeaseStatus: 'active',
+  /** The tenant lease's unit_id; a value not in unitRows() models a lease with no unit/property. */
+  tenantUnitId: 'u_tenant',
   extraUnits: [] as Row[],
   extraLeases: [] as Row[],
   // Building-RSF ruling (2026-11-08): the denominator is properties.cam_denominator_rsf, defaulted
@@ -104,7 +106,7 @@ function leaseRows(): Row[] {
   })
   return [
     row({
-      id: TENANT_LEASE_ID, unit_id: 'u_tenant', status: state.tenantLeaseStatus,
+      id: TENANT_LEASE_ID, unit_id: state.tenantUnitId, status: state.tenantLeaseStatus,
       start_date: state.tenantLeaseStart, end_date: state.tenantLeaseEnd,
       rent_type: state.leaseRentType, expense_stop_amount: state.leaseExpenseStop,
       proportionate_share_pct: state.leaseStatedPct, base_year: state.leaseBaseYear,
@@ -306,6 +308,7 @@ beforeEach(() => {
   state.tenantLeaseStart = '2020-01-01'
   state.tenantLeaseEnd = '2030-12-31'
   state.tenantLeaseStatus = 'active'
+  state.tenantUnitId = 'u_tenant'
   state.extraUnits = []
   state.extraLeases = []
   state.denominatorRSF = 50000
@@ -328,6 +331,16 @@ beforeEach(() => {
   state.listError = null
   installDbMock()
 })
+
+// REFUTE H2 (2026-11-10): a refused /calculate prices nothing. No insert, and the ONLY update
+// allowed is the invalidation patch that strips share_basis from an existing draft.
+function expectRefusedNotPriced() {
+  expect(camInsertSpy).not.toHaveBeenCalled()
+  for (const [patch] of camUpdateSpy.mock.calls as [Row][]) {
+    expect(Object.keys(patch).sort()).toEqual(['basis_warnings', 'share_basis'])
+    expect(patch.share_basis).toBeNull()
+  }
+}
 
 // ---------------------------------------------------------------------------
 // POST /api/cam/:id/approve — atomic approval (OI-046)
@@ -725,7 +738,7 @@ describe('POST /api/cam/calculate: rent type and expense stop', () => {
     const res = await calculate(BODY)
     expect(res.status).toBe(422)
     expect(((await res.json()) as { error: string }).error).toMatch(/expense stop/i)
-    expect(camUpdateSpy).not.toHaveBeenCalled()
+    expectRefusedNotPriced()
     expect(camInsertSpy).not.toHaveBeenCalled()
   })
 
@@ -816,7 +829,7 @@ describe('POST /api/cam/calculate: server-side pool (denominator + recoverable t
     state.tenantLeaseStart = '2026-01-01'
     const res = await calculate(BODY)
     expect(res.status).toBe(422)
-    expect(camUpdateSpy).not.toHaveBeenCalled()
+    expectRefusedNotPriced()
     expect(camInsertSpy).not.toHaveBeenCalled()
   })
 
@@ -879,7 +892,7 @@ describe('POST /api/cam/calculate: same-unit overlap (REFUTE C4b)', () => {
     expect(error).toMatch(/u_other/)
     expect(error).toMatch(/66666666-6666-4666-8666-666666666666/)
     expect(error).toMatch(new RegExp(OTHER_LEASE_ID))
-    expect(camUpdateSpy).not.toHaveBeenCalled()
+    expectRefusedNotPriced()
     expect(camInsertSpy).not.toHaveBeenCalled()
   })
 })
@@ -982,7 +995,7 @@ describe('POST /api/cam/calculate: building RSF denominator (ruling 2026-11-08)'
     const res = await calculate(BODY)
     expect(res.status).toBe(422)
     expect(((await res.json()) as { error: string }).error).toMatch(/rentable SF/i)
-    expect(camUpdateSpy).not.toHaveBeenCalled()
+    expectRefusedNotPriced()
     expect(camInsertSpy).not.toHaveBeenCalled()
   })
 
@@ -1077,7 +1090,7 @@ describe('POST /api/cam/:id/approve: pre-0021 drafts (leased-SF basis) are not b
     state.rec = freshRec({ share_basis: null })
     const res = await approve(REC_ID)
     expect(res.status).toBe(409)
-    expect(((await res.json()) as { error: string }).error).toMatch(/Recalculate/)
+    expect(((await res.json()) as { error: string }).error).toMatch(/recalculate/i)
     expect(chargesInsertSpy).not.toHaveBeenCalled()
     expect((state.rec as Row).status).toBe('draft')
   })
@@ -1097,5 +1110,154 @@ describe('over-recovery warning: concurrent stated shares above 100%', () => {
     const json = await res.json() as { data: Row; warnings: string[] }
     expect(json.warnings.some((w) => /103\.00%/.test(w))).toBe(true)
     expect(String(json.data.basis_warnings)).toMatch(/103\.00%/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// REFUTE round E (Opus adversarial-reviewer, 2026-11-10) regressions.
+// ---------------------------------------------------------------------------
+describe('holdover: excluded from CAM and flagged (ruling 2026-11-08; REFUTE C4)', () => {
+  const pool = (qs: string) => app.request(`/api/cam/pool?${qs}`, {}, env)
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-11-10T12:00:00Z'))
+  })
+  afterEach(() => { vi.useRealTimers() })
+
+  it('an active lease whose term ended mid-year: billed only to end_date, and the draft carries the holdover flag', async () => {
+    state.tenantLeaseEnd = '2025-06-30' // status stays 'active': the tenant is holding over
+    const res = await calculate({ lease_id: TENANT_LEASE_ID, reconciliation_year: 2025 })
+    expect(res.status).toBe(200)
+    const json = await res.json() as { data: Row; warnings: string[] }
+    // 2% x $10,000 x 181/365 days: the holdover half-year is excluded, not billed.
+    expect(json.data.actual_cam_owed).toBeCloseTo((200 * 181) / 365, 2)
+    const flag = json.warnings.find((w) => /^Holdover:/.test(w))
+    expect(flag).toMatch(new RegExp(`${TENANT_LEASE_ID}.*2025-06-30`))
+    expect(String(json.data.basis_warnings)).toContain(flag as string)
+  })
+
+  it('a holdover lease that ended before the year is flagged on /pool and refused by name on /calculate', async () => {
+    state.tenantLeaseEnd = '2024-06-30'
+    const p = await pool(`property_id=${PROPERTY_ID}&year=2025`)
+    expect(p.status).toBe(200)
+    const pj = await p.json() as { data: { warnings: string[]; leases: Row[] } }
+    expect(pj.data.leases.map((l) => l.lease_id)).not.toContain(TENANT_LEASE_ID)
+    expect(pj.data.warnings.some((w) => w.startsWith('Holdover:') && w.includes(TENANT_LEASE_ID))).toBe(true)
+
+    const res = await calculate({ lease_id: TENANT_LEASE_ID, reconciliation_year: 2025 })
+    expect(res.status).toBe(422)
+    expect(((await res.json()) as { error: string }).error).toMatch(/^Holdover:/)
+  })
+
+  it('not holdover: an expired lease, a lease ending on the last day of the year, a term not yet over', async () => {
+    // '2026-12-01' in 2026: still in term on 2026-11-10, so the cutoff must be today, not the year
+    // end (round-2 mutation M4 survived without this case).
+    for (const [status, end, year] of [['expired', '2025-06-30', 2025], ['active', '2025-12-31', 2025], ['active', '2026-12-31', 2026], ['active', '2026-12-01', 2026]] as const) {
+      state.tenantLeaseStatus = status
+      state.tenantLeaseEnd = end
+      installDbMock()
+      const p = await pool(`property_id=${PROPERTY_ID}&year=${year}`)
+      expect(p.status).toBe(200)
+      const pj = await p.json() as { data: { warnings: string[] } }
+      expect(pj.data.warnings.filter((w) => w.startsWith('Holdover:'))).toEqual([])
+    }
+  })
+
+  it('the current year flags an active lease whose end_date has already passed this year', async () => {
+    state.tenantLeaseEnd = '2026-03-31'
+    const p = await pool(`property_id=${PROPERTY_ID}&year=2026`)
+    const pj = await p.json() as { data: { warnings: string[] } }
+    expect(pj.data.warnings.some((w) => w.startsWith('Holdover:') && w.includes('2026-03-31'))).toBe(true)
+  })
+})
+
+describe('denominator below the property\'s summed unit SF (REFUTE H1)', () => {
+  it('warns on a computed share (saved with the draft) and on /pool, but does not refuse', async () => {
+    state.extraUnits = [{ id: 'u_vacant', property_id: PROPERTY_ID, sf: 20000 }] // 70,000 SF of units vs 50,000 RSF
+    const res = await calculate({ lease_id: TENANT_LEASE_ID, reconciliation_year: 2025 })
+    expect(res.status).toBe(200)
+    const json = await res.json() as { data: Row; warnings: string[] }
+    expect(json.data.actual_cam_owed).toBe(200)
+    expect(json.warnings.some((w) => /50,000 RSF.*70,000 SF of units/.test(w))).toBe(true)
+    expect(String(json.data.basis_warnings)).toMatch(/70,000 SF of units/)
+
+    const p = await app.request(`/api/cam/pool?property_id=${PROPERTY_ID}&year=2025`, {}, env)
+    const pj = await p.json() as { data: { warnings: string[] } }
+    expect(pj.data.warnings.some((w) => /70,000 SF of units/.test(w))).toBe(true)
+  })
+
+  it('a stated share ignores the RSF, so its draft does not carry the denominator warning', async () => {
+    state.extraUnits = [{ id: 'u_vacant', property_id: PROPERTY_ID, sf: 20000 }]
+    state.omitOtherLease = true // keep the >100% pool warning out of this assertion
+    state.leaseStatedPct = 0.02
+    const res = await calculate({ lease_id: TENANT_LEASE_ID, reconciliation_year: 2025 })
+    expect(res.status).toBe(200)
+    const json = await res.json() as { warnings: string[] }
+    expect(json.warnings.filter((w) => /SF of units/.test(w))).toEqual([])
+  })
+
+  it('no warning when the denominator covers every unit', async () => {
+    const res = await calculate({ lease_id: TENANT_LEASE_ID, reconciliation_year: 2025 })
+    const json = await res.json() as { warnings: string[] }
+    expect(json.warnings.filter((w) => /SF of units/.test(w))).toEqual([])
+  })
+})
+
+describe('a refused recalculation invalidates the previous draft (REFUTE H2)', () => {
+  const BODY = { lease_id: TENANT_LEASE_ID, reconciliation_year: 2025 }
+  const priorDraft = () => freshRec({ lease_id: TENANT_LEASE_ID, reconciliation_year: 2025, true_up_amount: 500 })
+
+  it('lease changed to a base year with no amount: 422, the old full-NNN draft loses its basis, and approve refuses it', async () => {
+    state.rec = priorDraft()
+    state.leaseBaseYear = 2024
+    state.leaseBaseAmount = null
+    const res = await calculate(BODY)
+    expect(res.status).toBe(422)
+    expectRefusedNotPriced()
+    expect(state.rec?.share_basis).toBeNull()
+    expect(String(state.rec?.basis_warnings)).toMatch(/^Last recalculation was refused: /)
+    expect(state.rec?.true_up_amount).toBe(500) // amounts untouched; the row is simply not billable
+
+    const ap = await approve(REC_ID)
+    expect(ap.status).toBe(409)
+    expect(chargesInsertSpy).not.toHaveBeenCalled()
+    expect(state.rec?.status).toBe('draft')
+  })
+
+  it('property RSF corrected below the leased SF: the old draft is invalidated too', async () => {
+    state.rec = priorDraft()
+    state.denominatorRSF = 40000
+    const res = await calculate(BODY)
+    expect(res.status).toBe(422)
+    expect(state.rec?.share_basis).toBeNull()
+  })
+
+  it('a lease with no unit/property: 422 and the old draft is invalidated (round-2 mutation M7)', async () => {
+    state.rec = priorDraft()
+    state.tenantUnitId = 'u_missing'
+    const res = await calculate(BODY)
+    expect(res.status).toBe(422)
+    expect(((await res.json()) as { error: string }).error).toMatch(/no unit\/property/)
+    expectRefusedNotPriced()
+    expect(state.rec?.share_basis).toBeNull()
+  })
+
+  it('a billed reconciliation is never touched by the invalidation', async () => {
+    state.rec = priorDraft()
+    state.rec.status = 'billed'
+    state.denominatorRSF = null
+    const res = await calculate(BODY)
+    expect(res.status).toBe(422)
+    expect(state.rec?.share_basis).toBe('premises_rsf_over_denominator')
+    expect(state.rec?.status).toBe('billed')
+  })
+
+  it('fails closed (500) when the invalidation write itself fails, instead of a 422 that leaves the draft billable', async () => {
+    state.rec = priorDraft()
+    state.denominatorRSF = null
+    state.reconciliationUpdateError = { message: 'boom update' }
+    const res = await calculate(BODY)
+    expect(res.status).toBe(500)
+    expect(await res.text()).not.toContain('boom update')
   })
 })

@@ -391,7 +391,8 @@ export function CAMList() {
                     {(row.tenant_pro_rata_share_pct * 100).toFixed(2)}%
                   </td>
                   <td className="px-4 py-3 text-xs text-muted-foreground">
-                    {row.share_basis ? SHARE_BASIS_LABEL[row.share_basis] : 'Pre-0021 (leased SF)'}
+                    {/* NULL basis = pre-0021 (leased SF) or a refused recalculation (REFUTE H2); approve 409s both. */}
+                    {row.share_basis ? SHARE_BASIS_LABEL[row.share_basis] : 'No valid basis: recalculate'}
                     {row.recovery_basis && <span> · {RECOVERY_BASIS_LABEL[row.recovery_basis]}</span>}
                     {row.basis_warnings && <p className="text-amber-600">{row.basis_warnings}</p>}
                   </td>
