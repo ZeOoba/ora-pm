@@ -1416,3 +1416,59 @@ describe('POST /api/cam/calculate: type and error-path hardening (REFUTE L1, L3,
     expect(state.rec?.share_basis).toBeNull()
   })
 })
+
+describe('approve gate, REFUTE round 2 (2026-11-10): isolated drift, billed rows, compare-and-swap', () => {
+  beforeEach(approveFixture)
+
+  it('D3: a share-only change (true-up unchanged) is still refused', async () => {
+    // Empty pool: owed is $0 whatever the share, so the true-up stays -$100 while the share moves.
+    state.expenses = []
+    state.camEstimateCharges = [{ amount: 100 }]
+    state.rec = freshRec({
+      lease_id: TENANT_LEASE_ID, total_property_recoverable_expenses: 0, estimated_cam_paid: 100,
+      actual_cam_owed: 0, true_up_amount: -100,
+    })
+    state.denominatorRSF = 100000 // 2% -> 1%
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: string }).error).toMatch(/tenant_pro_rata_share_pct 0\.02 -> 0\.01/)
+    expect(state.rec?.status).toBe('draft')
+  })
+
+  it('D3: owed and paid moving together (true-up unchanged) is still refused', async () => {
+    state.expenses.push({ id: 'e_2', property_id: PROPERTY_ID, expense_date: '2025-11-01', amount: 5000, recoverable: true })
+    state.camEstimateCharges = [{ amount: 100 }] // +$100 owed, +$100 paid: true-up still $500
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: string }).error).toMatch(/actual_cam_owed 500 -> 600/)
+    expect(chargesInsertSpy).not.toHaveBeenCalled()
+  })
+
+  it('D2: a billed row posts nothing, even after its charge was deleted', async () => {
+    state.rec = freshRec({ lease_id: TENANT_LEASE_ID, status: 'billed' })
+    state.charges = [] // the true-up charge was deleted via DELETE /charges/:id
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(400)
+    expect(((await res.json()) as { error: string }).error).toBe('already billed')
+    expect(chargesInsertSpy).not.toHaveBeenCalled()
+  })
+
+  it('D1: a change landing after the pre-post re-read is caught by the status compare-and-swap, loudly', async () => {
+    // Read 1 = initial, read 2 = pre-post re-read; the invalidation lands right after read 2.
+    state.afterRecRead = (n) => { if (n === 2) (state.rec as Row).share_basis = null }
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: string }).error).toMatch(/NOT marked billed.*500\.00 was already posted/)
+    expect(state.rec?.status).toBe('draft')
+  })
+
+  it('D1 (credit): the same compare-and-swap guards the credit branch; nothing was posted', async () => {
+    state.camEstimateCharges = [{ amount: 575 }]
+    state.rec = freshRec({ lease_id: TENANT_LEASE_ID, true_up_amount: -75, estimated_cam_paid: 575 })
+    state.afterRecRead = (n) => { if (n === 2) (state.rec as Row).true_up_amount = -80 }
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: string }).error).toMatch(/No charge was posted/)
+    expect(state.rec?.status).toBe('draft')
+  })
+})

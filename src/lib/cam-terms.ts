@@ -39,26 +39,38 @@ export function camTermsFormFromLease(l: Pick<Lease, 'rent_type' | 'proportionat
  *  base year cannot be combined with an expense stop (the engine refuses that pair). */
 export function validateCamTerms(f: CamTermsForm): CamTermsErrors {
   const e: CamTermsErrors = {}
+  const hasBaseYear = f.base_year.trim() !== ''
   if (f.proportionate_share_percent.trim() !== '') {
     const pct = Number(f.proportionate_share_percent)
-    if (!(Number.isFinite(pct) && pct > 0 && pct <= 100)) e.proportionate_share_percent = 'Enter a percent above 0 and at most 100'
+    // REFUTE D4: the payload rounds the fraction to 8 dp; a share that rounds to 0 would 422.
+    if (!(Number.isFinite(pct) && pct > 0 && pct <= 100 && Number((pct / 100).toFixed(8)) > 0)) {
+      e.proportionate_share_percent = 'Enter a percent above 0 and at most 100'
+    }
   }
-  if (f.base_year.trim() !== '') {
+  if (hasBaseYear) {
     const y = Number(f.base_year)
     if (!(Number.isInteger(y) && y >= 1900 && y <= 2200)) e.base_year = 'Enter a calendar year, e.g. 2026'
   }
   if (f.base_year_expense_amount.trim() !== '') {
     const amt = Number(f.base_year_expense_amount)
     if (!(Number.isFinite(amt) && amt >= 0)) e.base_year_expense_amount = 'Must be ≥ 0'
-    else if (f.base_year.trim() === '') e.base_year = 'Required when a base-year amount is entered'
+    else if (!hasBaseYear) e.base_year = 'Required when a base-year amount is entered'
+    // REFUTE C6: the engine refuses a $0 base amount against any non-zero pool (the 3x plausibility
+    // guard), so a $0 here would only fail later, at CAM time.
+    else if (amt === 0) e.base_year_expense_amount = 'A base year needs that year\'s recoverable total above $0'
+  } else if (hasBaseYear) {
+    // REFUTE C6: the engine refuses a base year with no amount; say so now, not at reconciliation.
+    e.base_year_expense_amount = 'Required with a base year: that year\'s whole-pool recoverable total ($)'
   }
   if (f.expense_stop_amount.trim() !== '') {
     const stop = Number(f.expense_stop_amount)
     if (!(Number.isFinite(stop) && stop >= 0)) e.expense_stop_amount = 'Must be ≥ 0'
-    else if (f.base_year.trim() !== '') e.expense_stop_amount = 'A lease uses a base year or an expense stop, not both'
+    else if (hasBaseYear) e.expense_stop_amount = 'A lease uses a base year or an expense stop, not both'
   }
-  if (f.rent_type === 'modified_gross' && f.expense_stop_amount.trim() === '' && !e.expense_stop_amount) {
-    e.expense_stop_amount = 'Modified gross needs an expense stop ($/SF/yr)'
+  // Modified gross recovers above an expense stop OR above a base year (the engine accepts either);
+  // with neither there is nothing to recover above.
+  if (f.rent_type === 'modified_gross' && f.expense_stop_amount.trim() === '' && !hasBaseYear && !e.expense_stop_amount) {
+    e.expense_stop_amount = 'Modified gross needs an expense stop ($/SF/yr) or a base year'
   }
   return e
 }

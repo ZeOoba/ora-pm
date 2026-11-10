@@ -428,11 +428,14 @@ async function computeReconciliation(db: Db, lease_id: string, reconciliation_ye
 
   // REFUTE L1: charges.amount is NUMERIC and can arrive from PostgREST as a string; `s + ch.amount`
   // would then concatenate. Summed in integer cents like loadRecoverableTotal; a non-numeric amount
-  // makes the sum NaN, which calculateCAMTrueUp refuses (fail closed).
+  // makes the sum NaN, refused just below (fail closed) rather than saved as a NULL true-up.
   const estimatedCamPaid = (camCharges ?? []).reduce(
     (cents: number, ch: { amount: number | string }) => cents + Math.round(Number(ch.amount) * 100),
     0,
   ) / 100
+  if (!Number.isFinite(estimatedCamPaid)) {
+    return { kind: 'db_error', error: { message: 'non-numeric CAM estimate charge amount' }, label: 'Failed to sum CAM estimate charges' }
+  }
 
   let result
   try {
@@ -516,7 +519,9 @@ camRouter.post('/calculate', async (c) => {
       .eq('status', 'draft')
       .select()
     if (invalidateErr) return dbError(c, invalidateErr, 'Failed to invalidate the stale CAM draft')
-    return c.json({ error: computed.message }, computed.httpStatus)
+    // `message` is CAMTermsError / engine text, never a DB error (those are 'db_error' above).
+    const { message, httpStatus } = computed
+    return c.json({ error: message }, httpStatus)
   }
   const { patch, warnings } = computed
 
@@ -630,6 +635,25 @@ camRouter.post('/calculate', async (c) => {
 // charge + status still 'draft' — safe to retry (insert hits 23505, update
 // completes). Crash before insert leaves nothing — safe to retry from
 // scratch. The ordering is load-bearing; do not swap it.
+/**
+ * The approve status update matched zero rows. Either the row is no longer a draft (a concurrent
+ * approve billed it: the existing 'already billed' answer) or it is still a draft whose figures
+ * changed under this request (REFUTE D1). In the second case the true-up charge may already be
+ * posted for the OLD amount, so say so loudly (409) instead of reporting success or a plain 400.
+ */
+async function approveLostRace(db: Db, c: Parameters<typeof dbError>[0], id: string, postedAmount: number | null) {
+  const { data: now, error } = await db.from('cam_reconciliations').select('*').eq('id', id).single()
+  if (error || !now) return dbError(c, error ?? { message: 'reconciliation vanished' }, 'Failed to re-read the CAM reconciliation')
+  if ((now as { status?: string }).status !== 'draft') return c.json({ error: 'already billed' }, 400)
+  return c.json({
+    error: 'This draft was recalculated or invalidated while it was being approved, so it was NOT marked billed. '
+      + (postedAmount === null
+        ? 'No charge was posted. Recalculate and approve again.'
+        : `A true-up charge of ${postedAmount.toFixed(2)} was already posted from the previous figures: `
+          + 'review it (void it if the new figures differ) before approving again.'),
+  }, 409)
+}
+
 camRouter.post('/:id/approve', async (c) => {
   const db = getDb(c.env)
   const id = c.req.param('id')
@@ -653,6 +677,11 @@ camRouter.post('/:id/approve', async (c) => {
         + 'recalculate it before approving.',
     }, 409)
   }
+  // REFUTE D2 (2026-11-10, pre-existing): a billed/collected row used to reach the charge insert
+  // before the conditional update rejected it. A cam_true_up charge is source 'manual' and can be
+  // deleted through DELETE /charges/:id, after which a repeat approve on the billed row re-posted a
+  // fresh charge and then answered "already billed". Only a draft may post anything.
+  if (r.status !== undefined && r.status !== 'draft') return c.json({ error: 'already billed' }, 400)
   const trueUp = Number(r.true_up_amount)
   if (trueUp === 0) return c.json({ message: 'No true-up required (balanced)', true_up_amount: 0 })
 
@@ -672,9 +701,8 @@ camRouter.post('/:id/approve', async (c) => {
   if (postedErr) return dbError(c, postedErr, 'Failed to check for an already-posted true-up')
   const alreadyPosted = (posted ?? []).length > 0
 
-  // Only a 'draft' is priced here; a billed/collected row falls through to the conditional status
-  // update below, which rejects it ('already billed') exactly as before.
-  if (!alreadyPosted && r.status === 'draft') {
+  // Non-drafts were refused above (D2), so everything reaching here is a draft.
+  if (!alreadyPosted) {
     const now = await computeReconciliation(db, r.lease_id, r.reconciliation_year)
     if (now.kind === 'db_error') return dbError(c, now.error, now.label)
     if (now.kind !== 'ok') {
@@ -718,10 +746,13 @@ camRouter.post('/:id/approve', async (c) => {
       })
       .eq('id', id)
       .eq('status', 'draft')
+      // REFUTE D1: compare-and-swap on the figures this approval priced (see the positive path).
+      .eq('true_up_amount', r.true_up_amount)
+      .eq('share_basis', r.share_basis as string)
       .select()
 
     if (updateErr) return dbError(c, updateErr, 'Failed to approve CAM reconciliation')
-    if (!updated || updated.length === 0) return c.json({ error: 'already billed' }, 400)
+    if (!updated || updated.length === 0) return approveLostRace(db, c, id, null)
 
     return c.json({
       success: true,
@@ -755,10 +786,15 @@ camRouter.post('/:id/approve', async (c) => {
     .update({ status: 'billed', billed_date: today })
     .eq('id', id)
     .eq('status', 'draft')
+    // REFUTE D1: compare-and-swap on the figures the posted charge was priced from. A recalculation
+    // or a refused-recalculation invalidation that lands between the pre-post re-read and here makes
+    // this match zero rows instead of marking billed a row whose figures no longer match the charge.
+    .eq('true_up_amount', r.true_up_amount)
+    .eq('share_basis', r.share_basis as string)
     .select()
 
   if (updateErr) return dbError(c, updateErr, 'Failed to approve CAM reconciliation')
-  if (!updated || updated.length === 0) return c.json({ error: 'already billed' }, 400)
+  if (!updated || updated.length === 0) return approveLostRace(db, c, id, Math.abs(trueUp))
 
   return c.json({ success: true, true_up_amount: trueUp })
 })

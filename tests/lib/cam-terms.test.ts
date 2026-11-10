@@ -53,6 +53,19 @@ describe('validateCamTerms', () => {
     expect(validateCamTerms({ ...blank, base_year_expense_amount: '1000' }).base_year).toMatch(/Required/)
   })
 
+  it('REFUTE C6: a base year needs its amount, above $0 (the engine refuses both otherwise)', () => {
+    expect(validateCamTerms({ ...blank, base_year: '2024' }).base_year_expense_amount).toMatch(/Required with a base year/)
+    expect(validateCamTerms({ ...blank, base_year: '2024', base_year_expense_amount: '0' }).base_year_expense_amount).toMatch(/above \$0/)
+  })
+
+  it('REFUTE C6: modified gross with a base year and no stop is valid (the engine accepts it)', () => {
+    expect(validateCamTerms({ ...blank, rent_type: 'modified_gross', base_year: '2022', base_year_expense_amount: '50000' })).toEqual({})
+  })
+
+  it('REFUTE D4: a share that rounds to a zero fraction is rejected up front', () => {
+    expect(validateCamTerms({ ...blank, proportionate_share_percent: '0.0000001' }).proportionate_share_percent).toBeDefined()
+  })
+
   it('rejects a base year combined with an expense stop, and modified gross without a stop', () => {
     expect(validateCamTerms({ ...blank, base_year: '2022', expense_stop_amount: '4' }).expense_stop_amount).toMatch(/not both/)
     expect(validateCamTerms({ ...blank, rent_type: 'modified_gross' }).expense_stop_amount).toMatch(/needs an expense stop/)
@@ -63,7 +76,8 @@ describe('validateCamTerms', () => {
       blank,
       { ...blank, proportionate_share_percent: '100' },
       { ...blank, proportionate_share_percent: '0.5' },
-      { ...blank, proportionate_share_percent: '33.94', base_year: '2016', base_year_expense_amount: '0' },
+      { ...blank, proportionate_share_percent: '33.94', base_year: '2016', base_year_expense_amount: '120000' },
+      { ...blank, rent_type: 'modified_gross', base_year: '2022', base_year_expense_amount: '50000' },
       { ...blank, rent_type: 'gross' },
       { ...blank, rent_type: 'modified_gross', expense_stop_amount: '6.25' },
     ]
