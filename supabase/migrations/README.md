@@ -57,6 +57,14 @@ should look at; the RLS policies below it are not the control in effect.
 Full explanation with code references: the comment block at the top of
 `server/db/client.ts`.
 
+## Testing a migration on real Postgres before applying it
+
+`tests/db/real-postgres-migrations.test.ts` replays every file here on real PostgreSQL 17 (PGlite,
+in-process, runs in `npm test`) and re-applies every migration from 0020 on. It covers what the
+pg-mem tests skip: DO blocks, extensions, EXCLUDE constraints, plpgsql, views. Supabase branching is
+not available on this project's plan, so this test is the real-Postgres gate; keep new migrations
+re-runnable (IF NOT EXISTS, conname-guarded DO blocks, DROP IF EXISTS + ADD for constraints).
+
 ## How migrations actually get applied to production
 
 **Preferred: the "DB Migrate (manual)" GitHub Actions workflow**
