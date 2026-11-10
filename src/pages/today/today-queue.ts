@@ -32,6 +32,7 @@ export interface ArAgingLeaseRow {
   lease_id: string
   tenant_id: string
   tenant_name: string
+  property_id: string
   property_name: string
   suite: string
   balance: number

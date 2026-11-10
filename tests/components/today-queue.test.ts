@@ -15,7 +15,7 @@ const zero = { current: 0, d1_30: 0, d31_60: 0, d61_90: 0, d90_plus: 0 }
 function ar(id: string, buckets: Partial<typeof zero>, tenant = `T${id}`): ArAgingLeaseRow {
   const b = { ...zero, ...buckets }
   const balance = Object.values(b).reduce((s, v) => s + v, 0)
-  return { lease_id: `L${id}`, tenant_id: tenant, tenant_name: `Tenant ${id}`, property_name: 'Raytown Flex', suite: id, balance, buckets: b }
+  return { lease_id: `L${id}`, tenant_id: tenant, tenant_name: `Tenant ${id}`, property_id: 'P', property_name: 'Raytown Flex', suite: id, balance, buckets: b }
 }
 
 function rr(p: Partial<RentRollRow>): RentRollRow {

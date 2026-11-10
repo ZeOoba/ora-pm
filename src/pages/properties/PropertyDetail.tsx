@@ -15,6 +15,12 @@ import { TextInput, NumberInput, Select } from '../../components/form/inputs'
 import { formatCurrency, formatDate, formatSF } from '../../lib/format'
 import { UnitMatrix } from '../units/UnitMatrix'
 import { leaseRowsOf } from './property-leases'
+import { StackingPlan } from '../portfolio/StackingPlan'
+import { stackingPlan, walt } from '../portfolio/portfolio-derive'
+import { compactMoney, computeVitals, pastDue, type ArAgingLeaseRow } from '../today/today-queue'
+import type { AgingTotals } from '../ar/ar-aging-view'
+import type { MonthlyIncomeStatementResponse } from '../../lib/report-types'
+import type { QueryLike } from '../../components/query-state'
 import type { Property, RentRollRow, Unit, UnitStatus } from '../../types'
 
 type PropertyWithUnits = Property & { units: Unit[] }
@@ -65,6 +71,20 @@ export function PropertyDetail() {
     enabled: !!id,
   })
 
+  // Server-aged balances for this property's leases (stacking-plan "past due" state).
+  const arAging = useQuery({
+    queryKey: ['ar-aging', 'buckets', id],
+    queryFn: () => api.get<{ data: ArAgingLeaseRow[]; totals: AgingTotals }>(`/reports/ar-aging?property_id=${id}`),
+    enabled: !!id,
+  })
+  // Trailing 12 complete months, billed basis (server/lib/financial-report.ts — not a GL).
+  const through = lastCompleteMonth()
+  const t12 = useQuery({
+    queryKey: ['income-12mo', id, through],
+    queryFn: () => api.get<MonthlyIncomeStatementResponse>(`/reports/income-statement-12mo?through=${through}&property_ids=${id}`),
+    enabled: !!id,
+  })
+
   const unitMutation = useSaveMutation<Unit>({
     method: 'post',
     path: '/units',
@@ -107,6 +127,14 @@ export function PropertyDetail() {
   const units = data?.units ?? []
   const occupiedCount = units.filter(u => u.status === 'occupied').length
   const leaseRows = leaseRowsOf(rentRoll.data)
+  const today = new Date().toISOString().slice(0, 10)
+  const rr = rentRoll.data ?? []
+  const arRows = arAging.data?.data ?? []
+  const vitals = computeVitals(rr, arRows, today)
+  const propWalt = walt(rr, today)
+  const pastDueTotal = arRows.reduce((sum, a) => sum + pastDue(a.buckets), 0)
+  const suites = stackingPlan(rr, arRows, today)
+  const balanceByLease = new Map(arRows.map(a => [a.lease_id, a.balance]))
 
   return (
     <QueryState query={query}>
@@ -123,9 +151,11 @@ export function PropertyDetail() {
             </Button>
           }
           kpis={[
-            { label: 'Total SF', value: formatSF(data.total_sf) },
-            { label: 'Units', value: units.length },
-            { label: 'Occupied', value: `${occupiedCount} of ${units.length}` },
+            { label: 'Leased', value: vitals.sfOccupancyPct == null ? '—' : `${vitals.sfOccupancyPct.toFixed(1)}%`, sub: `${formatSF(vitals.leasedSf)} of ${formatSF(vitals.totalSf)}` },
+            { label: 'Units occupied', value: `${occupiedCount} of ${units.length}` },
+            { label: 'ABR', value: compactMoney(vitals.abr), sub: 'Base rent × 12' },
+            { label: 'WALT', value: propWalt == null ? '—' : `${propWalt.toFixed(1)} yr` },
+            { label: 'Past due', value: compactMoney(pastDueTotal), warn: pastDueTotal > 0 },
             { label: 'Entity LLC', value: data.entity_llc ?? '—' },
           ]}
           tabs={[
@@ -133,6 +163,55 @@ export function PropertyDetail() {
               value: 'overview',
               label: 'Overview',
               content: (
+                <div className="flex flex-wrap items-start gap-7">
+                  <div className="flex min-w-0 flex-[999_1_560px] flex-col gap-3.5">
+                    <h2 className="font-display text-2xl text-navy">Stacking plan</h2>
+                    <QueryState query={[rentRoll, arAging]} isEmpty={() => suites.length === 0}
+                      empty={<EmptyState title="No units" message="Add units to see the stacking plan." />}>
+                      <StackingPlan suites={suites} />
+                      <div className="mt-2 overflow-x-auto rounded-xl border border-border bg-card">
+                        <Table>
+                          <TableHeader>
+                            <TableRow>
+                              <TableHead>Suite</TableHead>
+                              <TableHead>Tenant</TableHead>
+                              <TableHead className="text-right">SF</TableHead>
+                              <TableHead className="text-right">Rent/SF</TableHead>
+                              <TableHead className="text-right">Monthly</TableHead>
+                              <TableHead>Expires</TableHead>
+                              <TableHead className="text-right">Balance</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {[...rr].sort((a, b) => a.suite.localeCompare(b.suite, 'en-US', { numeric: true })).map(r => {
+                              const bal = r.lease_id ? balanceByLease.get(r.lease_id) ?? 0 : 0
+                              return (
+                                <TableRow key={r.unit_id}>
+                                  <TableCell className="font-mono">{r.suite}</TableCell>
+                                  <TableCell>
+                                    {r.tenant_id ? (
+                                      <Link to={`/tenants/${r.tenant_id}`} className="text-navy underline-offset-2 hover:underline">{r.tenant_name}</Link>
+                                    ) : <span className="capitalize text-muted-foreground">{r.unit_status}</span>}
+                                  </TableCell>
+                                  <TableCell className="text-right font-mono">{(r.sf ?? 0).toLocaleString('en-US')}</TableCell>
+                                  <TableCell className="text-right font-mono">{r.rent_psf_annual != null ? `$${r.rent_psf_annual.toFixed(2)}` : '—'}</TableCell>
+                                  <TableCell className="text-right font-mono">{formatCurrency(r.total_monthly)}</TableCell>
+                                  <TableCell>
+                                    {r.lease_id ? <Link to={`/leases/${r.lease_id}`} className="underline-offset-2 hover:underline">{formatDate(r.end_date)}</Link> : '—'}
+                                  </TableCell>
+                                  <TableCell className={bal > 0 ? 'text-right font-mono text-status-danger' : 'text-right font-mono text-muted-foreground'}>
+                                    {r.lease_id ? formatCurrency(bal) : '—'}
+                                  </TableCell>
+                                </TableRow>
+                              )
+                            })}
+                          </TableBody>
+                        </Table>
+                      </div>
+                    </QueryState>
+                  </div>
+                  <div className="flex min-w-0 flex-[1_1_300px] flex-col gap-4">
+                    <T12Card query={t12} />
                 <SectionCard title="Property Summary">
                   <DetailList>
                     <DetailRow label="Address">
@@ -150,6 +229,8 @@ export function PropertyDetail() {
                     <p className="mt-3 border-t border-border pt-3 text-sm text-status-neutral">{data.notes}</p>
                   )}
                 </SectionCard>
+                  </div>
+                </div>
               ),
             },
             {
@@ -266,5 +347,42 @@ export function PropertyDetail() {
         </SheetContent>
       </Sheet>
     </QueryState>
+  )
+}
+
+function lastCompleteMonth(today: Date = new Date()): string {
+  return new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() - 1, 1)).toISOString().slice(0, 7)
+}
+
+/** Trailing 12 complete months, billed basis (charges posted and expenses recorded; not a GL). */
+function T12Card({ query }: { query: QueryLike & { data?: MonthlyIncomeStatementResponse } }) {
+  const r = query.data
+  const t = r?.total
+  const rows: [string, number, boolean][] = t
+    ? [
+        ['Total income', t.total_income, false],
+        ['Operating expenses', -t.total_operating_expense, false],
+        ['Net operating income', t.noi, true],
+        ['Capital', -t.total_capital, false],
+      ]
+    : []
+  return (
+    <div className="flex flex-col gap-1.5 rounded-xl border border-border bg-card p-4">
+      <div className="flex items-baseline justify-between gap-2">
+        <span className="font-display text-xl text-navy">Trailing 12 months</span>
+        {r && r.months.length > 0 && (
+          <span className="font-mono text-[11px] text-muted-foreground">{r.months[0]} – {r.months[r.months.length - 1]}</span>
+        )}
+      </div>
+      <QueryState query={query}>
+        {rows.map(([label, v, strong]) => (
+          <div key={label} className={strong ? 'flex justify-between border-t border-border/60 py-1.5 text-[13px] font-semibold' : 'flex justify-between border-t border-border/60 py-1.5 text-[13px]'}>
+            <span>{label}</span>
+            <span className="font-mono">{formatCurrency(v)}</span>
+          </div>
+        ))}
+        <p className="pt-1 text-[11px] text-muted-foreground">Billed basis: charges posted and expenses recorded. Not a general ledger.</p>
+      </QueryState>
+    </div>
   )
 }
