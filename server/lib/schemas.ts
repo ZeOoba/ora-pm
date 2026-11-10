@@ -1,10 +1,17 @@
 // server/lib/schemas.ts
 import { z } from 'zod'
+import { EXPENSE_CATEGORIES } from './cam'
 
 // Shared validators
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Must be YYYY-MM-DD')
 const positiveAmount = z.number().positive('Amount must be positive')
 const nonNegativeAmount = z.number().min(0, 'Amount cannot be negative')
+/** A YYYY-MM-DD string that is a real calendar date (no Feb 30). */
+const isRealDate = (s: string) => {
+  const [y, m, d] = s.split('-').map(Number)
+  const t = new Date(Date.UTC(y, m - 1, d))
+  return t.getUTCFullYear() === y && t.getUTCMonth() === m - 1 && t.getUTCDate() === d
+}
 
 // Property — PropertyForm.tsx handleSubmit is the sole API write path (POST
 // create, PUT edit; scripts/import-from-pipeline.mjs writes the DB directly).
@@ -39,8 +46,20 @@ export const TenantInsertSchema = z.object({
 }).strict()
 export const TenantUpdateSchema = TenantInsertSchema.partial()
 
+// 0024 cross-field rules the DB CHECKs also enforce, checked here so a bad payload is a 422 with a
+// field message rather than a CHECK violation. Applied only to keys present in the payload (a PUT
+// is partial; the DB still guards a combination split across two requests).
+function camTermsCrossChecks(v: { cam_reconciled?: boolean; cam_exclusion_reason?: string | null; cam_annual_cap?: number | null; cam_cap_through?: string | null }, ctx: z.RefinementCtx) {
+  if (v.cam_reconciled === false && !(typeof v.cam_exclusion_reason === 'string' && v.cam_exclusion_reason.trim() !== '')) {
+    ctx.addIssue({ code: 'custom', path: ['cam_exclusion_reason'], message: 'Required when the lease is not CAM-reconciled' })
+  }
+  if (v.cam_cap_through != null && 'cam_annual_cap' in v && v.cam_annual_cap == null) {
+    ctx.addIssue({ code: 'custom', path: ['cam_cap_through'], message: 'A cap end date needs the annual cap' })
+  }
+}
+
 // Lease
-export const LeaseInsertSchema = z.object({
+const LeaseObjectSchema = z.object({
   tenant_id: z.string().uuid(),
   unit_id: z.string().uuid(),
   status: z.enum(['active', 'expired', 'terminated', 'pending']).default('active'),
@@ -57,10 +76,24 @@ export const LeaseInsertSchema = z.object({
   base_year: z.number().int().min(1900).max(2200).nullish(),
   // Base-year TOTAL recoverable expenses for the whole building/project pool ($/yr) — not the tenant's share.
   base_year_expense_amount: nonNegativeAmount.nullish(),
+  // 0024 / CAM rulings 2026-11-10 — same rules as the DB CHECKs. recoverable_categories: null = every
+  // recoverable expense; otherwise a non-empty, duplicate-free subset of expenses.category.
+  recoverable_categories: z.array(z.enum(EXPENSE_CATEGORIES)).min(1, 'Pick at least one category')
+    .refine((a) => new Set(a).size === a.length, 'A category is listed twice').nullish(),
+  base_year_categories: z.array(z.enum(EXPENSE_CATEGORIES)).min(1, 'Pick at least one category')
+    .refine((a) => new Set(a).size === a.length, 'A category is listed twice').nullish(),
+  // NUMERIC(12,2): whole cents above 0, below the column's range (REFUTE 0024: 0.001 and 1e13 used
+  // to pass here and fail at the DB as a 500).
+  cam_annual_cap: z.number().positive('Amount must be positive').max(9_999_999_999.99)
+    .refine((n) => Math.abs(Math.round(n * 100) - n * 100) < 1e-6, 'At most 2 decimal places').nullish(),
+  cam_cap_through: isoDate.refine(isRealDate, 'Not a real calendar date').nullish(),
+  cam_reconciled: z.boolean().optional(),
+  cam_exclusion_reason: z.string().nullish(),
   ti_allowance: nonNegativeAmount.nullish(),
   notes: z.string().nullish(),
 })
-export const LeaseUpdateSchema = LeaseInsertSchema.partial()
+export const LeaseInsertSchema = LeaseObjectSchema.superRefine(camTermsCrossChecks)
+export const LeaseUpdateSchema = LeaseObjectSchema.partial().superRefine(camTermsCrossChecks)
 
 // Charge
 export const ChargeInsertSchema = z.object({

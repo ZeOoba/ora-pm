@@ -1,8 +1,9 @@
 import { Hono } from 'hono'
 import { getDb } from '../db/client'
 import {
-  assertDenominatorCoversPool, assertNoStaleClosedLeases, calculateCAMTrueUp, computeCamPool, CAMTermsError,
-  overRecoveryWarning, peakConcurrentLeasedSF, resolveTenantShare, type CAMPool, type CAMRentType, type ResolvedShare,
+  assertBaseYearCategoriesMatch, assertCamReconciled, assertDenominatorCoversPool, assertNoStaleClosedLeases, assertValidCategories, calculateCAMTrueUp,
+  computeCamPool, CAMTermsError, EXPENSE_CATEGORIES, overRecoveryWarningByCategory, peakConcurrentLeasedSF, poolForCategories,
+  resolveTenantShare, type CAMPool, type CAMRentType, type ExpenseCategory, type ResolvedShare,
 } from '../lib/cam'
 import { CamCalculateSchema, CamRecoverableQuerySchema } from '../lib/schemas'
 import { dbError } from '../lib/api-error'
@@ -36,19 +37,35 @@ camRouter.get('/', async (c) => {
 // Keyset-paged on expenses.id (uuid PK) so the total is complete regardless of PostgREST's max_rows
 // cap; the year is an inclusive DATE range compared in Postgres. Shared by GET
 // /recoverable-expenses, GET /pool and POST /calculate (which no longer trusts a client total).
-async function loadRecoverableTotal(db: Db, propertyId: string, year: number): Promise<{ total: number; count: number; error: PgErr | null }> {
-  const { data: rows, error } = await fetchAllPages<{ id: string; amount: number }>((after) => {
-    let q = db.from('expenses').select('id, amount')
+// 0024 (rulings 2026-11-10): totals are also split by expenses.category, so a lease that passes
+// through only some categories is billed a share of those (poolForCategories). An expense whose
+// category is not one of EXPENSE_CATEGORIES (impossible under the 0002 CHECK) fails closed.
+type RecoverableTotals = { total: number; count: number; byCategory: Record<ExpenseCategory, number> }
+async function loadRecoverableTotal(db: Db, propertyId: string, year: number): Promise<
+  (RecoverableTotals & { error: null }) | { total: 0; count: 0; byCategory: null; error: PgErr }
+> {
+  const { data: rows, error } = await fetchAllPages<{ id: string; amount: number | string; category: string }>((after) => {
+    let q = db.from('expenses').select('id, amount, category')
       .eq('property_id', propertyId)
       .eq('recoverable', true)
       .gte('expense_date', `${year}-01-01`).lte('expense_date', `${year}-12-31`)
     if (after !== null) q = q.gt('id', after)
     return q.order('id').limit(POSTGREST_MAX_ROWS)
   }, (e) => e.id)
-  if (error) return { total: 0, count: 0, error }
+  if (error) return { total: 0, count: 0, byCategory: null, error }
   // Summed in integer cents: thousands of float additions can drift before a final round.
-  const total = rows.reduce((cents, e) => cents + Math.round(Number(e.amount) * 100), 0) / 100
-  return { total, count: rows.length, error: null }
+  const centsBy = Object.fromEntries(EXPENSE_CATEGORIES.map((c) => [c, 0])) as Record<ExpenseCategory, number>
+  let totalCents = 0
+  for (const e of rows) {
+    const cents = Math.round(Number(e.amount) * 100)
+    if (!(e.category in centsBy)) {
+      return { total: 0, count: 0, byCategory: null, error: { message: `recoverable expense ${e.id} has unknown category` } }
+    }
+    centsBy[e.category as ExpenseCategory] += cents
+    totalCents += cents
+  }
+  const byCategory = Object.fromEntries(EXPENSE_CATEGORIES.map((c) => [c, centsBy[c] / 100])) as Record<ExpenseCategory, number>
+  return { total: totalCents / 100, count: rows.length, byCategory, error: null }
 }
 
 // Lease statuses that can have occupied space during a past reconciliation year. 'pending' (not yet
@@ -66,6 +83,10 @@ type PoolLeaseRow = {
   rent_type: CAMRentType
   /** leases.proportionate_share_pct (0021): NUMERIC, may arrive as a string from PostgREST. */
   proportionate_share_pct: number | string | null
+  /** 0024: categories passed through (null = all), and the not-reconciled flag. */
+  recoverable_categories: string[] | null
+  cam_reconciled: boolean
+  cam_exclusion_reason: string | null
 }
 
 /** NUMERIC columns can arrive from PostgREST as strings; null stays null. A non-numeric value
@@ -120,7 +141,7 @@ async function loadCamPool(db: Db, propertyId: string, year: number): Promise<
     units.map((u) => u.id),
     UNIT_ID_CHUNK,
     (chunk) => db.from('leases')
-      .select('id, unit_id, status, start_date, end_date, rent_type, proportionate_share_pct')
+      .select('id, unit_id, status, start_date, end_date, rent_type, proportionate_share_pct, recoverable_categories, cam_reconciled, cam_exclusion_reason')
       .in('unit_id', chunk)
       .in('status', POOL_LEASE_STATUSES)
       .lte('start_date', `${year}-12-31`)
@@ -202,25 +223,29 @@ function shareForPoolLease(pool: CAMPool, lease: PoolLeaseRow, denominatorRSF: n
 }
 
 /** Every pool lease's resolved share (or the CAMTermsError that refused it), plus the pool-level
- *  over-recovery warning (stated shares summing above 100% on some day) — warning only. */
+ *  over-recovery warning (shares of one category summing above 100% on some day) — warning only.
+ *  0024: a lease marked not CAM-reconciled still has its share resolved for display but is left out
+ *  of the over-recovery sum (it recovers nothing); a lease with invalid categories is refused. */
 function resolvePoolShares(pool: CAMPool, leases: PoolLeaseRow[], denominatorRSF: number | null): {
   byLease: Map<string, ResolvedShare | CAMTermsError>
   poolWarning: string | null
 } {
   const byLease = new Map<string, ResolvedShare | CAMTermsError>()
-  const annual = new Map<string, number>()
+  const recovering = new Map<string, { annualPct: number; categories: readonly ExpenseCategory[] | null }>()
   for (const l of leases) {
     if (!pool.byLease[l.id]) continue
     try {
       const s = shareForPoolLease(pool, l, denominatorRSF)
+      const categories = l.recoverable_categories ?? null
+      assertValidCategories(categories)
       byLease.set(l.id, s)
-      annual.set(l.id, s.annualPct)
+      if (l.cam_reconciled !== false) recovering.set(l.id, { annualPct: s.annualPct, categories })
     } catch (err) {
       if (!(err instanceof CAMTermsError)) throw err
       byLease.set(l.id, err)
     }
   }
-  return { byLease, poolWarning: overRecoveryWarning(pool, annual) }
+  return { byLease, poolWarning: overRecoveryWarningByCategory(pool, recovering)[0] ?? null }
 }
 
 camRouter.get('/recoverable-expenses', async (c) => {
@@ -231,9 +256,9 @@ camRouter.get('/recoverable-expenses', async (c) => {
   if (!parsed.success) return c.json({ error: parsed.error.flatten().fieldErrors }, 400)
   const { property_id, year } = parsed.data
 
-  const { total, count, error } = await loadRecoverableTotal(getDb(c.env), property_id, year)
+  const { total, count, byCategory, error } = await loadRecoverableTotal(getDb(c.env), property_id, year)
   if (error) return dbError(c, error, 'Failed to load recoverable expenses')
-  return c.json({ data: { total, count } })
+  return c.json({ data: { total, count, by_category: byCategory } })
 })
 
 // GET /cam/pool?property_id&year — the server-computed CAM pool the CAM page displays and whose
@@ -259,6 +284,7 @@ camRouter.get('/pool', async (c) => {
     data: {
       recoverable_total: recoverable.total,
       recoverable_count: recoverable.count,
+      recoverable_by_category: recoverable.byCategory,
       days_in_year: camPool.daysInYear,
       weighted_leased_sf: camPool.weightedLeasedSF,
       // Ruling 2026-11-08: the Proportionate Share denominator (building/project RSF) — null when
@@ -293,6 +319,11 @@ camRouter.get('/pool', async (c) => {
             effective_share_pct: share?.effectivePct ?? null,
             share_error: shareError,
             warnings: share?.warnings ?? [],
+            // 0024: the CAM page lists a not-reconciled lease with its reason and skips it in
+            // Calculate all; /calculate refuses it (422) regardless.
+            recoverable_categories: l.recoverable_categories ?? null,
+            cam_reconciled: l.cam_reconciled !== false,
+            cam_exclusion_reason: l.cam_exclusion_reason ?? null,
           }
         }),
     },
@@ -317,6 +348,15 @@ function draftMismatch(saved: Record<string, unknown>, now: Record<string, unkno
   for (const f of ['share_basis', 'recovery_basis']) {
     if ((saved[f] ?? null) !== (now[f] ?? null)) return `${f} ${String(saved[f])} -> ${String(now[f])}`
   }
+  // 0024: a category or cap edit after the draft changes what it billed even when the dollar
+  // figures happen to match. Categories compared as sorted sets; the cap in cents, null-aware.
+  const cats = (v: unknown) => (Array.isArray(v) ? [...v].map(String).sort().join(',') : null)
+  if (cats(saved.recoverable_categories) !== cats(now.recoverable_categories)) {
+    return `recoverable_categories ${String(cats(saved.recoverable_categories))} -> ${String(cats(now.recoverable_categories))}`
+  }
+  const capA = saved.cam_annual_cap_applied == null ? null : cents(saved.cam_annual_cap_applied)
+  const capB = now.cam_annual_cap_applied == null ? null : cents(now.cam_annual_cap_applied)
+  if (capA !== capB) return `cam_annual_cap_applied ${String(saved.cam_annual_cap_applied)} -> ${String(now.cam_annual_cap_applied)}`
   return null
 }
 
@@ -330,6 +370,9 @@ type ReconciliationPatch = {
   share_basis: ResolvedShare['basis']
   recovery_basis: string
   basis_warnings: string | null
+  /** 0024: the categories the pool summed (null = all) and the prorated cap when it bound. */
+  recoverable_categories: ExpenseCategory[] | null
+  cam_annual_cap_applied: number | null
   status: 'draft'
 }
 type Computed =
@@ -352,7 +395,8 @@ type Computed =
 async function computeReconciliation(db: Db, lease_id: string, reconciliation_year: number): Promise<Computed> {
   const { data: lease, error: leaseErr } = await db
     .from('leases')
-    .select('id, rent_type, expense_stop_amount, base_year, base_year_expense_amount, units(property_id)')
+    .select('id, rent_type, expense_stop_amount, base_year, base_year_expense_amount, recoverable_categories, '
+      + 'base_year_categories, cam_annual_cap, cam_cap_through, cam_reconciled, cam_exclusion_reason, units(property_id)')
     .eq('id', lease_id)
     .single()
   if (leaseErr) {
@@ -369,8 +413,28 @@ async function computeReconciliation(db: Db, lease_id: string, reconciliation_ye
     expense_stop_amount: number | string | null
     base_year: number | string | null
     base_year_expense_amount: number | string | null
+    recoverable_categories: string[] | null
+    base_year_categories: string[] | null
+    cam_annual_cap: number | string | null
+    cam_cap_through: string | null
+    cam_reconciled: boolean | null
+    cam_exclusion_reason: string | null
   } | null
   const refused = (message: string, httpStatus: 422 | 400 = 422): Computed => ({ kind: 'refused', message, httpStatus })
+
+  // 0024 (ruling 2026-11-10): a lease marked not CAM-reconciled (direct pay, fixed charge in rent)
+  // is refused before anything else is read, with its recorded reason. cam_reconciled is NOT NULL
+  // DEFAULT true; anything but an explicit true is refused (fail closed).
+  try {
+    assertCamReconciled(lease_id, leaseRow?.cam_reconciled === true, leaseRow?.cam_exclusion_reason ?? null)
+    assertValidCategories(leaseRow?.recoverable_categories ?? null)
+  } catch (err) {
+    if (err instanceof CAMTermsError) return refused(err.message)
+    throw err
+  }
+  const recoverableCategories = (leaseRow?.recoverable_categories ?? null) as ExpenseCategory[] | null
+  const annualCap = numOrNull(leaseRow?.cam_annual_cap)
+  const capThrough = leaseRow?.cam_cap_through ?? null
 
   const propertyId = leaseRow?.units?.property_id
   if (!propertyId) return refused('Lease has no unit/property — cannot build the CAM pool')
@@ -385,12 +449,27 @@ async function computeReconciliation(db: Db, lease_id: string, reconciliation_ye
     return refused(`Lease base year "${String(leaseRow?.base_year)}" is not a calendar year`)
   }
   const baseYearExpenseAmount = numOrNull(leaseRow?.base_year_expense_amount)
+  // REFUTE (0024 pass): the base-year amount must cover the categories the lease is billed on.
+  try {
+    assertBaseYearCategoriesMatch(baseYear, recoverableCategories, leaseRow?.base_year_categories ?? null)
+  } catch (err) {
+    if (err instanceof CAMTermsError) return refused(err.message)
+    throw err
+  }
 
   // Server-side pool: recoverable total, the leases in effect during the year (days in effect,
   // same-unit overlap, stale-end-date and RSF-covers-pool checks) and the property's denominator RSF.
   const recoverable = await loadRecoverableTotal(db, propertyId, reconciliation_year)
   if (recoverable.error) return { kind: 'db_error', error: recoverable.error, label: 'Failed to load recoverable expenses' }
-  const total_property_recoverable_expenses = recoverable.total
+  // 0024: the lease's pool — the recoverable expenses in its categories (all when null). Saved as
+  // total_property_recoverable_expenses so the draft shows the pool it was billed a share of.
+  let total_property_recoverable_expenses: number
+  try {
+    total_property_recoverable_expenses = poolForCategories(recoverable.byCategory, recoverableCategories)
+  } catch (err) {
+    if (err instanceof CAMTermsError) return refused(err.message)
+    throw err
+  }
   const loaded = await loadCamPool(db, propertyId, reconciliation_year)
   if (loaded.error instanceof CAMTermsError) return refused(loaded.error.message)
   if (loaded.error) return { kind: 'db_error', error: loaded.error, label: 'Failed to load CAM pool' }
@@ -451,6 +530,10 @@ async function computeReconciliation(db: Db, lease_id: string, reconciliation_ye
       baseYear,
       baseYearExpenseAmount,
       reconciliationYear: reconciliation_year,
+      annualCap,
+      capThrough,
+      daysInEffect: tenantInPool.overlapDays,
+      daysInYear: loaded.pool.daysInYear,
     })
   } catch (err) {
     // Lease-terms problems (e.g. modified_gross with no expense stop) are a 422 the user fixes on
@@ -466,6 +549,7 @@ async function computeReconciliation(db: Db, lease_id: string, reconciliation_ye
     ...(poolShares.poolWarning ? [poolShares.poolWarning] : []),
     ...(share.basis === 'premises_rsf_over_denominator' ? loaded.denominatorWarnings : []),
     ...(holdoverFlag ? [holdoverFlag] : []),
+    ...result.warnings,
   ]
   return {
     kind: 'ok',
@@ -479,6 +563,8 @@ async function computeReconciliation(db: Db, lease_id: string, reconciliation_ye
       share_basis: share.basis,
       recovery_basis: result.recoveryBasis,
       basis_warnings: warnings.length > 0 ? warnings.join('\n') : null,
+      recoverable_categories: recoverableCategories === null ? null : [...recoverableCategories],
+      cam_annual_cap_applied: result.capApplied,
       status: 'draft',
     },
   }

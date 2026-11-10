@@ -14,11 +14,20 @@ export interface CAMInput {
   expenseStopPerSF?: number | null
   /** leases.base_year (calendar year). Set = recover only the increase over the base year. */
   baseYear?: number | null
-  /** leases.base_year_expense_amount: Base-year TOTAL recoverable expenses for the whole
-   *  building/project pool ($/yr) — not the tenant's share. */
+  /** leases.base_year_expense_amount: Base-year TOTAL recoverable expenses ($/yr) for the same pool
+   *  the lease is billed on — its recoverable categories, or the whole building/project pool when it
+   *  has none (0024; see assertBaseYearCategoriesMatch) — not the tenant's share. */
   baseYearExpenseAmount?: number | null
-  /** The calendar year being reconciled. Required when baseYear is set. */
+  /** The calendar year being reconciled. Required when baseYear or annualCap is set. */
   reconciliationYear?: number
+  /** leases.cam_annual_cap (0024): annual $ cap on what the tenant owes. Null/omitted = no cap. */
+  annualCap?: number | null
+  /** leases.cam_cap_through (0024): last ISO date the cap applies. Null = no end. Needs annualCap. */
+  capThrough?: string | null
+  /** Days the lease was in effect in the year, and the year's length: prorate the cap. Required
+   *  when annualCap is set. */
+  daysInEffect?: number
+  daysInYear?: number
 }
 
 /** How actualCamOwed was derived — persisted context for a human reviewing the draft. */
@@ -32,11 +41,99 @@ export interface CAMOutput {
   actualCamOwed: number
   trueUpAmount: number  // positive = tenant owes; negative = credit to tenant
   recoveryBasis: CAMRecoveryBasis
+  /** The prorated annual cap when it bound (actualCamOwed was reduced to it), else null. */
+  capApplied: number | null
+  /** Non-blocking warnings (e.g. the cap ends inside the reconciliation year). */
+  warnings: string[]
 }
 
 /** Lease terms make a recovery uncomputable (e.g. modified_gross with no expense stop). Callers map
  *  this to a 422: it is a lease-data problem a human must fix, not a server error. */
 export class CAMTermsError extends Error {}
+
+// ---------------------------------------------------------------------------
+// Recoverable categories (migration 0024; Gabriel rulings 2026-11-10)
+//
+// A lease passes through a subset of the expense categories (expenses.category, 0002). NULL = every
+// recoverable expense — the pre-0024 behaviour every existing lease keeps until a human enters its
+// categories. The 2026-11-10 extraction found taxes-only (55 New Plant Ct) and CAM-without-taxes
+// (2008/2026 Zettler, 4595 E 5th: "Landlord shall pay all real estate taxes" plus a share of common
+// area maintenance and water/storm/sewer) leases that a whole-pool share overbills.
+// ---------------------------------------------------------------------------
+
+/** expenses.category CHECK values (0002), in that order. */
+export const EXPENSE_CATEGORIES = ['taxes', 'insurance', 'maintenance', 'utilities', 'management', 'capital', 'other'] as const
+export type ExpenseCategory = typeof EXPENSE_CATEGORIES[number]
+const CATEGORY_SET: ReadonlySet<string> = new Set(EXPENSE_CATEGORIES)
+
+/** Throws CAMTermsError unless `categories` is null or a non-empty, duplicate-free subset of
+ *  EXPENSE_CATEGORIES (the 0024 CHECK). */
+export function assertValidCategories(categories: readonly string[] | null): asserts categories is readonly ExpenseCategory[] | null {
+  if (categories === null) return
+  if (!Array.isArray(categories) || categories.length === 0) {
+    throw new CAMTermsError('Lease recoverable categories are empty. Pick at least one category, or mark the lease not CAM-reconciled.')
+  }
+  const bad = categories.filter((c) => !CATEGORY_SET.has(c))
+  if (bad.length > 0) throw new CAMTermsError(`Lease recoverable categories include unknown value(s): ${bad.join(', ')}`)
+  if (new Set(categories).size !== categories.length) {
+    throw new CAMTermsError('Lease recoverable categories list a category more than once')
+  }
+}
+
+/**
+ * The recoverable pool a lease is billed a share of: the sum of the year's recoverable expenses in
+ * its categories (every category when null). Summed in integer cents. Fails closed on an invalid
+ * category list or a non-finite total in any category it would include.
+ */
+export function poolForCategories(
+  totalsByCategory: Readonly<Record<ExpenseCategory, number>>,
+  categories: readonly ExpenseCategory[] | null,
+): number {
+  assertValidCategories(categories)
+  const included = categories ?? EXPENSE_CATEGORIES
+  let cents = 0
+  for (const c of included) {
+    const v = Number(totalsByCategory[c] ?? 0)
+    if (!Number.isFinite(v)) throw new CAMTermsError(`Recoverable ${c} total is not a number`)
+    cents += Math.round(v * 100)
+  }
+  return cents / 100
+}
+
+const catKey = (c: readonly string[] | null) => (c === null ? null : [...c].sort().join(','))
+
+/**
+ * REFUTE (0024 pass, 2026-11-10): the base-year amount is a total for ONE set of categories. Compared
+ * against a different category pool, the 3x plausibility guard does not catch it, and recovery is
+ * silently zeroed or overbilled (taxes base of $41k against an all-category pool billed ~$34.5k too
+ * much). leases.base_year_categories records which categories the amount covers (null = every
+ * recoverable expense); a base-year lease whose categories differ from it is refused for a human to
+ * re-enter the base-year amount for the current categories. No base year: nothing to check.
+ */
+export function assertBaseYearCategoriesMatch(
+  baseYear: number | null,
+  recoverableCategories: readonly string[] | null,
+  baseYearCategories: readonly string[] | null,
+): void {
+  if (baseYear === null) return
+  assertValidCategories(baseYearCategories)
+  if (catKey(recoverableCategories) === catKey(baseYearCategories)) return
+  const show = (c: readonly string[] | null) => (c === null ? 'all recoverable categories' : [...c].sort().join(', '))
+  throw new CAMTermsError(
+    `The lease's base-year amount was entered for ${show(baseYearCategories)}, but the lease now recovers `
+    + `${show(recoverableCategories)}. Re-enter the base-year recoverable total for the current categories, then recalculate.`
+  )
+}
+
+/** A lease marked not CAM-reconciled (leases.cam_reconciled = false, 0024: tenant pays expenses
+ *  directly, or a fixed charge is bundled in rent) is refused with its recorded reason. */
+export function assertCamReconciled(leaseId: string, reconciled: boolean, reason: string | null): void {
+  if (reconciled) return
+  throw new CAMTermsError(
+    `Lease ${leaseId} is marked not CAM-reconciled${reason && reason.trim() !== '' ? `: ${reason.trim()}` : ''}. `
+    + 'No CAM reconciliation is computed for it. Any CAM estimate billed to it must be credited manually.'
+  )
+}
 
 // ---------------------------------------------------------------------------
 // CAM pool: which leases were in effect during the reconciliation year, and for how many days
@@ -185,6 +282,34 @@ export function overRecoveryWarning(pool: CAMPool, annualShareById: ReadonlyMap<
   if (peak <= 1 + SHARE_MISMATCH_TOLERANCE + 1e-12) return null
   return `The Proportionate Shares of the leases in effect on ${on} total ${fmtPct(peak)}, more than 100% `
     + 'of recoverable expenses. Check the stated shares and the property\'s rentable SF.'
+}
+
+/**
+ * overRecoveryWarning per category (0024): a lease only takes a share of its own categories, so the
+ * shares are summed per category — two 60% leases on taxes-only and CAM-only never over-recover,
+ * two on taxes do. `byId` holds each reconciled lease's annual share and categories (null = all);
+ * leases marked not CAM-reconciled must be left out by the caller. Returns at most one warning,
+ * naming every category whose concurrent shares exceed 100% (+ tolerance), with the highest total.
+ */
+export function overRecoveryWarningByCategory(
+  pool: CAMPool,
+  byId: ReadonlyMap<string, { annualPct: number; categories: readonly ExpenseCategory[] | null }>,
+): string[] {
+  let worst: { peak: number; on: string | null } | null = null
+  const over: ExpenseCategory[] = []
+  for (const cat of EXPENSE_CATEGORIES) {
+    const { peak, on } = peakConcurrent(pool, (id) => {
+      const e = byId.get(id)
+      return e && (e.categories === null || e.categories.includes(cat)) ? e.annualPct : 0
+    })
+    if (peak <= 1 + SHARE_MISMATCH_TOLERANCE + 1e-12) continue
+    over.push(cat)
+    if (worst === null || peak > worst.peak) worst = { peak, on }
+  }
+  if (worst === null) return []
+  const cats = over.length === EXPENSE_CATEGORIES.length ? 'recoverable expenses' : `recoverable ${over.join(', ')}`
+  return [`The Proportionate Shares of the leases in effect on ${worst.on} total ${fmtPct(worst.peak)}, more than 100% `
+    + `of ${cats}. Check the stated shares, the leases' recoverable categories and the property's rentable SF.`]
 }
 
 function peakConcurrent(
@@ -351,7 +476,11 @@ export function resolveTenantShare(input: ShareInput): ResolvedShare {
  * a negative/non-finite amount; a reconciliation year before the base year; a gross/modified-gross
  * lease that also carries an expense stop (two conflicting recovery terms).
  * Gross-up is NOT applied: both forms make it permissive ("Landlord may ... gross up"), so it is a
- * landlord election, not a lease requirement. CAM caps and admin fees are not modelled (no fields).
+ * landlord election, not a lease requirement. Admin fees are not modelled (no fields).
+ *
+ * 0024 (rulings 2026-11-10): `totalRecoverableExpenses` is the LEASE's pool — the recoverable
+ * expenses in its categories (poolForCategories), so a base-year amount must be the base year's
+ * total for those same categories. An annual cap (annualCap / capThrough) is applied last.
  */
 export function calculateCAMTrueUp(input: CAMInput): CAMOutput {
   const { totalRecoverableExpenses, tenantSF, tenantSharePct, estimatedCamPaid } = input
@@ -414,7 +543,7 @@ export function calculateCAMTrueUp(input: CAMInput): CAMOutput {
       throw new CAMTermsError(
         `Base-year expense amount ${usd(baseAmount)} is more than ${BASE_YEAR_RATIO_LIMIT}x away from the `
         + `${input.reconciliationYear} recoverable total (${usd(totalRecoverableExpenses)}). It must be the base `
-        + `year's recoverable Operating Costs and Taxes in total dollars for the whole pool (not $/SF); check `
+        + `year's recoverable total in total dollars for the lease's recoverable categories (the whole pool when none are set; not $/SF); check `
         + 'the lease and correct it, then recalculate.'
       )
     }
@@ -451,8 +580,57 @@ export function calculateCAMTrueUp(input: CAMInput): CAMOutput {
     recoveryBasis = 'none_gross'
   }
 
-  const actualCamOwed = Math.round(owed * 100) / 100
+  // Annual cap (0024; ruling 2026-11-10), applied LAST — after rent type, expense stop and base
+  // year — because the lease caps what the tenant pays ("Taxes, Insurance, and CAM expense incurred
+  // by the tenant shall not exceed $15,000 annually", 29000 Information Lane 507).
+  const uncapped = Math.round(owed * 100) / 100
+  const { capApplied, warnings } = applyAnnualCap(input, uncapped)
+  const actualCamOwed = capApplied ?? uncapped
   const trueUpAmount = Math.round((actualCamOwed - estimatedCamPaid) * 100) / 100
 
-  return { tenantProRataSharePct, actualCamOwed, trueUpAmount, recoveryBasis }
+  return { tenantProRataSharePct, actualCamOwed, trueUpAmount, recoveryBasis, capApplied, warnings }
+}
+
+/**
+ * The cap for the year, prorated by days in effect: cap x daysInEffect / daysInYear (ruling
+ * 2026-11-10, matching how the share itself is prorated). Returns capApplied = the prorated cap
+ * when it is below `owedRounded` (the cap binds), else null.
+ *   - capThrough before Jan 1 of the year: the cap no longer applies.
+ *   - capThrough inside the year: the cap applies to the WHOLE year (ruling: tenant-favourable,
+ *     never overbills) and a warning asks the reviewer to adjust if the lease says otherwise.
+ * Fails closed on a non-positive cap, a capThrough with no cap, an invalid date, or missing days.
+ */
+function applyAnnualCap(input: CAMInput, owedRounded: number): { capApplied: number | null; warnings: string[] } {
+  const cap = input.annualCap ?? null
+  const capThrough = input.capThrough ?? null
+  if (cap === null) {
+    if (capThrough !== null) {
+      throw new CAMTermsError('Lease has a CAM cap end date but no annual cap. Enter the cap (or clear the date), then recalculate.')
+    }
+    return { capApplied: null, warnings: [] }
+  }
+  if (!(Number.isFinite(cap) && cap > 0)) throw new CAMTermsError('Lease annual CAM cap must be a positive dollar amount')
+  const year = input.reconciliationYear
+  if (year === undefined || !Number.isInteger(year)) throw new CAMTermsError('A capped lease needs the reconciliation year')
+  const { daysInEffect, daysInYear } = input
+  if (!(daysInYear !== undefined && daysInEffect !== undefined
+    && Number.isInteger(daysInYear) && daysInYear > 0
+    && Number.isInteger(daysInEffect) && daysInEffect > 0 && daysInEffect <= daysInYear)) {
+    throw new CAMTermsError('A capped lease needs its days in effect for the year to prorate the cap')
+  }
+  const warnings: string[] = []
+  if (capThrough !== null) {
+    const through = isoDay(capThrough, 'cam_cap_through')
+    const jan1 = Math.round(Date.UTC(year, 0, 1) / DAY_MS)
+    const dec31 = Math.round(Date.UTC(year, 11, 31) / DAY_MS)
+    if (through < jan1) return { capApplied: null, warnings: [] }
+    if (through < dec31) {
+      warnings.push(
+        `The lease's annual CAM cap ends ${capThrough}, inside ${year}. The cap was applied to the whole of `
+        + `${year} (never overbills). If the lease uncaps the rest of the year, adjust before Approve & Bill.`
+      )
+    }
+  }
+  const prorated = Math.round(((cap * daysInEffect) / daysInYear) * 100) / 100
+  return { capApplied: owedRounded > prorated ? prorated : null, warnings }
 }
