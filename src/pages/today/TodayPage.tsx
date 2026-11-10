@@ -22,6 +22,7 @@ import {
   type QueueItem,
   type QueueKind,
 } from './today-queue'
+import { indexByLease, useOpenCollectionsRecords } from '../money/collections-records'
 
 const KIND_TONE: Record<QueueKind, string> = {
   Collect: 'text-status-danger',
@@ -69,9 +70,15 @@ export function TodayPage() {
   const [tab, setTab] = useState<Tab>('All')
   const [snoozed, setSnoozed] = useState<Set<string>>(readSnoozed)
 
+  // B1 promises/disputes annotate Collect items. Not part of the blocking QueryState: a failed
+  // work-log read degrades to plain balances rather than hiding the queue.
+  const { promises, disputes } = useOpenCollectionsRecords()
   const queue = useMemo(
-    () => buildQueue({ ar: arAging.data?.data ?? [], rentRoll: rentRoll.data ?? [], dates: critDates.data ?? [], today }),
-    [arAging.data, rentRoll.data, critDates.data, today],
+    () => buildQueue({
+      ar: arAging.data?.data ?? [], rentRoll: rentRoll.data ?? [], dates: critDates.data ?? [], today,
+      records: indexByLease(promises.data, disputes.data),
+    }),
+    [arAging.data, rentRoll.data, critDates.data, today, promises.data, disputes.data],
   )
   const live = queue.filter((q) => !snoozed.has(q.key))
   const shown = live.filter((q) => tab === 'All' || q.kind === tab)
