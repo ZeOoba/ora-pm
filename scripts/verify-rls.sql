@@ -196,3 +196,43 @@ LEFT JOIN pg_constraint con
  AND con.conname = expected.conname
  AND con.contype = 'c'
 ORDER BY expected.conname;
+
+-- ── Part 7 (0020_lease_abstraction.sql): the seven lease-abstraction tables
+-- must have rowsecurity = true and ZERO policies — default-deny, service role
+-- only, the same posture as Parts 4 and 6. Expect exactly seven rows, each
+-- `true` with policy_count = 0. ─────────────────────────────────────────────
+SELECT
+  expected.tablename,
+  t.rowsecurity,
+  (SELECT count(*) FROM pg_policies p
+    WHERE p.schemaname = 'public' AND p.tablename = expected.tablename) AS policy_count
+FROM (VALUES
+  ('lease_abstracts'), ('lease_rent_schedule'), ('lease_escalation_rules'),
+  ('lease_concessions'), ('lease_recurring_charges'), ('lease_provisions'),
+  ('lease_critical_dates')
+) AS expected(tablename)
+LEFT JOIN pg_tables t
+  ON t.schemaname = 'public' AND t.tablename = expected.tablename
+ORDER BY expected.tablename;
+
+-- ── Part 7b (0020): the five EXCLUDE USING gist overlap guards must exist.
+-- They are added inside a DO block guarded by conname, so a pre-existing
+-- constraint of the same name would be silently kept: compare the definition.
+-- Expect five rows, each present = true; read actual_definition and confirm it
+-- is EXCLUDE USING gist on lease_id plus the inclusive daterange ('[]') and a
+-- WHERE clause containing superseded_at IS NULL. ────────────────────────────
+SELECT
+  expected.conname,
+  con.oid IS NOT NULL AS present,
+  pg_get_constraintdef(con.oid) AS actual_definition
+FROM (VALUES
+  ('lease_rent_schedule_no_overlap'),
+  ('lease_concessions_no_overlap'),
+  ('lease_recurring_charges_no_overlap'),
+  ('lease_recurring_charges_other_no_overlap'),
+  ('lease_escalation_rules_no_overlap')
+) AS expected(conname)
+LEFT JOIN pg_constraint con
+  ON con.conname = expected.conname
+ AND con.contype = 'x'
+ORDER BY expected.conname;
