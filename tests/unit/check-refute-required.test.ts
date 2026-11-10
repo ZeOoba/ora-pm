@@ -67,10 +67,13 @@ describe('check-refute-required — financial-source classification', () => {
     expect(isFinancialSourcePath('server/routes/exports.ts')).toBe(true)
     expect(isFinancialSourcePath('server/lib/iif-export.ts')).toBe(true)
     expect(isFinancialSourcePath('server/lib/ar-aging.ts')).toBe(true)
+    // B8 general ledger core.
+    expect(isFinancialSourcePath('server/lib/gl.ts')).toBe(true)
+    expect(isFinancialSourcePath('server/routes/gl.ts')).toBe(true)
   })
 
   it('exposes the financial path set with the expected membership', () => {
-    expect(FINANCIAL_SOURCE_PATHS.size).toBe(20)
+    expect(FINANCIAL_SOURCE_PATHS.size).toBe(22)
     for (const p of [
       'server/routes/cron.ts',
       'server/routes/stripe.ts',
@@ -171,6 +174,9 @@ describe('check-refute-required — migrations', () => {
     expect(migrationTouchesFinancialTables('CREATE INDEX idx_charges_lease ON "charges" (lease_id);')).toBe(true)
     expect(migrationTouchesFinancialTables('DROP VIEW IF EXISTS ar_ledger_v2;')).toBe(true)
     expect(migrationTouchesFinancialTables('SELECT * FROM PAYMENTS;')).toBe(true)
+    // B8: the general-ledger tables are money tables too.
+    expect(migrationTouchesFinancialTables('CREATE TABLE IF NOT EXISTS gl_journal_lines (id uuid);')).toBe(true)
+    expect(migrationTouchesFinancialTables('ALTER TABLE gl_periods ADD COLUMN note text;')).toBe(true)
   })
 
   it('does not flag SQL whose only identifiers merely contain a table name as a substring', () => {

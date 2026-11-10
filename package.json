@@ -11,7 +11,8 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint . --max-warnings 0",
     "check:refute": "tsx scripts/check-refute-required.ts",
-    "eval:lease-intake-model": "tsx evals/lease-intake-model-eval/run-eval.ts"
+    "eval:lease-intake-model": "tsx evals/lease-intake-model-eval/run-eval.ts",
+    "verify:gl-sql": "bash scripts/verify-gl-sql.sh"
   },
   "dependencies": {
     "@fontsource/dm-sans": "^5.2.8",

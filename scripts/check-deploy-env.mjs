@@ -46,6 +46,7 @@ export const RUNTIME_ENV = {
   STRIPE_SECRET_KEY: 'deferred', // tenant payments / autopay — pre-launch
   STRIPE_WEBHOOK_SECRET: 'deferred', // tenant payments — pre-launch
   INTAKE_MODEL: 'optional', // intake.ts resolveModel() falls back to DEFAULT_MODEL
+  GL_PERIOD_LOCK_EMAILS: 'deferred', // B8 ledger: period lock fails closed (403) until set; needed at first month-end close
 }
 
 // Bindings are configured in wrangler.toml, not as env vars, so the Pages

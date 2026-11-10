@@ -80,12 +80,17 @@ export const FINANCIAL_SOURCE_PATHS: ReadonlySet<string> = new Set([
   'server/lib/statement.ts',
   'server/lib/statement-render.ts',
   'server/routes/statements.ts',
+  // B8 native general ledger core (2026-11-10): journal posting, reversal, period lock and the
+  // trial balance. The ledger becomes the book of record at QB cutover.
+  'server/lib/gl.ts',
+  'server/routes/gl.ts',
 ])
 
 // Tables whose schema/view/index changes are financial: charges (what tenants owe), payments
 // (what was collected / debited), ar_ledger (the balance view the autopay debit and delinquency
 // sweep read).
-export const FINANCIAL_TABLES: readonly string[] = ['charges', 'payments', 'ar_ledger']
+// gl_* (B8): the native general ledger's accounts, periods and journal.
+export const FINANCIAL_TABLES: readonly string[] = ['charges', 'payments', 'ar_ledger', 'gl_accounts', 'gl_periods', 'gl_journal_entries', 'gl_journal_lines']
 
 const MIGRATION_RE = /^supabase\/migrations\/[^/]+\.sql$/
 
