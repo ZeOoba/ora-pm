@@ -173,9 +173,14 @@ function TenantView({ data, id }: { data: TenantWithJoins; id: string | undefine
       subtitle={data.contact_name ?? undefined}
       status={hasPortal ? <Badge tone="active">Portal access</Badge> : undefined}
       actions={
-        <Button asChild variant="ghost" className="border border-border">
-          <Link to={`/tenants/${id}/edit`}>Edit</Link>
-        </Button>
+        <>
+          <Button asChild variant="ghost" className="border border-border">
+            <Link to={`/tenants/${id}/portal-preview`}>View as tenant</Link>
+          </Button>
+          <Button asChild variant="ghost" className="border border-border">
+            <Link to={`/tenants/${id}/edit`}>Edit</Link>
+          </Button>
+        </>
       }
       kpis={[
         {

@@ -86,6 +86,16 @@ export interface Lease extends Pick<DBLease,
   lease_amendments?: Array<{ id: string; effective_date: string; description: string }>
 }
 
+// GET /api/portal/aging (B13): the tenant's own aging, same allocator as the admin AR report.
+// Positive-balance leases only; the gap to TenantMe.total_balance is credit on account.
+export interface PortalAgingBuckets {
+  current: number; d1_30: number; d31_60: number; d61_90: number; d90_plus: number; unallocated: number
+}
+export interface PortalAging {
+  data: { lease_id: string; property_name: string; suite: string; balance: number | string; buckets: PortalAgingBuckets }[]
+  totals: PortalAgingBuckets & { balance: number }
+}
+
 export interface Document {
   id: string
   lease_id: string
@@ -105,6 +115,8 @@ export const portalApi = {
   getLease: () => portalFetch<{ data: Lease[] }>('/lease'),
 
   getDocuments: () => portalFetch<{ data: Document[] }>('/documents'),
+
+  getAging: () => portalFetch<PortalAging>('/aging'),
 
   setAutopay: (lease_id: string, enabled: boolean, payment_method_id?: string) =>
     portalFetch<{ autopay_enabled: boolean }>('/autopay', {

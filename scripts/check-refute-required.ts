@@ -77,6 +77,10 @@ export const FINANCIAL_SOURCE_PATHS: ReadonlySet<string> = new Set([
   'server/lib/iif-export.ts',
   // AR-aging oldest-first allocation of payments to charges (the aging buckets and their totals).
   'server/lib/ar-aging.ts',
+  // AR-aging report read (2026-11-10, B13): the ledger + charges reads, snapshot cross-check and
+  // bucket totals behind /api/reports/ar-aging AND the tenant-facing /api/portal/aging. A paging or
+  // filter bug here misstates what a tenant is told they owe.
+  'server/lib/ar-aging-report.ts',
   // Tenant account statements (2026-11-09): opening/closing balance, counted-vs-pending payment
   // classification, as-of-end aging, the ar_ledger cross-check, and the rendered figures and
   // signing entity that go out to tenants as Outlook drafts.
