@@ -57,6 +57,11 @@ export const FINANCIAL_SOURCE_PATHS: ReadonlySet<string> = new Set([
   'server/routes/charges.ts',
   // Monthly charge builder: rent / cam_estimate amounts, proration, due dates, idempotency keys.
   'server/lib/billing.ts',
+  // Rent-schedule engine (lease abstraction Phase 2): per-day rent steps, concessions/waivers,
+  // recurring lines and the CAM source rule that billing.ts posts from; escalation expansion.
+  'server/lib/rent-schedule.ts',
+  // Backfill: writes the one-row rent schedule that moves an existing lease onto the engine.
+  'scripts/backfill-rent-schedule.ts',
   // Zod schemas bounding charge / payment inserts and the payment-intent request id — a contract
   // change here carries the same blast radius the reference repo learned from its LTV bound.
   'server/lib/schemas.ts',

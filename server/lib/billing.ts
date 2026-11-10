@@ -1,4 +1,12 @@
 import { format, endOfMonth } from 'date-fns'
+import {
+  computeScheduledLines,
+  hasSchedule,
+  isoDayNumber,
+  type LeaseSchedule,
+  type RecurringChargeType,
+  type ScheduleException,
+} from './rent-schedule'
 
 export interface BillingInput {
   leaseId: string
@@ -8,9 +16,17 @@ export interface BillingInput {
   leaseEndDate: string     // ISO date, INCLUSIVE last day of the term (leases.end_date)
   periodYear: number
   periodMonth: number      // 1–12
+  /**
+   * The lease's rows from 0020 (rent schedule, recurring charges, concessions). When it has ANY
+   * active row, billing goes through server/lib/rent-schedule.ts and baseRentMonthly is ignored
+   * (camEstimateMonthly is used only if no active cam_estimate recurring row exists). Absent or
+   * empty: the legacy flat-field path below, unchanged. No caller passes this yet (cron wiring is
+   * Phase 7 of the lease abstraction plan, with the autopay variance guard).
+   */
+  schedule?: LeaseSchedule
 }
 
-type AutoChargeType = 'rent' | 'cam_estimate'
+type AutoChargeType = 'rent' | RecurringChargeType
 
 export interface AutoCharge {
   lease_id: string
@@ -27,6 +43,8 @@ export interface AutoCharge {
 
 export interface BillingOutput {
   charges: AutoCharge[]
+  /** Set (with charges = []) when the lease's schedule is unusable; the caller must surface it. */
+  exception?: ScheduleException
 }
 
 export function generateIdempotencyKey(params: {
@@ -37,20 +55,8 @@ export function generateIdempotencyKey(params: {
   return `auto:${params.leaseId}:${params.periodStart}:${params.type}`
 }
 
-const ISO_DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/
-
-/** Days since the epoch for an ISO calendar date, computed in UTC so the result never depends on
- *  the host time zone (`new Date('2026-06-16').getDate()` reads 15 west of UTC). null if malformed. */
-function isoDayNumber(iso: string | null | undefined): number | null {
-  if (typeof iso !== 'string') return null
-  const m = ISO_DATE_RE.exec(iso)
-  if (!m) return null
-  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])]
-  const t = Date.UTC(y, mo - 1, d)
-  const back = new Date(t)
-  if (back.getUTCFullYear() !== y || back.getUTCMonth() !== mo - 1 || back.getUTCDate() !== d) return null
-  return Math.round(t / 86_400_000)
-}
+// isoDayNumber (UTC day number for an ISO date, null if malformed) now lives in rent-schedule.ts,
+// moved verbatim so both paths share one date parser.
 
 export type LeaseTermStatus = 'in_term' | 'not_started' | 'ended' | 'invalid'
 
@@ -92,6 +98,34 @@ export function buildMonthlyCharges(input: BillingInput): BillingOutput {
   // past-end lease is surfaced for review instead of silently dropped or silently billed.
   if (leaseTermStatusForPeriod(leaseStartDate, leaseEndDate, periodYear, periodMonth) !== 'in_term') {
     return { charges: [] }
+  }
+
+  // Schedule path (0020 rows present). Same period/due-date fields and key shape as legacy; rent and
+  // cam_estimate keep the legacy key so moving a lease onto a schedule can never double-bill a month.
+  if (hasSchedule(input.schedule)) {
+    const result = computeScheduledLines({
+      schedule: input.schedule as LeaseSchedule,
+      leaseStartDate,
+      leaseEndDate,
+      legacyCamMonthly: camEstimateMonthly,
+      periodYear,
+      periodMonth,
+    })
+    if ('exception' in result) return { charges: [], exception: result.exception }
+    return {
+      charges: result.lines.map((line) => ({
+        lease_id: leaseId,
+        charge_date: chargeDate,
+        due_date: dueDate,
+        period_start: periodStartStr,
+        period_end: periodEndStr,
+        type: line.type,
+        amount: line.amount,
+        description: line.description,
+        source: 'auto' as const,
+        idempotency_key: generateIdempotencyKey({ leaseId, periodStart: periodStartStr, type: line.keySuffix ?? line.type }),
+      })),
+    }
   }
 
   // Prorate by the days of the month that fall inside the term, at EITHER end: a mid-month start
