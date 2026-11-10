@@ -74,8 +74,9 @@ describe('check-refute-required — financial-source classification', () => {
   })
 
   it('exposes the financial path set with the expected membership', () => {
-    expect(FINANCIAL_SOURCE_PATHS.size).toBe(22)
-    expect(FINANCIAL_SOURCE_PATHS.size).toBe(23)
+    // 23 on main (#67 ar-aging-report, #71 gl.ts lib + route) + server/lib/lease-abstract.ts from this PR.
+    // GitHub's "Update branch" auto-merge kept both sides' pins (22 and 23); the true total is 24.
+    expect(FINANCIAL_SOURCE_PATHS.size).toBe(24)
     for (const p of [
       'server/routes/cron.ts',
       'server/routes/stripe.ts',
