@@ -255,7 +255,7 @@ function installDbMock() {
                 limit: vi.fn().mockImplementation(async () => (
                   state.chargesSelectError
                     ? { data: null, error: state.chargesSelectError }
-                    : { data: state.charges.filter((ch) => ch.idempotency_key === firstVal).map((ch) => ({ id: ch.idempotency_key })), error: null }
+                    : { data: state.charges.filter((ch) => ch.idempotency_key === firstVal).map((ch) => ({ amount: ch.amount, voided_at: ch.voided_at ?? null })), error: null }
                 )),
               }
             : {
@@ -440,7 +440,12 @@ describe('POST /api/cam/:id/approve', () => {
   // that won the race) is an idempotent no-op, not an error: the status
   // update still runs and the call still reports success.
   it('treats a 23505 on the true-up insert as an idempotent no-op, not an error', async () => {
-    state.chargesInsertError = { code: '23505', message: 'duplicate key value violates unique constraint "charges_idempotency_key_key"' }
+    // A concurrent approve posts the same true-up after this request's already-posted check (read 2 =
+    // the pre-post re-read), so this request's insert genuinely hits the unique key (23505). REFUTE
+    // F2: the status completes because the stored charge equals this draft's true-up.
+    state.afterRecRead = (n) => {
+      if (n === 2) state.charges.push({ idempotency_key: `cam_true_up:${TENANT_LEASE_ID}:${YEAR}`, type: 'cam_true_up', amount: 500 })
+    }
 
     const res = await approve(REC_ID)
     expect(res.status).toBe(200)
@@ -1458,7 +1463,7 @@ describe('approve gate, REFUTE round 2 (2026-11-10): isolated drift, billed rows
     state.afterRecRead = (n) => { if (n === 2) (state.rec as Row).share_basis = null }
     const res = await approve(REC_ID)
     expect(res.status).toBe(409)
-    expect(((await res.json()) as { error: string }).error).toMatch(/NOT marked billed.*500\.00 was already posted/)
+    expect(((await res.json()) as { error: string }).error).toMatch(/NOT marked billed.*true-up charge of 500\.00 is posted.*delete it/)
     expect(state.rec?.status).toBe('draft')
   })
 
@@ -1470,5 +1475,70 @@ describe('approve gate, REFUTE round 2 (2026-11-10): isolated drift, billed rows
     expect(res.status).toBe(409)
     expect(((await res.json()) as { error: string }).error).toMatch(/No charge was posted/)
     expect(state.rec?.status).toBe('draft')
+  })
+})
+
+describe('approve with a true-up already on the ledger (REFUTE F2, 2026-11-10)', () => {
+  beforeEach(approveFixture)
+  const KEY = () => `cam_true_up:${TENANT_LEASE_ID}:${YEAR}`
+
+  it('crash, then a recalculation to a DIFFERENT figure: 409 naming both, not billed, no second charge', async () => {
+    state.charges = [{ idempotency_key: KEY(), type: 'cam_true_up', amount: 500 }]
+    state.rec = freshRec({ lease_id: TENANT_LEASE_ID, true_up_amount: 600, actual_cam_owed: 600, total_property_recoverable_expenses: 30000 })
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: string }).error).toMatch(/charge of 500\.00 is already posted.*now says 600\.00.*NOT marked billed/)
+    expect(state.rec?.status).toBe('draft')
+    expect(state.charges).toHaveLength(1)
+  })
+
+  it('a +500 charge is live and the draft became a credit: 409, never billed as "credit, not auto-posted"', async () => {
+    state.charges = [{ idempotency_key: KEY(), type: 'cam_true_up', amount: 500 }]
+    state.camEstimateCharges = [{ amount: 575 }]
+    state.rec = freshRec({ lease_id: TENANT_LEASE_ID, true_up_amount: -75, estimated_cam_paid: 575 })
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: string }).error).toMatch(/500\.00 is already posted.*-75\.00 \(a credit\)/)
+    expect(state.rec?.status).toBe('draft')
+  })
+
+  it('the 409 -> approve-again path from the old D1 fix no longer bills a mismatch', async () => {
+    // First approve: a change after the pre-post re-read -> 409, charge for 500 posted.
+    state.afterRecRead = (n) => { if (n === 2) (state.rec as Row).true_up_amount = 600 }
+    expect((await approve(REC_ID)).status).toBe(409)
+    state.afterRecRead = null
+    // Second approve on the 600 row: must not complete against the 500 charge.
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(409)
+    expect(state.rec?.status).toBe('draft')
+    expect(state.charges.filter((ch) => ch.type === 'cam_true_up')).toEqual([expect.objectContaining({ amount: 500 })])
+  })
+
+  it('a concurrent approval posted a DIFFERENT amount (insert hits 23505): 409, not billed', async () => {
+    state.afterRecRead = (n) => {
+      if (n === 2) state.charges.push({ idempotency_key: KEY(), type: 'cam_true_up', amount: 450 })
+    }
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: string }).error).toMatch(/concurrent approval posted.*does not match.*500\.00/)
+    expect(state.rec?.status).toBe('draft')
+    expect(state.charges).toEqual([expect.objectContaining({ amount: 450 })])
+  })
+
+  it('a voided true-up still holding the key: 409, nothing posted, not billed', async () => {
+    state.charges = [{ idempotency_key: KEY(), type: 'cam_true_up', amount: 500, voided_at: '2026-11-01T00:00:00Z' }]
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: string }).error).toMatch(/voided/)
+    expect(chargesInsertSpy).not.toHaveBeenCalled()
+    expect(state.rec?.status).toBe('draft')
+  })
+
+  it('crash recovery still completes when the posted charge equals the draft to the cent (string NUMERIC)', async () => {
+    state.charges = [{ idempotency_key: KEY(), type: 'cam_true_up', amount: '500.00' }]
+    const res = await approve(REC_ID)
+    expect(res.status).toBe(200)
+    expect(state.rec?.status).toBe('billed')
+    expect(state.charges).toHaveLength(1)
   })
 })

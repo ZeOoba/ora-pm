@@ -72,6 +72,9 @@ type PoolLeaseRow = {
  *  becomes NaN, which every consumer in server/lib/cam.ts refuses (fail closed). */
 const numOrNull = (v: number | string | null | undefined): number | null => (v == null ? null : Number(v))
 
+/** Dollars (number or NUMERIC string) to integer cents, for exact money comparison. */
+const cents = (v: unknown) => Math.round(Number(v) * 100)
+
 /**
  * The CAM pool for a property/year, from the DB (audit finding cam-denominator-client-snapshot).
  * Every lease on the property's units whose term overlaps the year (status active / expired /
@@ -301,7 +304,6 @@ camRouter.get('/pool', async (c) => {
  * match. Money compared in cents and the share to 1e-9 (NUMERIC columns can arrive as strings).
  */
 function draftMismatch(saved: Record<string, unknown>, now: Record<string, unknown>): string | null {
-  const cents = (v: unknown) => Math.round(Number(v) * 100)
   for (const f of ['true_up_amount', 'actual_cam_owed', 'estimated_cam_paid', 'total_property_recoverable_expenses']) {
     const a = cents(saved[f])
     const b = cents(now[f])
@@ -641,17 +643,37 @@ camRouter.post('/calculate', async (c) => {
  * changed under this request (REFUTE D1). In the second case the true-up charge may already be
  * posted for the OLD amount, so say so loudly (409) instead of reporting success or a plain 400.
  */
-async function approveLostRace(db: Db, c: Parameters<typeof dbError>[0], id: string, postedAmount: number | null) {
+async function approveLostRace(db: Db, c: Parameters<typeof dbError>[0], id: string, idempotencyKey: string) {
   const { data: now, error } = await db.from('cam_reconciliations').select('*').eq('id', id).single()
   if (error || !now) return dbError(c, error ?? { message: 'reconciliation vanished' }, 'Failed to re-read the CAM reconciliation')
   if ((now as { status?: string }).status !== 'draft') return c.json({ error: 'already billed' }, 400)
+  // Report what is actually on the ledger, not what this request meant to post (REFUTE F2).
+  const posted = await loadPostedTrueUp(db, idempotencyKey)
+  if (posted.kind === 'db_error') return dbError(c, posted.error, 'Failed to check for an already-posted true-up')
   return c.json({
     error: 'This draft was recalculated or invalidated while it was being approved, so it was NOT marked billed. '
-      + (postedAmount === null
-        ? 'No charge was posted. Recalculate and approve again.'
-        : `A true-up charge of ${postedAmount.toFixed(2)} was already posted from the previous figures: `
-          + 'review it (void it if the new figures differ) before approving again.'),
+      + (posted.kind === 'live'
+        ? `A true-up charge of ${Number(posted.amount).toFixed(2)} is posted from the previous figures: delete it if the `
+          + 'new figures differ, then recalculate and approve again.'
+        : 'No charge was posted. Recalculate and approve again.'),
   }, 409)
+}
+
+
+/** The true-up charge already holding this lease/year's idempotency key, if any. The key is unique
+ *  across voided and live charges alike, so a voided one still blocks a new insert. */
+async function loadPostedTrueUp(db: Db, idempotencyKey: string): Promise<
+  { kind: 'none' } | { kind: 'live'; amount: number | string } | { kind: 'voided' } | { kind: 'db_error'; error: PgErr }
+> {
+  const { data, error } = await db
+    .from('charges')
+    .select('amount, voided_at')
+    .eq('idempotency_key', idempotencyKey)
+    .limit(1)
+  if (error) return { kind: 'db_error', error }
+  const row = (data ?? [])[0] as { amount: number | string; voided_at: string | null } | undefined
+  if (!row) return { kind: 'none' }
+  return row.voided_at ? { kind: 'voided' } : { kind: 'live', amount: row.amount }
 }
 
 camRouter.post('/:id/approve', async (c) => {
@@ -693,13 +715,29 @@ camRouter.post('/:id/approve', async (c) => {
   // before the status update), skip the recompute and only complete the status transition — the
   // money already moved, and the documented retry path must not get stuck on later data edits.
   const idempotencyKey = `cam_true_up:${r.lease_id}:${r.reconciliation_year}`
-  const { data: posted, error: postedErr } = await db
-    .from('charges')
-    .select('id')
-    .eq('idempotency_key', idempotencyKey)
-    .limit(1)
-  if (postedErr) return dbError(c, postedErr, 'Failed to check for an already-posted true-up')
-  const alreadyPosted = (posted ?? []).length > 0
+  const posted = await loadPostedTrueUp(db, idempotencyKey)
+  if (posted.kind === 'db_error') return dbError(c, posted.error, 'Failed to check for an already-posted true-up')
+  // REFUTE F2 (2026-11-10): an already-posted charge used to skip every check, so a retry (or a
+  // recalculation between a crash and the retry) marked the row billed at figures that differ from
+  // the charge on the tenant's ledger, even a "credit, not auto-posted" while a +charge was live.
+  // Crash recovery now completes ONLY when the posted charge is live and equals this draft's
+  // true-up to the cent; anything else is a 409 naming both figures for a human to resolve.
+  if (posted.kind === 'voided') {
+    return c.json({
+      error: `A voided ${r.reconciliation_year} CAM true-up charge already holds this lease's true-up key, so a new one `
+        + 'cannot be posted. Resolve it manually before approving.',
+    }, 409)
+  }
+  if (posted.kind === 'live') {
+    if (!(trueUp > 0 && cents(posted.amount) === cents(trueUp))) {
+      return c.json({
+        error: `A ${r.reconciliation_year} CAM true-up charge of ${Number(posted.amount).toFixed(2)} is already posted, but this `
+          + `draft now says ${trueUp.toFixed(2)}${trueUp < 0 ? ' (a credit)' : ''}. It was NOT marked billed. Delete that charge `
+          + '(or confirm it is right and recalculate) before approving.',
+      }, 409)
+    }
+  }
+  const alreadyPosted = posted.kind === 'live'
 
   // Non-drafts were refused above (D2), so everything reaching here is a draft.
   if (!alreadyPosted) {
@@ -752,7 +790,7 @@ camRouter.post('/:id/approve', async (c) => {
       .select()
 
     if (updateErr) return dbError(c, updateErr, 'Failed to approve CAM reconciliation')
-    if (!updated || updated.length === 0) return approveLostRace(db, c, id, null)
+    if (!updated || updated.length === 0) return approveLostRace(db, c, id, idempotencyKey)
 
     return c.json({
       success: true,
@@ -780,6 +818,18 @@ camRouter.post('/:id/approve', async (c) => {
   if (insertErr && insertErr.code !== '23505') {
     return dbError(c, insertErr, 'Failed to post CAM true-up charge')
   }
+  if (insertErr) {
+    // 23505: a concurrent approve posted it first. Same rule as crash recovery: only a live charge
+    // equal to this draft's true-up lets the status complete (REFUTE F2).
+    const raced = await loadPostedTrueUp(db, idempotencyKey)
+    if (raced.kind === 'db_error') return dbError(c, raced.error, 'Failed to re-check the posted true-up')
+    if (raced.kind !== 'live' || cents(raced.amount) !== cents(trueUp)) {
+      return c.json({
+        error: `A concurrent approval posted a ${r.reconciliation_year} CAM true-up that does not match this draft's `
+          + `${trueUp.toFixed(2)}. It was NOT marked billed. Review the charge before approving again.`,
+      }, 409)
+    }
+  }
 
   const { data: updated, error: updateErr } = await db
     .from('cam_reconciliations')
@@ -794,7 +844,7 @@ camRouter.post('/:id/approve', async (c) => {
     .select()
 
   if (updateErr) return dbError(c, updateErr, 'Failed to approve CAM reconciliation')
-  if (!updated || updated.length === 0) return approveLostRace(db, c, id, Math.abs(trueUp))
+  if (!updated || updated.length === 0) return approveLostRace(db, c, id, idempotencyKey)
 
   return c.json({ success: true, true_up_amount: trueUp })
 })
