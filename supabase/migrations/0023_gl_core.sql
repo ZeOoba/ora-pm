@@ -50,7 +50,9 @@
 -- date_trunc(text, date) (where CREATE on public is granted) would win overload resolution over
 -- pg_catalog's, so every month computation is now pg_catalog.date_trunc on an explicit timestamp;
 -- and that REPEATABLE READ snapshots let the reclassification guards miss committed postings, so
--- those changes are refused outside READ COMMITTED. Each is reproduced in the test suite.
+-- those changes are refused outside READ COMMITTED. Pass 5 survived; its one should-fix (a public
+-- ->>(jsonb, jsonb) capturing the untyped-literal keys in gl_post_entry) is closed with
+-- OPERATOR(pg_catalog.->>) and text-typed keys. Each is reproduced in the test suite.
 --
 -- Writes go through two functions (gl_post_entry, gl_reverse_entry) and gl_lock_period, so header
 -- and lines land in ONE transaction (PostgREST runs each RPC in its own transaction).
@@ -540,9 +542,9 @@ BEGIN
     v_no := v_no + 1;
     INSERT INTO gl_journal_lines (entry_id, entity_id, account_id, line_no, debit_cents, credit_cents, memo)
       VALUES (
-        v_entry, p_entity_id, (v_line->>'account_id')::uuid, v_no,
-        COALESCE((v_line->>'debit_cents')::bigint, 0), COALESCE((v_line->>'credit_cents')::bigint, 0),
-        NULLIF(btrim(v_line->>'memo'), '')
+        v_entry, p_entity_id, (v_line OPERATOR(pg_catalog.->>) 'account_id'::text)::uuid, v_no,
+        COALESCE((v_line OPERATOR(pg_catalog.->>) 'debit_cents'::text)::bigint, 0), COALESCE((v_line OPERATOR(pg_catalog.->>) 'credit_cents'::text)::bigint, 0),
+        NULLIF(btrim(v_line OPERATOR(pg_catalog.->>) 'memo'::text), '')
       );
   END LOOP;
   -- Fire the pending balance checks now so the caller gets the error from this call, then restore
@@ -635,6 +637,11 @@ ALTER TABLE gl_journal_lines ENABLE ROW LEVEL SECURITY;
 -- go too.
 REVOKE ALL ON gl_entities, gl_accounts, gl_periods, gl_journal_entries, gl_journal_lines FROM PUBLIC, anon, authenticated;
 REVOKE TRIGGER, TRUNCATE, REFERENCES ON gl_entities, gl_accounts, gl_periods, gl_journal_entries, gl_journal_lines FROM service_role;
+-- Journal rows are insert-only (the guards reject UPDATE/DELETE anyway). Without UPDATE/DELETE,
+-- service_role also cannot LOCK TABLE or SELECT ... FOR UPDATE them to stall posting and month-end
+-- (REFUTE-5 N1). gl_periods/gl_accounts/gl_entities keep UPDATE: the SECURITY INVOKER lock and
+-- guard paths need it.
+REVOKE UPDATE, DELETE ON gl_journal_entries, gl_journal_lines FROM service_role;
 
 REVOKE EXECUTE ON FUNCTION gl_post_entry(UUID, DATE, TEXT, TEXT, TEXT, JSONB) FROM PUBLIC, anon, authenticated;
 REVOKE EXECUTE ON FUNCTION gl_reverse_entry(UUID, DATE, TEXT, TEXT) FROM PUBLIC, anon, authenticated;

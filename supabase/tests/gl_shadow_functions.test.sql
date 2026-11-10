@@ -8,6 +8,22 @@
 GRANT CREATE ON SCHEMA public TO service_role;
 SET ROLE service_role;
 
+-- REFUTE-5 F1: a public ->>(jsonb, jsonb) is an exact match for `jsonb ->> 'literal'` (the literal
+-- is untyped) and would capture every key lookup in gl_post_entry. Runs first: no plan cached yet.
+CREATE FUNCTION public.r5_dos(jsonb, jsonb) RETURNS text LANGUAGE sql AS $$ SELECT 'x' $$;
+CREATE OPERATOR public.->> (LEFTARG = jsonb, RIGHTARG = jsonb, FUNCTION = public.r5_dos);
+DO $$ BEGIN
+  PERFORM gl_post_entry('e0000000-0000-4000-8000-000000000001', '2026-11-09', 'R5 F1 with ->> shadow', 'manual', 'tester',
+    '[{"account_id":"a0000000-0000-4000-8000-000000000001","debit_cents":321,"memo":" m "},{"account_id":"a0000000-0000-4000-8000-000000000002","credit_cents":321}]');
+  IF NOT EXISTS (SELECT 1 FROM gl_journal_lines l JOIN gl_journal_entries e ON e.id = l.entry_id
+                  WHERE e.memo = 'R5 F1 with ->> shadow' AND l.debit_cents = 321 AND l.memo = 'm') THEN
+    RAISE EXCEPTION 'R5 F1: posting with a ->> shadow did not record the right line';
+  END IF;
+  RAISE NOTICE 'ok: R5 F1 a public ->>(jsonb, jsonb) cannot capture gl_post_entry''s key lookups';
+END $$;
+DROP OPERATOR public.->> (jsonb, jsonb);
+DROP FUNCTION public.r5_dos(jsonb, jsonb);
+
 -- F1: a public date_trunc(text, date) is an EXACT match for date_trunc('month', <date>) and would
 -- beat pg_catalog's timestamp/timestamptz overloads. This one claims every date is in 2099.
 CREATE FUNCTION public.date_trunc(text, date) RETURNS timestamp LANGUAGE sql AS $$ SELECT timestamp '2099-12-01' $$;

@@ -155,6 +155,13 @@ describe('migration 0023 — money-rule triggers, functions and access (textual 
     expect(sql).toMatch(/status = 'open' AND locked_at IS NULL AND locked_by IS NULL/)
   })
 
+  it('REFUTE pass 5: no capturable ->> on literal keys; journal tables insert-only for service_role', () => {
+    const code = sql.replace(/^--.*$/gm, '')
+    expect(code).not.toMatch(/(?<!pg_catalog\.)->>/)
+    expect((code.match(/OPERATOR\(pg_catalog\.->>\) '[a-z_]+'::text/g) ?? []).length).toBe(4)
+    has(/^REVOKE UPDATE, DELETE ON gl_journal_entries, gl_journal_lines FROM service_role$/)
+  })
+
   it('RLS on every gl_ table, no policies', () => {
     for (const t of ['gl_entities', 'gl_accounts', 'gl_periods', 'gl_journal_entries', 'gl_journal_lines']) {
       has(new RegExp(`^ALTER TABLE ${t} ENABLE ROW LEVEL SECURITY$`))

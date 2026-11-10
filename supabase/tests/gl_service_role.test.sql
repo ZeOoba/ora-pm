@@ -53,7 +53,17 @@ BEGIN
       RAISE EXCEPTION 'F2: unexpected privilege remains on %', t;
     END IF;
   END LOOP;
-  RAISE NOTICE 'ok: F2 no TRIGGER/TRUNCATE/REFERENCES for service_role; no table access for anon/authenticated';
+  FOREACH t IN ARRAY ARRAY['gl_journal_entries', 'gl_journal_lines'] LOOP
+    IF has_table_privilege('service_role', 'public.' || t, 'UPDATE') OR has_table_privilege('service_role', 'public.' || t, 'DELETE') THEN
+      RAISE EXCEPTION 'R5 N1: service_role keeps UPDATE/DELETE on %', t;
+    END IF;
+    BEGIN
+      EXECUTE format('LOCK TABLE public.%I IN ACCESS EXCLUSIVE MODE', t);
+      RAISE EXCEPTION 'R5 N1: service_role could LOCK TABLE %', t;
+    EXCEPTION WHEN insufficient_privilege THEN NULL;
+    END;
+  END LOOP;
+  RAISE NOTICE 'ok: F2 no TRIGGER/TRUNCATE/REFERENCES for service_role; no table access for anon/authenticated; journal is insert-only';
 END $$;
 
 -- F3: lock audit fields cannot be forged: open rows carry none, and the DB stamps locked_at.
