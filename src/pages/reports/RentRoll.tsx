@@ -6,6 +6,11 @@ import { StatusBadge } from '../../components/StatusBadge'
 import { DataTable } from '../../components/data-table/DataTable'
 import { dataTableColumnHelper } from '../../components/data-table/columns'
 import { csvFilename } from '../../components/data-table/csv'
+import { QueryState } from '../../components/QueryState'
+import { EmptyState } from '../../components/ui/EmptyState'
+import { ViewToggle } from '../../components/ViewToggle'
+import { useView } from '../../components/view-param'
+import { RentRollGrouped } from '../money/RentRollGrouped'
 import type { RentRollRow } from '../../types'
 
 const h = dataTableColumnHelper<RentRollRow>()
@@ -74,22 +79,33 @@ function matchesSearch(r: RentRollRow, q: string): boolean {
   return [r.property_name, r.suite, r.tenant_name].some((v) => v?.toLowerCase().includes(needle))
 }
 
+const VIEWS = ['grouped', 'table'] as const
+
 export function RentRoll() {
-  const { data, error, refetch } = useQuery({
+  const query = useQuery({
     queryKey: ['rent-roll'],
     queryFn: () => api.get<{ data: RentRollRow[] }>('/reports/rent-roll').then((r) => r.data),
   })
+  const { data, error, refetch } = query
+  const [view, setView] = useView(VIEWS)
 
   const all = data ?? []
   const totalMonthly = all.reduce((s, r) => s + (r.total_monthly ?? 0), 0)
   const occupied = all.filter((r) => r.lease_status === 'active').length
+  const today = new Date().toISOString().slice(0, 10)
 
   return (
     <div>
       <PageHeader
         title="Rent Roll"
-        subtitle={data ? `${occupied} occupied · ${formatCurrency(totalMonthly)}/mo total` : undefined}
+        subtitle={data ? `As of ${formatDate(today)} · ${occupied} occupied · ${formatCurrency(totalMonthly)}/mo total` : undefined}
+        action={<ViewToggle options={VIEWS} value={view} onChange={setView} labels={{ grouped: 'By property', table: 'Table & export' }} />}
       />
+      {view === 'grouped' ? (
+        <QueryState query={query} isEmpty={() => all.length === 0} empty={<EmptyState title="No units" message="Add properties and units to build the rent roll." />}>
+          <RentRollGrouped rows={all} today={today} />
+        </QueryState>
+      ) : (
       <DataTable<RentRollRow>
         mode="client"
         columns={columns}
@@ -104,6 +120,7 @@ export function RentRoll() {
         initialSort={{ id: 'property_name', desc: false }}
         emptyTitle="No data"
       />
+      )}
     </div>
   )
 }
