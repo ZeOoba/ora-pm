@@ -325,7 +325,7 @@ function sentKeys(componentPath: string): string[] {
 
 function tableColumns(table: string): Set<string> {
   const cols = new Set<string>()
-  for (const file of ['0001_core_entities.sql', '0002_financial_tables.sql', '0011_appsec_idempotency_and_scale.sql', '0015_payments_idempotency_key.sql', '0019_cam_proportionate_share_base_year.sql']) {
+  for (const file of ['0001_core_entities.sql', '0002_financial_tables.sql', '0011_appsec_idempotency_and_scale.sql', '0015_payments_idempotency_key.sql', '0021_cam_proportionate_share_base_year.sql']) {
     const sql = readFileSync(join(root, 'supabase/migrations', file), 'utf-8')
     const create = sql.match(new RegExp(`CREATE TABLE ${table} \\(([\\s\\S]*?)\\n\\);`))
     if (create) for (const m of create[1].matchAll(/^\s*([a-z_]+)\s+[A-Z]/gm)) cols.add(m[1])

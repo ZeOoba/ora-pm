@@ -22,6 +22,7 @@ import { portalRouter } from './routes/portal'
 import { portalInsuranceRouter } from './routes/portal-insurance'
 import { intakeRouter } from './routes/intake'
 import { searchRouter } from './routes/search'
+import { statementsRouter } from './routes/statements'
 import { errorHandlerMiddleware } from './middleware/error-handler'
 import { checkRateLimit } from './lib/rate-limit'
 
@@ -61,6 +62,27 @@ export interface Env {
   RATE_LIMIT_KV?: KVNamespace
 }
 
+// Roots that skip adminAuthMiddleware: public, or authenticated by their own router (webhook
+// signature, CRON_SECRET, tenant JWT). NOTE: /api/admin is intentionally NOT exempt — its tenant
+// invite/revoke endpoints are privileged admin actions and must pass adminAuthMiddleware.
+export const ADMIN_EXEMPT: readonly string[] = [
+  '/api/webhooks',
+  '/api/cron',
+  '/api/portal',
+  '/api/health',
+  '/api/stripe',
+]
+
+/**
+ * True when `path` is an exempt root or lies beneath one. M13 (2026-11-08 audit): matched on a
+ * path-segment boundary — a bare startsWith exempted any look-alike ("/api/portalX",
+ * "/api/stripe-x"). Callers pass c.req.path, the same path Hono's router matches on, so the gate
+ * and the router can never disagree about which route a request reaches.
+ */
+export function isAdminExempt(path: string): boolean {
+  return ADMIN_EXEMPT.some((root) => path === root || path.startsWith(`${root}/`))
+}
+
 export function createApp() {
   const app = new Hono<{ Bindings: Env }>()
 
@@ -80,19 +102,9 @@ export function createApp() {
     c.json({ status: 'ok', ts: new Date().toISOString() })
   )
 
-  // Admin auth: gate all /api/* routes except public/already-authed paths.
-  // NOTE: /api/admin is intentionally NOT exempt — its tenant invite/revoke
-  // endpoints are privileged admin actions and must pass adminAuthMiddleware.
-  const ADMIN_EXEMPT = [
-    '/api/webhooks',
-    '/api/cron',
-    '/api/portal',
-    '/api/health',
-    '/api/stripe',
-  ]
+  // Admin auth: gate all /api/* routes except public/already-authed paths (ADMIN_EXEMPT, below).
   app.use('/api/*', async (c, next) => {
-    const path = new URL(c.req.url).pathname
-    if (ADMIN_EXEMPT.some(prefix => path.startsWith(prefix))) return next()
+    if (isAdminExempt(c.req.path)) return next()
     return adminAuthMiddleware(c as unknown as Parameters<typeof adminAuthMiddleware>[0], next)
   })
 
@@ -107,8 +119,7 @@ export function createApp() {
   // two buckets are independent and both apply on that route.
   const MUTATION_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
   app.use('/api/*', async (c, next) => {
-    const path = new URL(c.req.url).pathname
-    if (ADMIN_EXEMPT.some(prefix => path.startsWith(prefix))) return next()
+    if (isAdminExempt(c.req.path)) return next()
     if (!MUTATION_METHODS.has(c.req.method)) return next()
     const adminUserId = c.get('adminUserId') ?? 'unknown-admin'
     const { allowed, retryAfterMs } = await checkRateLimit(c.env.RATE_LIMIT_KV, adminUserId, {
@@ -138,6 +149,7 @@ export function createApp() {
   app.route('/api/exports', exportsRouter)
   app.route('/api/intake', intakeRouter)
   app.route('/api/search', searchRouter)
+  app.route('/api/statements', statementsRouter)
   app.route('/api/stripe', stripeRouter)
   app.route('/api/admin', portalAuthRouter)
   app.route('/api/portal', portalRouter)

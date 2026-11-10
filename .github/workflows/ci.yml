@@ -35,6 +35,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Invariant 3 pre-push gate (scripts/prepush_confidential_scan.py): end-to-end tests that
+      # run real `git push`es through the shipped shim. Stdlib Python only.
+      - name: Pre-push confidentiality gate tests
+        run: python3 scripts/test_prepush_confidential_scan.py
+
       - name: Type check
         run: npm run typecheck
 
@@ -88,13 +93,16 @@ jobs:
       # PR-only: it diffs the PR against its base; a direct push to main has no diff base, so it is
       # skipped there. It sits in this job ahead of the deploy steps, so a failing gate fails the
       # job before anything ships — make this workflow a REQUIRED check via branch protection to
-      # hard-enforce it at merge. Fails OPEN on git/tooling gaps (scripts/check-refute-required.ts).
+      # hard-enforce it at merge. Under --strict it fails CLOSED when the base ref is empty or does
+      # not resolve (M12), so the fetch below is required (scripts/check-refute-required.ts).
       - name: REFUTE gate (financial-decision paths)
         if: github.event_name == 'pull_request'
         run: |
           set -euo pipefail
           git fetch --no-tags origin "${{ github.base_ref }}"
-          npm run check:refute -- --strict --base="origin/${{ github.base_ref }}"
+          # Full ref name: a bare `origin/<base>` is resolved by git as refs/tags/origin/<base> FIRST
+          # if such a tag exists, which would let a tag shadow the real base and empty the range.
+          npm run check:refute -- --strict --base="refs/remotes/origin/${{ github.base_ref }}"
 
       - name: Check commit is still the tip of main
         id: tip
@@ -121,13 +129,15 @@ jobs:
       # because `.is('voided_at', null)` raises 42703 against the old schema. That nearly happened
       # merging PR #42; it was caught only because a human was watching CI live.
       # Gated identically to the Cloudflare-env check below, and fails closed on any doubt.
-      # `version: latest` matches db-migrate.yml rather than inventing a second pin. A CLI output
-      # change would break the gate's parser -- which fails CLOSED with an explicit "format may have
-      # changed" error, so the worst case is a blocked deploy, never a silently-skipped check.
+      # Pinned to the same CLI version as db-migrate.yml (keep the two in step). It was `latest`
+      # until 2026-11-09, when `migration list` was exiting non-zero in both workflows under CLI
+      # v3.x (v3.0.0 shipped 2026-11-02; suspected cause). 2.122.1 is the last v2 release. Bump deliberately,
+      # after a db-migrate dry run on the new version passes. A CLI output change would break the
+      # gate's parser -- which fails CLOSED, so the worst case is a blocked deploy.
       - uses: supabase/setup-cli@v1
         if: github.ref == 'refs/heads/main' && github.event_name == 'push' && steps.tip.outputs.deploy == 'true'
         with:
-          version: latest
+          version: 2.122.1
 
       # `migration list --linked` needs link state, which a fresh CI checkout does not have.
       - name: Link to production project (for the migration gate)

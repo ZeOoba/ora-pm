@@ -1,5 +1,5 @@
 /// <reference types="node" />
-// tests/db/cam-share-migration-0019.test.ts
+// tests/db/cam-share-migration-0021.test.ts
 //
 // Gabriel ruling 2026-11-08: CAM Proportionate Share on building/project RENTABLE SF, a lease-stated
 // share that overrides it, and base-year recovery. Runs the REAL migration chain on pg-mem
@@ -9,7 +9,7 @@ import { join } from 'node:path'
 import { describe, it, expect, beforeEach } from 'vitest'
 import { freshMigratedDb, migrationFiles, type MigratedDb } from '../fixtures/pg-migrations'
 
-const FILE = '0019_cam_proportionate_share_base_year.sql'
+const FILE = '0021_cam_proportionate_share_base_year.sql'
 const PROP = '00000000-0000-0000-0000-000000000001'
 const UNIT = '00000000-0000-0000-0000-000000000002'
 const TENANT = '00000000-0000-0000-0000-000000000003'
@@ -25,15 +25,15 @@ function seed(db: MigratedDb) {
   `)
 }
 
-describe('migration 0019 — CAM share basis + base year (runtime, real migration SQL on pg-mem)', () => {
+describe('migration 0021 — CAM share basis + base year (runtime, real migration SQL on pg-mem)', () => {
   let db: MigratedDb
   beforeEach(() => {
     db = freshMigratedDb()
     seed(db)
   })
 
-  it('ships as the only 0019 migration file', () => {
-    expect(migrationFiles().filter((f) => f.startsWith('0019_'))).toEqual([FILE])
+  it('ships as the only 0021 migration file', () => {
+    expect(migrationFiles().filter((f) => f.startsWith('0021_'))).toEqual([FILE])
   })
 
   it('every new column defaults to NULL on existing rows', () => {

@@ -35,6 +35,7 @@
 //    exercised at the route seam by tests/routes/stripe.test.ts with a
 //    stateful stand-in that models the same contract.
 //  - GRANT / REVOKE: not parseable; privilege statements are not under test.
+//  - CREATE EXTENSION btree_gist (0020): pg-mem ships no extensions.
 //  - DO $$ ... $$: pg-mem ships no plpgsql. 0017's guarded data migration
 //    (OI-278 late-fee void) is a DO block; its guards are pinned textually
 //    and its UPDATE is run standalone by tests/db/charges-void.test.ts.
@@ -55,6 +56,25 @@ export const PG_MEM_SKIP: RegExp[] = [
   /^CREATE (OR REPLACE )?FUNCTION\b/i,
   /^(GRANT|REVOKE)\b/i,
   /^DO\s+\$\$/i,
+  // 0020: btree_gist backs the EXCLUDE USING gist overlap guards (themselves inside a DO block above);
+  // pg-mem ships no extensions. tests/db/lease-abstraction-migration-0020.test.ts pins both textually.
+  /^CREATE EXTENSION IF NOT EXISTS btree_gist$/i,
+  // 0019's backfill reads the critical_dates VIEW, which pg-mem never creates (views are skipped
+  // above); tests/db/sent-notifications-tier-migration-0019.test.ts runs it standalone.
+  /^UPDATE sent_notifications\s+SET alert_tier = CASE\b[\s\S]*\bFROM critical_dates cd\b/i,
+]
+
+// pg-mem gives an unnamed table constraint NO name, while Postgres names it
+// <table>_<cols>_key (truncated only past 63 chars). A later migration that drops
+// such a constraint by its Postgres name (0019 drops 0003's sent_notifications
+// UNIQUE) would fail here though it is correct on Supabase. These rewrites give the
+// constraint, in pg-mem only, exactly the name Postgres assigns. Each must match once.
+export const PG_MEM_NAME_CONSTRAINTS: { file: string; from: string; to: string }[] = [
+  {
+    file: '0003_operations_tables.sql',
+    from: '  UNIQUE(notification_type, reference_id, recipient)\n',
+    to: '  CONSTRAINT sent_notifications_notification_type_reference_id_recipient_key UNIQUE(notification_type, reference_id, recipient)\n',
+  },
 ]
 
 // Splits SQL into statements on ";" while respecting single-quoted strings
@@ -162,7 +182,7 @@ export function freshMigratedDb() {
   const pub = db.public
   // Supabase-environment stubs pg-mem doesn't ship: the auth schema that
   // tenants.auth_user_id references, pgcrypto's gen_random_uuid(), and the
-  // btrim() builtin (used by 0016's void-pair CHECK; pg-mem has no string
+  // btrim()/length() builtins (btrim used by 0016's void-pair CHECK; pg-mem has no string
   // trimming functions at all, so this is the real Postgres semantics).
   pub.registerFunction({
     name: 'gen_random_uuid',
@@ -176,9 +196,30 @@ export function freshMigratedDb() {
     returns: DataType.text,
     implementation: (s: string | null) => (s === null ? null : s.trim()),
   })
+  // length(text) for 0020's tenants.state_of_formation CHECK: character count, NULL-preserving
+  // (Array.from counts code points, as Postgres does for a UTF-8 database).
+  // text ~ text (POSIX regex match) for 0020's lease_abstracts.file_sha256 CHECK. JS RegExp agrees with
+  // Postgres ARE syntax for the anchored character-class patterns used in these migrations.
+  pub.registerOperator({
+    operator: '~',
+    left: DataType.text,
+    right: DataType.text,
+    returns: DataType.bool,
+    implementation: (a: string, b: string) => new RegExp(b).test(a),
+  })
+  pub.registerFunction({
+    name: 'length',
+    args: [DataType.text],
+    returns: DataType.integer,
+    implementation: (s: string | null) => (s === null ? null : Array.from(s).length),
+  })
   pub.none('CREATE SCHEMA auth; CREATE TABLE auth.users (id UUID PRIMARY KEY);')
   for (const file of migrationFiles()) {
-    const sql = readFileSync(join(MIGRATIONS_DIR, file), 'utf8')
+    let sql = readFileSync(join(MIGRATIONS_DIR, file), 'utf8').replace(/\r\n/g, '\n')
+    for (const r of PG_MEM_NAME_CONSTRAINTS.filter((x) => x.file === file)) {
+      if (sql.split(r.from).length !== 2) throw new Error(`PG_MEM_NAME_CONSTRAINTS: expected exactly one match in ${file} for ${JSON.stringify(r.from)}`)
+      sql = sql.replace(r.from, r.to)
+    }
     for (const stmt of splitSqlStatements(sql)) {
       const body = statementBody(stmt)
       if (PG_MEM_SKIP.some((re) => re.test(body))) continue

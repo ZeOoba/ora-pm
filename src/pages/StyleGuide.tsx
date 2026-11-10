@@ -14,6 +14,7 @@ import { DataTable } from '../components/data-table/DataTable'
 import { dataTableColumnHelper } from '../components/data-table/columns'
 import { OccupancyDonut } from '../components/charts/OccupancyDonut'
 import { AgingChart } from '../components/charts/AgingChart'
+import { Gauge } from '../components/charts/Gauge'
 
 // Fake data only - no real tenants, amounts or properties.
 type SampleRow = { id: string; tenant: string; unit: string; rent: number; status: string }
@@ -106,6 +107,22 @@ export function StyleGuide() {
           <KpiStat label="Monthly Rent Roll" value="$248,500" sub="Active leases" />
           <KpiStat label="Outstanding AR" value="$12,300" sub="Unpaid charges" warn />
           <KpiStat label="Critical Dates" value={3} sub="Urgent or overdue" warn />
+        </div>
+      </section>
+
+      <section className="mb-10">
+        <h2 className="text-sm font-semibold uppercase tracking-wider text-status-neutral mb-3">Dashboard money tiles &amp; gauges</h2>
+        <div className="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <KpiStat accent="positive" label="Cash In" value="$21,742.54" sub="Payments received" />
+          <KpiStat accent="negative" label="Cash Out" value="$4,241.46" sub="Expenses recorded" />
+          <KpiStat accent="navy" label="Net Cash Flow" value="$17,501.08" sub="Cash in − cash out" />
+          <KpiStat accent="warning" label="Outstanding AR" value="$12,300.00" sub="Unpaid charges, all dates" />
+        </div>
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <Gauge title="Rent Collected" tone="positive" caption="84% of billed collected as of Nov 9, 2026" value={35511.7} max={42299.63}
+            centerValue="$35,511.70" centerLabel="Collected" minLabel="$0.00" maxLabel="$42,299.63" />
+          <Gauge title="% Occupied" caption="31 of 33 units rented as of Nov 9, 2026" value={31} max={33}
+            centerValue="94%" centerLabel="Occupied" minLabel="0" maxLabel="100%" />
         </div>
       </section>
 

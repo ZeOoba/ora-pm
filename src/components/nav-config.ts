@@ -1,9 +1,12 @@
 import {
+  ArrowLeftRight,
   Banknote,
+  BookOpen,
   Building2,
   CalendarClock,
   CalendarSync,
   Download,
+  FileSpreadsheet,
   FileText,
   Grid2x2,
   HandCoins,
@@ -45,9 +48,11 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     heading: 'Accounting',
     items: [
+      { to: '/transactions', label: 'Transactions', icon: ArrowLeftRight },
       { to: '/billing', label: 'Billing', icon: Receipt },
       { to: '/payments', label: 'Payments', icon: Banknote },
       { to: '/ar', label: 'AR / Collections', icon: HandCoins },
+      { to: '/statements', label: 'Statements', icon: FileSpreadsheet },
       { to: '/cam', label: 'CAM', icon: Landmark },
       { to: '/expenses', label: 'Expenses', icon: ReceiptText },
       { to: '/budgets', label: 'Budgets', icon: Wallet },
@@ -56,6 +61,7 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     heading: 'Reports',
     items: [
+      { to: '/reports', label: 'Report Library', icon: BookOpen },
       { to: '/rent-roll', label: 'Rent Roll', icon: ScrollText },
       { to: '/exports', label: 'QB Export', icon: Download },
     ],

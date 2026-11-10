@@ -75,6 +75,6 @@ ALTER TABLE cam_reconciliations ADD CONSTRAINT cam_reconciliations_recovery_basi
   CHECK (recovery_basis IS NULL OR recovery_basis IN ('full_pro_rata', 'above_expense_stop', 'none_gross', 'above_base_year'));
 
 ALTER TABLE cam_reconciliations ADD COLUMN IF NOT EXISTS basis_warnings TEXT;
-COMMENT ON COLUMN cam_reconciliations.share_basis IS 'lease_stated_pct | premises_rsf_over_denominator. NULL = calculated before 0019.';
-COMMENT ON COLUMN cam_reconciliations.recovery_basis IS 'How actual_cam_owed was derived. NULL = calculated before 0019.';
+COMMENT ON COLUMN cam_reconciliations.share_basis IS 'lease_stated_pct | premises_rsf_over_denominator. NULL = calculated before 0021.';
+COMMENT ON COLUMN cam_reconciliations.recovery_basis IS 'How actual_cam_owed was derived. NULL = calculated before 0021.';
 COMMENT ON COLUMN cam_reconciliations.basis_warnings IS 'Non-blocking warnings from the calculation (e.g. stated share vs computed share > 0.5 pp), newline-separated.';

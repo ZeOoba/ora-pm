@@ -391,7 +391,7 @@ export function CAMList() {
                     {(row.tenant_pro_rata_share_pct * 100).toFixed(2)}%
                   </td>
                   <td className="px-4 py-3 text-xs text-muted-foreground">
-                    {row.share_basis ? SHARE_BASIS_LABEL[row.share_basis] : 'Pre-0019 (leased SF)'}
+                    {row.share_basis ? SHARE_BASIS_LABEL[row.share_basis] : 'Pre-0021 (leased SF)'}
                     {row.recovery_basis && <span> · {RECOVERY_BASIS_LABEL[row.recovery_basis]}</span>}
                     {row.basis_warnings && <p className="text-amber-600">{row.basis_warnings}</p>}
                   </td>

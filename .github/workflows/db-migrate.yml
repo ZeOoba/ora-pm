@@ -67,7 +67,10 @@ jobs:
 
       - uses: supabase/setup-cli@v1
         with:
-          version: latest
+          # Pinned (was `latest`): `migration list` exited non-zero under CLI v3.x on 2026-11-09
+          # (suspected cause). Keep equal to
+          # ci.yml's migration-gate pin; bump only after a dry run on the new version passes.
+          version: 2.122.1
 
       - name: Link to production project
         # --password passed explicitly (not just as an env var) — `link` needs
@@ -79,7 +82,9 @@ jobs:
           SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
 
       - name: Show pending migrations
-        run: supabase migration list --linked --password "$SUPABASE_DB_PASSWORD"
+        # --debug: the CLI otherwise exits 1 with no reason ("rerun with --debug"). GitHub masks
+        # the secret values if any debug line echoes them.
+        run: supabase migration list --linked --password "$SUPABASE_DB_PASSWORD" --debug
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}

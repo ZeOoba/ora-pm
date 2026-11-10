@@ -32,29 +32,24 @@ describe('portal-api Charge/Lease — schema-derived, no reintroduced field drif
     expect(charge.type).toBe('rent')
   })
 
-  it('Lease accepts only real leases-table columns (no monthly_rent)', () => {
+  // M8 (2026-11-08): the portal Lease type is the tenant-safe projection the server returns
+  // (PORTAL_LEASE_SELECT), a Pick of real leases columns. Internal fields (notes, options, TI,
+  // expense stop) are excess properties here, so a page reaching for one fails tsc.
+  it('Lease accepts only the tenant-safe leases columns the portal endpoint returns', () => {
     const lease: Lease = {
       id: 'l1',
-      tenant_id: 't1',
-      unit_id: 'u1',
       status: 'active',
       start_date: '2026-01-01',
       end_date: '2027-01-01',
       rent_type: 'nnn',
       base_rent_monthly: 3000,
       cam_estimate_monthly: 300,
-      security_deposit: 6000,
-      expense_stop_amount: null,
-      proportionate_share_pct: null, base_year: null, base_year_expense_amount: null,
-      ti_allowance: null,
-      ti_reimbursement_schedule: null,
-      percentage_rent_terms: null,
-      options: null,
-      notes: null,
-      created_at: '2026-01-01T00:00:00Z',
       autopay_enabled: false,
       autopay_payment_method_id: null,
     }
     expect(lease.base_rent_monthly).toBe(3000)
+    // @ts-expect-error internal landlord notes are not part of the tenant projection
+    const withNotes: Lease = { ...lease, notes: 'internal' }
+    expect(withNotes.id).toBe('l1')
   })
 })

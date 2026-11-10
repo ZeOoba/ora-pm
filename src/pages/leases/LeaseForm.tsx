@@ -340,7 +340,7 @@ export function LeaseForm({
             </Field>
           </div>
 
-          {/* CAM Proportionate Share and base year (0019; CAM ruling 2026-11-08) */}
+          {/* CAM Proportionate Share and base year (0021; CAM ruling 2026-11-08) */}
           <div className="grid grid-cols-2 gap-4">
             <Field
               label="Proportionate Share (%)"

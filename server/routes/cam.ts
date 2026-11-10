@@ -64,7 +64,7 @@ type PoolLeaseRow = {
   start_date: string
   end_date: string
   rent_type: CAMRentType
-  /** leases.proportionate_share_pct (0019): NUMERIC, may arrive as a string from PostgREST. */
+  /** leases.proportionate_share_pct (0021): NUMERIC, may arrive as a string from PostgREST. */
   proportionate_share_pct: number | string | null
 }
 
@@ -83,7 +83,7 @@ async function loadCamPool(db: Db, propertyId: string, year: number): Promise<
   | { pool: null; leases: null; denominatorRSF: null; error: PgErr | CAMTermsError }
 > {
   // Building-RSF ruling (2026-11-08): the denominator is the building/project RSF the lease form
-  // names (properties.cam_denominator_rsf, 0019) — never total_sf, which the importer fills with
+  // names (properties.cam_denominator_rsf, 0021) — never total_sf, which the importer fills with
   // summed suite SF. Fail closed on any read error.
   const { data: prop, error: propErr } = await db
     .from('properties')
@@ -292,7 +292,7 @@ camRouter.post('/calculate', async (c) => {
   const rentType: CAMRentType = leaseRow?.rent_type ?? 'nnn' // column is NOT NULL DEFAULT 'nnn'
   // NUMERIC can arrive as a string from PostgREST; null stays null (no stop).
   const expenseStopPerSF = leaseRow?.expense_stop_amount == null ? null : Number(leaseRow.expense_stop_amount)
-  // Base year (0019; ruling 2026-11-08): recover only the increase over the base year's total.
+  // Base year (0021; ruling 2026-11-08): recover only the increase over the base year's total.
   const baseYear = numOrNull(leaseRow?.base_year)
   const baseYearExpenseAmount = numOrNull(leaseRow?.base_year_expense_amount)
 
@@ -496,7 +496,7 @@ camRouter.post('/:id/approve', async (c) => {
   if (recErr || !rec) return c.json({ error: 'Not found' }, 404)
 
   const r = rec as { true_up_amount: number; lease_id: string; reconciliation_year: number; share_basis?: string | null; status?: string }
-  // CAM ruling 2026-11-08: a draft saved before migration 0019 (share_basis NULL) was priced on the
+  // CAM ruling 2026-11-08: a draft saved before migration 0021 (share_basis NULL) was priced on the
   // superseded leased-SF denominator. It must be recalculated on the building-RSF basis before it
   // can be billed. Billed/collected rows are unaffected (the conditional update below rejects them).
   if (r.status === 'draft' && (r.share_basis === null || r.share_basis === undefined)) {

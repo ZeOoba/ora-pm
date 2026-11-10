@@ -290,7 +290,7 @@ function freshRec(overrides: Partial<Row> = {}): Row {
     reconciliation_year: YEAR,
     true_up_amount: 500,
     status: 'draft',
-    // 0019: drafts priced on the building-RSF basis carry a share_basis (a NULL one is pre-0019).
+    // 0021: drafts priced on the building-RSF basis carry a share_basis (a NULL one is pre-0021).
     share_basis: 'premises_rsf_over_denominator',
     ...overrides,
   }
@@ -1072,7 +1072,7 @@ describe('GET /api/cam/pool: share basis per lease', () => {
   })
 })
 
-describe('POST /api/cam/:id/approve: pre-0019 drafts (leased-SF basis) are not billable', () => {
+describe('POST /api/cam/:id/approve: pre-0021 drafts (leased-SF basis) are not billable', () => {
   it('409 and nothing posted for a draft with no share_basis; the row stays a draft', async () => {
     state.rec = freshRec({ share_basis: null })
     const res = await approve(REC_ID)

@@ -490,23 +490,56 @@ cronRouter.post('/monthly-billing', async (c) => {
   return c.json({ posted, skipped, errors, chargeErrors, autopayErrors, errorMessages, remaining, year, month, voidedSkipped, notStarted, expiredUnbilled, leaseExceptions }, status)
 })
 
+// OI-047: CRIT_RECIPIENTS only scopes the sent_notifications dedup-key set — it does not control
+// who receives mail. The actual send recipient is $script:EmailTo in
+// C:\Users\Owner\ora-pm-cron\ping-crons-lib.ps1 (separately maintained). Changing one without
+// the other either has no effect on delivery, or records alerts for an address that never gets mail.
+const CRIT_RECIPIENTS = ['ggoldberg@oxfordra.net']
+// OI-321: dedup is keyed on (reference_id, urgency tier, critical date) —
+// sent_notifications.alert_tier + alert_date (0019) — so a date alerts again as it escalates
+// notice -> warning -> urgent -> overdue, and again after it is edited in place (a lease extended
+// by changing end_date). Same four tiers as the critical_dates view's CASE
+// (0004_views_and_rls.sql) and the alert_tier CHECK constraint.
+const CRIT_TIERS = ['overdue', 'urgent', 'warning', 'notice'] as const
+type CritTier = typeof CRIT_TIERS[number]
+const isCritTier = (t: unknown): t is CritTier => typeof t === 'string' && (CRIT_TIERS as readonly string[]).includes(t)
+// A real calendar date in PostgREST's DATE form (YYYY-MM-DD); 2026-02-30 is rejected.
+const isIsoDate = (d: unknown): d is string => {
+  if (typeof d !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(d)) return false
+  const t = new Date(`${d}T00:00:00Z`)
+  return !Number.isNaN(t.getTime()) && t.toISOString().slice(0, 10) === d
+}
+const CRIT_ACK_VERSION = 1
+// One ack can carry at most this many alerts; a larger set fails closed (400) rather than
+// recording part of a digest. Far above any real weekly digest.
+const CRIT_ACK_MAX_ALERTS = 5000
+const CRIT_ACK_UPSERT_CHUNK = 500
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+// POST /api/cron/critical-dates-alerts
+//
+// OI-321 (2026-11-09): this handler no longer writes sent_notifications. Before, it recorded the
+// dedup rows BEFORE responding (OI-047's dedup-before-send), so when ping-crons.ps1's Outlook-COM
+// send then failed the alerts were already marked sent and never fired again. Now it returns the
+// digest plus an `ack_token` naming exactly the (reference_id, tier, date) alerts in it; ping-crons.ps1
+// POSTs that token to /critical-dates-alerts/ack only after a confirmed send (exit 0). An
+// unconfirmed send — failed, unknown (exit 6), or an ack that never arrives — leaves the alerts
+// unrecorded, so the next run reports them again: a duplicate, never a loss.
+//
+// Read-only, so a caller that never acks (e.g. a pinger predating OI-321) gets the same digest
+// every run. Never add this endpoint to scripts/delinquency-backup.sh: that job has no send path,
+// so it must neither call this nor ack.
 cronRouter.post('/critical-dates-alerts', async (c) => {
   const db = getDb(c.env)
-  // OI-047: RECIPIENTS only scopes the sent_notifications dedup-key set
-  // (`${reference_id}:${recipient}`) now — it no longer controls who
-  // actually receives mail. The actual send recipient is $script:EmailTo in
-  // C:\Users\Owner\ora-pm-cron\ping-crons-lib.ps1 (separately maintained).
-  // Changing one without the other either has no effect on delivery, or
-  // writes dedup rows for an address that never gets mail.
-  const RECIPIENTS = ['ggoldberg@oxfordra.net']
   const HORIZON_DAYS = 90
-  // Per `.in('reference_id', chunk)` call on the dedup read. The read is also filtered to this
-  // notification_type and RECIPIENTS, so a chunk returns at most chunk × RECIPIENTS.length rows
-  // (UNIQUE(notification_type, reference_id, recipient)) — keep that product under
-  // POSTGREST_MAX_ROWS or fetchChunked fails every run closed.
+  // Per `.in('reference_id', chunk)` call on the dedup read. The read is filtered to this
+  // notification_type, CRIT_RECIPIENTS and the chunk's CURRENT critical dates (legacy untagged
+  // rows have a NULL alert_date and drop out), so a chunk returns at most
+  // chunk × CRIT_RECIPIENTS.length × CRIT_TIERS.length rows per matching date (UNIQUE
+  // (notification_type, reference_id, recipient, alert_tier, alert_date)) — keep that product
+  // under POSTGREST_MAX_ROWS or fetchChunked fails every run closed.
   const BULK_QUERY_CHUNK_SIZE = 100
 
-  // Query critical dates within horizon
   const horizonDate = new Date()
   horizonDate.setDate(horizonDate.getDate() + HORIZON_DAYS)
   const horizonStr = horizonDate.toISOString().slice(0, 10)
@@ -526,51 +559,45 @@ cronRouter.post('/critical-dates-alerts', async (c) => {
 
   if (cdErr) return c.json({ error: cdErr.message }, 500)
   if (criticalDates.length === 0) {
-    return c.json({ new_alerts: 0, skipped: 0, email: null })
+    return c.json({ new_alerts: 0, skipped: 0, email: null, ack_token: null })
   }
+  // An urgency outside the four tiers could never be acked (alert_tier CHECK), so it would
+  // re-alert every run forever. View contract drift must fail loudly instead.
+  const badTier = criticalDates.find(r => !isCritTier(r.urgency))
+  if (badTier) return c.json({ error: `critical_dates returned an unknown urgency '${String(badTier.urgency)}'` }, 500)
+  // Same reasoning for the date half of the key (the ack rejects a non-calendar date).
+  const badDate = criticalDates.find(r => !isIsoDate(r.critical_date))
+  if (badDate) return c.json({ error: `critical_dates returned a malformed critical_date '${String(badDate.critical_date)}'` }, 500)
 
-  // Dedup: check which reference_ids already notified this recipient. Chunked (fetchChunked) so
-  // the `.in()` URL stays bounded, and fails closed on an error or a capped chunk: a truncated or
-  // failed read makes sent alerts look unsent, the insert below then hits the UNIQUE constraint,
-  // and the run 500s — permanently, since the same rows re-truncate every run.
+  // Dedup: which (reference_id, tier, date) alerts this recipient already got. Chunked
+  // (fetchChunked) so the `.in()` URL stays bounded, and fails closed on an error or a capped
+  // chunk: a truncated or failed read makes acked alerts look new and re-sends them.
   const refIds = criticalDates.map(r => r.reference_id)
-  const { data: alreadySent, error: sentErr } = await fetchChunked<{ reference_id: string; recipient: string }>(
+  const dateByRef = new Map(criticalDates.map(r => [r.reference_id, r.critical_date]))
+  const { data: alreadySent, error: sentErr } = await fetchChunked<{ reference_id: string; recipient: string; alert_tier: string | null; alert_date: string | null }>(
     refIds, BULK_QUERY_CHUNK_SIZE,
     (chunk) => db.from('sent_notifications')
-      .select('reference_id, recipient')
+      .select('reference_id, recipient, alert_tier, alert_date')
       .eq('notification_type', 'critical_date_alert')
-      .in('recipient', RECIPIENTS)
-      .in('reference_id', chunk),
+      .in('recipient', CRIT_RECIPIENTS)
+      .in('reference_id', chunk)
+      .in('alert_date', [...new Set(chunk.map(id => dateByRef.get(id)!))]),
     { maxRows: POSTGREST_MAX_ROWS }
   )
   if (sentErr) return c.json({ error: `Failed to read sent notifications: ${sentErr.message}` }, 500)
 
-  const sentSet = new Set(alreadySent.map(s => `${s.reference_id}:${s.recipient}`))
-
-  // Determine new alerts (items not yet sent to at least one recipient)
+  // A legacy row (untagged: recorded before 0019 and not backfilled because its date had left
+  // the view) matches no (tier, date), so it suppresses nothing.
+  const key = (ref: string, rec: string, tier: string, date: string) => `${ref}|${rec}|${tier}|${date}`
+  const sentSet = new Set(alreadySent.filter(s => s.alert_tier !== null && s.alert_date !== null)
+    .map(s => key(s.reference_id, s.recipient, s.alert_tier!, s.alert_date!)))
   const newAlerts: CritRow[] = criticalDates.filter(r =>
-    RECIPIENTS.some(rec => !sentSet.has(`${r.reference_id}:${rec}`))
+    CRIT_RECIPIENTS.some(rec => !sentSet.has(key(r.reference_id, rec, r.urgency, r.critical_date)))
   )
 
   if (newAlerts.length === 0) {
-    return c.json({ new_alerts: 0, skipped: criticalDates.length, email: null })
+    return c.json({ new_alerts: 0, skipped: criticalDates.length, email: null, ack_token: null })
   }
-
-  // Record in sent_notifications (upsert / ignore duplicates)
-  const notifications = newAlerts.flatMap(r =>
-    RECIPIENTS.map(rec => ({
-      notification_type: 'critical_date_alert',
-      reference_id: r.reference_id,
-      recipient: rec,
-    }))
-  )
-
-  // Record dedup rows BEFORE building the email digest — if this fails, return
-  // without one so the next run retries cleanly rather than re-reporting
-  // alerts the principal already received (OI-047: dedup-before-send is
-  // preserved unchanged; only the actual send moved out of this Worker).
-  const { error: insErr } = await db.from('sent_notifications').insert(notifications)
-  if (insErr) return c.json({ error: `Failed to record notifications: ${insErr.message}` }, 500)
 
   // Build email digest
   const urgencyOrder: Record<string, number> = { overdue: 0, urgent: 1, warning: 2, notice: 3 }
@@ -591,11 +618,51 @@ cronRouter.post('/critical-dates-alerts', async (c) => {
   // scheduler (ping-crons.ps1) sends it via Outlook COM.
   const subject = `[ORA PM] ${newAlerts.length} Critical Date${newAlerts.length > 1 ? 's' : ''} — ${new Date().toISOString().slice(0,10)}`
 
+  // Opaque to the caller, which posts it back verbatim to /ack. Ids, tiers and dates only, no
+  // tenant data.
+  const ack_token = JSON.stringify({ v: CRIT_ACK_VERSION, alerts: newAlerts.map(r => [r.reference_id, r.urgency, r.critical_date]) })
+
   return c.json({
     new_alerts: newAlerts.length,
     skipped: criticalDates.length - newAlerts.length,
     email: { subject, body: bodyText },
+    ack_token,
   })
+})
+
+// POST /api/cron/critical-dates-alerts/ack  { "ack_token": "<token from /critical-dates-alerts>" }
+//
+// OI-321: records the dedup rows for a digest ping-crons.ps1 confirmed it sent. Idempotent
+// (ON CONFLICT DO NOTHING), so a retried ack is harmless. Validates the whole token before
+// writing anything; a token it cannot fully parse is a 400 and records nothing.
+cronRouter.post('/critical-dates-alerts/ack', async (c) => {
+  let raw: unknown
+  try { raw = await c.req.json() } catch { return c.json({ error: 'body is not JSON' }, 400) }
+  const tokenStr = (raw as { ack_token?: unknown } | null)?.ack_token
+  if (typeof tokenStr !== 'string') return c.json({ error: 'ack_token (string) is required' }, 400)
+  let token: unknown
+  try { token = JSON.parse(tokenStr) } catch { return c.json({ error: 'ack_token is not valid' }, 400) }
+  const { v, alerts } = (token ?? {}) as { v?: unknown; alerts?: unknown }
+  if (v !== CRIT_ACK_VERSION) return c.json({ error: 'ack_token version is not supported' }, 400)
+  if (!Array.isArray(alerts) || alerts.length === 0) return c.json({ error: 'ack_token carries no alerts' }, 400)
+  if (alerts.length > CRIT_ACK_MAX_ALERTS) return c.json({ error: `ack_token carries more than ${CRIT_ACK_MAX_ALERTS} alerts` }, 400)
+  const acked: [string, CritTier, string][] = []
+  for (const a of alerts) {
+    if (!Array.isArray(a) || a.length !== 3 || typeof a[0] !== 'string' || !UUID_RE.test(a[0]) || !isCritTier(a[1]) || !isIsoDate(a[2])) {
+      return c.json({ error: 'ack_token carries a malformed alert' }, 400)
+    }
+    acked.push([a[0], a[1], a[2]])
+  }
+
+  const rows = acked.flatMap(([reference_id, alert_tier, alert_date]) =>
+    CRIT_RECIPIENTS.map(recipient => ({ notification_type: 'critical_date_alert', reference_id, recipient, alert_tier, alert_date })))
+  const db = getDb(c.env)
+  for (let i = 0; i < rows.length; i += CRIT_ACK_UPSERT_CHUNK) {
+    const { error: ackErr } = await db.from('sent_notifications')
+      .upsert(rows.slice(i, i + CRIT_ACK_UPSERT_CHUNK), { onConflict: 'notification_type,reference_id,recipient,alert_tier,alert_date', ignoreDuplicates: true })
+    if (ackErr) return c.json({ error: `Failed to record notifications: ${ackErr.message}` }, 500)
+  }
+  return c.json({ recorded: acked.length })
 })
 
 cronRouter.post('/delinquency-check', async (c) => {

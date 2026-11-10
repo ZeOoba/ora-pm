@@ -1,3 +1,13 @@
 # Normalize line endings repo-wide: git stores LF; Windows working tree gets CRLF via core.autocrlf.
 # Added 2026-07-12 to end perpetual phantom-modified flags from pre-existing CRLF blobs.
 * text=auto
+
+# E11 (2026-11-08): files with a `#!` shebang must keep LF in the working tree too. With
+# `* text=auto` + core.autocrlf a Windows checkout rewrites `#!/usr/bin/env node\n` to `...\r\n`,
+# and Node's ESM loader then throws "SyntaxError: Invalid or unexpected token" on import (this broke
+# tests/scripts/check-migrations-applied.test.ts on Windows); bash likewise rejects CRLF scripts.
+*.mjs text eol=lf
+*.sh  text eol=lf
+
+# Git hook shims are run by sh and must stay LF in every working tree.
+scripts/git-hooks/* text eol=lf
