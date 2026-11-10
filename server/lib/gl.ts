@@ -110,6 +110,11 @@ export function validateEntryLines(lines: JournalPost['lines']): LineValidation 
   if (errors.length) return { ok: false, errors }
   const debits = out.reduce((s, l) => s + l.debit_cents, 0)
   const credits = out.reduce((s, l) => s + l.credit_cents, 0)
+  // Each line is capped at MAX_LINE_CENTS, but enough lines could push a JS sum past 2^53 and make
+  // the balance comparison inexact. Refuse rather than compare rounded numbers.
+  if (!Number.isSafeInteger(debits) || !Number.isSafeInteger(credits)) {
+    return { ok: false, errors: ['entry total is too large to post as one entry'] }
+  }
   if (debits !== credits) {
     return { ok: false, errors: [`entry does not balance: debits ${formatCents(debits)} ≠ credits ${formatCents(credits)}`] }
   }

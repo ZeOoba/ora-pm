@@ -183,6 +183,89 @@ BEGIN
   RAISE NOTICE 'ok: entity trial balance ties (% cents each side)', d;
 END $$;
 
+-- ── REFUTE regressions (2026-11-10 adversarial pass) ───────────────────────────────────────────
+-- D1: two transactions in ONE simple-query message share now(). The second must still be unable to
+-- append lines to the first's entry. `\;` keeps everything in a single message to psql's server.
+BEGIN \; SELECT gl_post_entry('e0000000-0000-4000-8000-000000000002', '2026-10-20', 'D1 victim', 'manual', 'tester', '[{"account_id":"a0000000-0000-4000-8000-000000000009","debit_cents":100},{"account_id":"a0000000-0000-4000-8000-000000000009","credit_cents":100}]') \; COMMIT \; BEGIN \; SELECT pg_temp.expect_error(format('INSERT INTO gl_journal_lines (entry_id, entity_id, account_id, line_no, debit_cents) VALUES (%L, %L, %L, 3, 999900); INSERT INTO gl_journal_lines (entry_id, entity_id, account_id, line_no, credit_cents) VALUES (%L, %L, %L, 4, 999900)', (SELECT id FROM gl_journal_entries WHERE memo = 'D1 victim'), 'e0000000-0000-4000-8000-000000000002', 'a0000000-0000-4000-8000-000000000009', (SELECT id FROM gl_journal_entries WHERE memo = 'D1 victim'), 'e0000000-0000-4000-8000-000000000002', 'a0000000-0000-4000-8000-000000000009'), 'only be added in the transaction') \; COMMIT;
+DO $$ BEGIN
+  IF (SELECT count(*) FROM gl_journal_lines l JOIN gl_journal_entries e ON e.id = l.entry_id WHERE e.memo = 'D1 victim') <> 2 THEN
+    RAISE EXCEPTION 'D1: lines were appended to an entry from another transaction';
+  END IF;
+  IF (SELECT posted_txid FROM gl_journal_entries WHERE memo = 'D1 victim') IS NULL THEN
+    RAISE EXCEPTION 'D1: posted_txid must be set by the database';
+  END IF;
+  RAISE NOTICE 'ok: D1 same-message transactions cannot append lines to another transaction''s entry';
+END $$;
+
+-- D3: periods, accounts and entities cannot be truncated; no period row (open or locked) can be deleted.
+DO $$ BEGIN
+  PERFORM pg_temp.expect_error('TRUNCATE gl_periods', 'cannot be truncated');
+  PERFORM pg_temp.expect_error('TRUNCATE gl_accounts CASCADE', 'cannot be truncated');
+  PERFORM pg_temp.expect_error('TRUNCATE gl_entities CASCADE', 'cannot be truncated');
+  PERFORM pg_temp.expect_error($q$DELETE FROM gl_periods WHERE period_start = '2026-10-01'$q$, 'cannot be deleted');
+  IF NOT EXISTS (SELECT 1 FROM gl_periods WHERE period_start = '2026-09-01' AND status = 'locked') THEN
+    RAISE EXCEPTION 'D3: the September lock must survive';
+  END IF;
+  RAISE NOTICE 'ok: D3 locks survive TRUNCATE/DELETE attempts; accounts and entities cannot be truncated';
+END $$;
+
+-- D4: reversal integrity holds for direct inserts too.
+DO $$
+DECLARE v_real UUID; v_rev UUID;
+BEGIN
+  v_real := gl_post_entry('e0000000-0000-4000-8000-000000000001', '2026-11-03', 'D4 real', 'manual', 'tester',
+    '[{"account_id":"a0000000-0000-4000-8000-000000000003","debit_cents":700},{"account_id":"a0000000-0000-4000-8000-000000000001","credit_cents":700}]');
+  SELECT id INTO v_rev FROM gl_journal_entries WHERE source = 'reversal' LIMIT 1;
+  -- a direct "reversal of a reversal"
+  PERFORM pg_temp.expect_error(format(
+    'INSERT INTO gl_journal_entries (entity_id, entry_date, memo, source, reverses_entry_id, posted_by) VALUES (%L, %L, %L, %L, %L, %L)',
+    'e0000000-0000-4000-8000-000000000001', '2026-11-04', 'rev of rev', 'reversal', v_rev, 't'), 'cannot itself be reversed');
+  -- a direct fake "reversal" of the real entry with non-mirror lines (would block the real reversal)
+  PERFORM pg_temp.expect_error(format(
+    'WITH e AS (INSERT INTO gl_journal_entries (entity_id, entry_date, memo, source, reverses_entry_id, posted_by) VALUES (%L, %L, %L, %L, %L, %L) RETURNING id) ' ||
+    'INSERT INTO gl_journal_lines (entry_id, entity_id, account_id, line_no, debit_cents, credit_cents) ' ||
+    'SELECT id, %L::uuid, %L::uuid, 1, 5::bigint, 0::bigint FROM e UNION ALL SELECT id, %L::uuid, %L::uuid, 2, 0::bigint, 5::bigint FROM e',
+    'e0000000-0000-4000-8000-000000000001', '2026-11-04', 'fake', 'reversal', v_real, 't',
+    'e0000000-0000-4000-8000-000000000001', 'a0000000-0000-4000-8000-000000000001',
+    'e0000000-0000-4000-8000-000000000001', 'a0000000-0000-4000-8000-000000000002'), 'does not exactly mirror');
+  -- the real reversal still works afterwards
+  PERFORM gl_reverse_entry(v_real, '2026-11-05', 'D4 real reversal', 'tester');
+  RAISE NOTICE 'ok: D4 no direct reversal-of-reversal; non-mirror fake reversal rejected; real reversal unblocked';
+END $$;
+
+-- D5: two postings (and a reversal) in one transaction.
+DO $$
+DECLARE a UUID; b UUID;
+BEGIN
+  a := gl_post_entry('e0000000-0000-4000-8000-000000000001', '2026-11-06', 'D5 first', 'manual', 'tester',
+    '[{"account_id":"a0000000-0000-4000-8000-000000000001","debit_cents":10},{"account_id":"a0000000-0000-4000-8000-000000000002","credit_cents":10}]');
+  b := gl_post_entry('e0000000-0000-4000-8000-000000000001', '2026-11-06', 'D5 second', 'manual', 'tester',
+    '[{"account_id":"a0000000-0000-4000-8000-000000000001","debit_cents":20},{"account_id":"a0000000-0000-4000-8000-000000000002","credit_cents":20}]');
+  PERFORM gl_reverse_entry(a, '2026-11-07', 'D5 reverse first', 'tester');
+  PERFORM gl_post_entry('e0000000-0000-4000-8000-000000000001', '2026-11-07', 'D5 third', 'manual', 'tester',
+    '[{"account_id":"a0000000-0000-4000-8000-000000000001","debit_cents":30},{"account_id":"a0000000-0000-4000-8000-000000000002","credit_cents":30}]');
+  SET CONSTRAINTS ALL IMMEDIATE;
+  RAISE NOTICE 'ok: D5 several postings and a reversal in one transaction';
+END $$;
+
+-- Observations: deactivated accounts stay reversible; posted history cannot be reclassified; only
+-- ended months can be locked.
+DO $$
+DECLARE v UUID;
+BEGIN
+  v := gl_post_entry('e0000000-0000-4000-8000-000000000001', '2026-11-08', 'Obs repairs', 'manual', 'tester',
+    '[{"account_id":"a0000000-0000-4000-8000-000000000003","debit_cents":4000},{"account_id":"a0000000-0000-4000-8000-000000000001","credit_cents":4000}]');
+  SET CONSTRAINTS ALL IMMEDIATE;
+  UPDATE gl_accounts SET is_active = false, qb_name = 'Repairs (retired)', number = '6100R' WHERE id = 'a0000000-0000-4000-8000-000000000003';
+  PERFORM gl_reverse_entry(v, '2026-11-09', 'Reverse through a retired account', 'tester');
+  SET CONSTRAINTS ALL IMMEDIATE;
+  PERFORM pg_temp.expect_error($q$UPDATE gl_accounts SET account_type = 'asset' WHERE id = 'a0000000-0000-4000-8000-000000000003'$q$, 'entity and type cannot change');
+  PERFORM pg_temp.expect_error($q$UPDATE gl_entities SET accounting_basis = 'cash' WHERE id = 'e0000000-0000-4000-8000-000000000001'$q$, 'accounting basis cannot change');
+  PERFORM pg_temp.expect_error(format('SELECT gl_lock_period(%L, %L, %L)', 'e0000000-0000-4000-8000-000000000001', date_trunc('month', current_date)::date, 'x'), 'has ended');
+  PERFORM pg_temp.expect_error(format('SELECT gl_lock_period(%L, %L, %L)', 'e0000000-0000-4000-8000-000000000001', '2099-12-01', 'x'), 'has ended');
+  RAISE NOTICE 'ok: retired accounts stay reversible; type/basis frozen once used; only ended months lock';
+END $$;
+
 -- ── Privileges ────────────────────────────────────────────────────────────────────────────────
 DO $$ BEGIN
   IF has_function_privilege('anon', 'gl_post_entry(uuid, date, text, text, text, jsonb)', 'EXECUTE')

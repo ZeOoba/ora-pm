@@ -22,17 +22,27 @@
 --      or lines that do not balance, cannot commit).
 --   3. Same-entity accounts. Composite foreign keys (entity_id, entry_id) and
 --      (entity_id, account_id): a line can only hit an account of its own entry's entity.
---   4. Immutability. Posted entries and lines cannot be UPDATEd or DELETEd (trigger); a
---      correction is a reversing entry. Each entry can be reversed at most once (UNIQUE), and a
---      reversal cannot itself be reversed.
---   5. Period lock. No entry may be inserted dated in a locked month (trigger); a locked month
---      cannot be unlocked or deleted (trigger). gl_post_entry and gl_lock_period serialize on the
---      period row, so a posting and a lock of the same month cannot interleave.
---   6. Inactive accounts cannot take new lines.
---   7. Lines are written only in the transaction that created their entry (trigger), so no one
---      can later append a balanced pair of lines to an old entry, e.g. one in a locked month.
---      posted_at is forced to now() (the transaction start time) on insert, and a line's entry
---      must carry posted_at = now(). Unlike an xmin check this also holds inside savepoints.
+--   4. Immutability. Posted entries and lines cannot be UPDATEd, DELETEd or TRUNCATEd; a
+--      correction is a reversing entry. Each entry can be reversed at most once (UNIQUE); a
+--      reversal must reverse a non-reversal of its own entity and must EXACTLY mirror it (deferred
+--      check at commit), so a fake "reversal" cannot be inserted to block the real one.
+--   5. Period lock. Every entry and line insert holds its month's period row FOR SHARE (trigger),
+--      and gl_lock_period takes it FOR UPDATE, so a lock and any posting into that month serialize,
+--      whether through the functions or direct SQL. A locked month rejects new entries and lines.
+--      A lock is permanent: period rows cannot be unlocked, edited, deleted or truncated. Only a
+--      month that has ended can be locked.
+--   6. Inactive accounts take no new lines (reversal lines excepted, so history stays correctable).
+--      Once an account has lines its entity and type are fixed; once an entity has entries its
+--      accounting basis is fixed. gl_accounts and gl_entities cannot be truncated.
+--   7. Lines are written only by the transaction that posted their entry: the entry records the
+--      top-level transaction id (pg_current_xact_id, the same inside savepoints), and a line's
+--      entry must carry the current one. (A now()-based check was refuted: every transaction in
+--      one multi-statement message shares the same now().)
+--
+-- REFUTE (2026-11-10, independent adversarial reviewer, real Postgres 16, as service_role): the
+-- first draft of rules 4, 5 and 7 was bypassable by direct SQL (D1–D4) and blocked two postings
+-- in one transaction (D5). This version closes each; supabase/tests/gl_core.test.sql reproduces
+-- every attack and asserts it now fails.
 --
 -- Writes go through two functions (gl_post_entry, gl_reverse_entry) and gl_lock_period, so header
 -- and lines land in ONE transaction (PostgREST runs each RPC in its own transaction).
@@ -100,6 +110,8 @@ CREATE TABLE IF NOT EXISTS gl_journal_entries (
   posted_by TEXT NOT NULL
     CONSTRAINT gl_journal_entries_posted_by_nonempty CHECK (btrim(posted_by) <> ''),
   posted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  -- Top-level transaction id of the posting transaction, set by gl_assert_entry_insert (rule 7).
+  posted_txid BIGINT,
   CONSTRAINT gl_journal_entries_entity_id_key UNIQUE (entity_id, id),
   -- A reversal must reverse an entry of its own entity.
   CONSTRAINT gl_journal_entries_reverses_same_entity FOREIGN KEY (entity_id, reverses_entry_id) REFERENCES gl_journal_entries (entity_id, id),
@@ -196,38 +208,116 @@ CREATE TRIGGER gl_journal_lines_no_truncate
   BEFORE TRUNCATE ON gl_journal_lines
   FOR EACH STATEMENT EXECUTE FUNCTION gl_reject_change();
 
--- ── Rules 5 and 6: locked periods, inactive accounts ─────────────────────────────────────────
-CREATE OR REPLACE FUNCTION gl_assert_entry_period_open() RETURNS trigger
+-- ── Rules 4, 5, 7: entry insert (period hold, reversal integrity, posting transaction) ─────────
+-- Holds the period row (FOR SHARE) for the rest of the transaction, creating it as 'open' if it
+-- does not exist yet. gl_lock_period takes the same row FOR UPDATE, so a lock and ANY insert into
+-- that month (function or direct SQL) serialize. Period rows are never deleted (gl_periods_guard),
+-- so the row is always found after the upsert.
+CREATE OR REPLACE FUNCTION gl_hold_open_period(p_entity_id UUID, p_date DATE) RETURNS void
 LANGUAGE plpgsql
 SET search_path = public
 AS $$
+DECLARE
+  v_status TEXT;
 BEGIN
-  -- The posting time is the database's, never the caller's (rule 7 depends on it).
-  NEW.posted_at := now();
-  IF EXISTS (
-    SELECT 1 FROM gl_periods
-     WHERE entity_id = NEW.entity_id
-       AND period_start = date_trunc('month', NEW.entry_date)::date
-       AND status = 'locked'
-  ) THEN
-    RAISE EXCEPTION 'gl: period % is locked for entity %; post in an open month', date_trunc('month', NEW.entry_date)::date, NEW.entity_id
+  INSERT INTO gl_periods (entity_id, period_start) VALUES (p_entity_id, date_trunc('month', p_date)::date)
+    ON CONFLICT (entity_id, period_start) DO NOTHING;
+  SELECT status INTO v_status FROM gl_periods
+   WHERE entity_id = p_entity_id AND period_start = date_trunc('month', p_date)::date
+   FOR SHARE;
+  IF v_status IS NULL THEN
+    RAISE EXCEPTION 'gl: period row for % missing after upsert', date_trunc('month', p_date)::date USING ERRCODE = 'check_violation';
+  END IF;
+  IF v_status = 'locked' THEN
+    RAISE EXCEPTION 'gl: period % is locked for entity %; post in an open month', date_trunc('month', p_date)::date, p_entity_id
       USING ERRCODE = 'check_violation';
+  END IF;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION gl_assert_entry_insert() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = public
+AS $$
+DECLARE
+  v_ref_source TEXT;
+BEGIN
+  -- Rule 7: the posting transaction and time are the database's, never the caller's. The top-level
+  -- transaction id is the same inside savepoints and unique per transaction (unlike now(), which
+  -- every transaction in one multi-statement message shares — REFUTE D1).
+  NEW.posted_at := now();
+  NEW.posted_txid := pg_current_xact_id()::text::bigint;
+  -- Rule 5: hold the month open for this transaction (or fail if it is locked) — REFUTE D2.
+  PERFORM gl_hold_open_period(NEW.entity_id, NEW.entry_date);
+  -- Rule 4: a reversal must reverse a non-reversal (same entity: composite FK). The exact-mirror
+  -- check runs at commit (gl_journal_entries_reversal_mirror) — REFUTE D4.
+  IF NEW.reverses_entry_id IS NOT NULL THEN
+    SELECT source INTO v_ref_source FROM gl_journal_entries WHERE id = NEW.reverses_entry_id;
+    IF v_ref_source = 'reversal' THEN
+      RAISE EXCEPTION 'gl: a reversal cannot itself be reversed; post a new entry' USING ERRCODE = 'check_violation';
+    END IF;
   END IF;
   RETURN NEW;
 END;
 $$;
 
 DROP TRIGGER IF EXISTS gl_journal_entries_period_open ON gl_journal_entries;
-CREATE TRIGGER gl_journal_entries_period_open
+DROP TRIGGER IF EXISTS gl_journal_entries_insert_guard ON gl_journal_entries;
+CREATE TRIGGER gl_journal_entries_insert_guard
   BEFORE INSERT ON gl_journal_entries
-  FOR EACH ROW EXECUTE FUNCTION gl_assert_entry_period_open();
+  FOR EACH ROW EXECUTE FUNCTION gl_assert_entry_insert();
 
-CREATE OR REPLACE FUNCTION gl_assert_account_active() RETURNS trigger
+-- Rule 4 at commit: a reversal's lines are exactly its original's lines with debit and credit
+-- swapped (same line numbers, accounts and amounts; nothing extra, nothing missing).
+CREATE OR REPLACE FUNCTION gl_assert_reversal_mirror() RETURNS trigger
 LANGUAGE plpgsql
 SET search_path = public
 AS $$
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM gl_accounts WHERE id = NEW.account_id AND entity_id = NEW.entity_id AND is_active) THEN
+  IF NEW.reverses_entry_id IS NULL THEN
+    RETURN NULL;
+  END IF;
+  IF EXISTS (
+    (SELECT line_no, account_id, credit_cents AS d, debit_cents AS c FROM gl_journal_lines WHERE entry_id = NEW.reverses_entry_id
+     EXCEPT
+     SELECT line_no, account_id, debit_cents, credit_cents FROM gl_journal_lines WHERE entry_id = NEW.id)
+    UNION ALL
+    (SELECT line_no, account_id, debit_cents, credit_cents FROM gl_journal_lines WHERE entry_id = NEW.id
+     EXCEPT
+     SELECT line_no, account_id, credit_cents, debit_cents FROM gl_journal_lines WHERE entry_id = NEW.reverses_entry_id)
+  ) THEN
+    RAISE EXCEPTION 'gl: reversal % does not exactly mirror entry %', NEW.id, NEW.reverses_entry_id USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NULL;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS gl_journal_entries_reversal_mirror ON gl_journal_entries;
+CREATE CONSTRAINT TRIGGER gl_journal_entries_reversal_mirror
+  AFTER INSERT ON gl_journal_entries
+  DEFERRABLE INITIALLY DEFERRED
+  FOR EACH ROW EXECUTE FUNCTION gl_assert_reversal_mirror();
+
+-- ── Rules 5, 6, 7: line insert ────────────────────────────────────────────────────────────────
+-- A line may only be written by the transaction that posted its entry (REFUTE D1), into a month
+-- that is still open (re-held FOR SHARE), on an active account of the entry's entity. Reversal
+-- lines are exempt from the active-account rule so a deactivated account never makes history
+-- impossible to correct.
+CREATE OR REPLACE FUNCTION gl_assert_line_insert() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = public
+AS $$
+DECLARE
+  v_entry gl_journal_entries%ROWTYPE;
+BEGIN
+  SELECT * INTO v_entry FROM gl_journal_entries WHERE id = NEW.entry_id;
+  IF NOT FOUND OR v_entry.posted_txid IS DISTINCT FROM pg_current_xact_id()::text::bigint THEN
+    RAISE EXCEPTION 'gl: lines can only be added in the transaction that posts their entry (entry %)', NEW.entry_id
+      USING ERRCODE = 'restrict_violation';
+  END IF;
+  PERFORM gl_hold_open_period(v_entry.entity_id, v_entry.entry_date);
+  IF v_entry.source <> 'reversal'
+     AND NOT EXISTS (SELECT 1 FROM gl_accounts WHERE id = NEW.account_id AND entity_id = NEW.entity_id AND is_active) THEN
     RAISE EXCEPTION 'gl: account % is inactive or not in entity %', NEW.account_id, NEW.entity_id
       USING ERRCODE = 'check_violation';
   END IF;
@@ -235,42 +325,21 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION gl_assert_line_same_tx() RETURNS trigger
-LANGUAGE plpgsql
-SET search_path = public
-AS $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM gl_journal_entries e
-     WHERE e.id = NEW.entry_id AND e.posted_at = now()
-  ) THEN
-    RAISE EXCEPTION 'gl: lines can only be added in the transaction that posts their entry (entry %)', NEW.entry_id
-      USING ERRCODE = 'restrict_violation';
-  END IF;
-  RETURN NEW;
-END;
-$$;
-
 DROP TRIGGER IF EXISTS gl_journal_lines_same_tx ON gl_journal_lines;
-CREATE TRIGGER gl_journal_lines_same_tx
-  BEFORE INSERT ON gl_journal_lines
-  FOR EACH ROW EXECUTE FUNCTION gl_assert_line_same_tx();
-
 DROP TRIGGER IF EXISTS gl_journal_lines_account_active ON gl_journal_lines;
-CREATE TRIGGER gl_journal_lines_account_active
+DROP TRIGGER IF EXISTS gl_journal_lines_insert_guard ON gl_journal_lines;
+CREATE TRIGGER gl_journal_lines_insert_guard
   BEFORE INSERT ON gl_journal_lines
-  FOR EACH ROW EXECUTE FUNCTION gl_assert_account_active();
+  FOR EACH ROW EXECUTE FUNCTION gl_assert_line_insert();
 
+-- ── Periods: a lock is permanent; period rows are never deleted or truncated (REFUTE D3) ───────
 CREATE OR REPLACE FUNCTION gl_guard_period_change() RETURNS trigger
 LANGUAGE plpgsql
 SET search_path = public
 AS $$
 BEGIN
   IF TG_OP = 'DELETE' THEN
-    IF OLD.status = 'locked' THEN
-      RAISE EXCEPTION 'gl: a locked period cannot be deleted' USING ERRCODE = 'restrict_violation';
-    END IF;
-    RETURN OLD;
+    RAISE EXCEPTION 'gl: period rows cannot be deleted' USING ERRCODE = 'restrict_violation';
   END IF;
   IF OLD.status = 'locked' THEN
     RAISE EXCEPTION 'gl: a locked period cannot be changed or unlocked' USING ERRCODE = 'restrict_violation';
@@ -287,31 +356,65 @@ CREATE TRIGGER gl_periods_guard
   BEFORE UPDATE OR DELETE ON gl_periods
   FOR EACH ROW EXECUTE FUNCTION gl_guard_period_change();
 
--- ── Write path ────────────────────────────────────────────────────────────────────────────────
--- Holds the period row (FOR SHARE) for the rest of the transaction, creating it as 'open' if it
--- does not exist yet. gl_lock_period takes the same row FOR UPDATE, so lock and post serialize.
-CREATE OR REPLACE FUNCTION gl_hold_open_period(p_entity_id UUID, p_date DATE) RETURNS void
+CREATE OR REPLACE FUNCTION gl_reject_truncate() RETURNS trigger
 LANGUAGE plpgsql
 SET search_path = public
 AS $$
-DECLARE
-  v_status TEXT;
 BEGIN
-  INSERT INTO gl_periods (entity_id, period_start) VALUES (p_entity_id, date_trunc('month', p_date)::date)
-    ON CONFLICT (entity_id, period_start) DO NOTHING;
-  SELECT status INTO v_status FROM gl_periods
-   WHERE entity_id = p_entity_id AND period_start = date_trunc('month', p_date)::date
-   FOR SHARE;
-  IF v_status = 'locked' THEN
-    RAISE EXCEPTION 'gl: period % is locked for entity %; post in an open month', date_trunc('month', p_date)::date, p_entity_id
-      USING ERRCODE = 'check_violation';
-  END IF;
+  RAISE EXCEPTION 'gl: % cannot be truncated', TG_TABLE_NAME USING ERRCODE = 'restrict_violation';
 END;
 $$;
 
+DROP TRIGGER IF EXISTS gl_periods_no_truncate ON gl_periods;
+CREATE TRIGGER gl_periods_no_truncate BEFORE TRUNCATE ON gl_periods FOR EACH STATEMENT EXECUTE FUNCTION gl_reject_truncate();
+DROP TRIGGER IF EXISTS gl_accounts_no_truncate ON gl_accounts;
+CREATE TRIGGER gl_accounts_no_truncate BEFORE TRUNCATE ON gl_accounts FOR EACH STATEMENT EXECUTE FUNCTION gl_reject_truncate();
+DROP TRIGGER IF EXISTS gl_entities_no_truncate ON gl_entities;
+CREATE TRIGGER gl_entities_no_truncate BEFORE TRUNCATE ON gl_entities FOR EACH STATEMENT EXECUTE FUNCTION gl_reject_truncate();
+
+-- ── Posted history cannot be reclassified (REFUTE observation) ────────────────────────────────
+-- Once an account has lines, its entity and type are fixed (renames, numbers and deactivation stay
+-- allowed). Once an entity has entries, its accounting basis is fixed.
+CREATE OR REPLACE FUNCTION gl_guard_account_change() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = public
+AS $$
+BEGIN
+  IF (NEW.entity_id <> OLD.entity_id OR NEW.account_type <> OLD.account_type)
+     AND EXISTS (SELECT 1 FROM gl_journal_lines WHERE account_id = OLD.id) THEN
+    RAISE EXCEPTION 'gl: account % has posted lines; its entity and type cannot change', OLD.id USING ERRCODE = 'restrict_violation';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS gl_accounts_guard ON gl_accounts;
+CREATE TRIGGER gl_accounts_guard
+  BEFORE UPDATE ON gl_accounts
+  FOR EACH ROW EXECUTE FUNCTION gl_guard_account_change();
+
+CREATE OR REPLACE FUNCTION gl_guard_entity_change() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = public
+AS $$
+BEGIN
+  IF NEW.accounting_basis <> OLD.accounting_basis
+     AND EXISTS (SELECT 1 FROM gl_journal_entries WHERE entity_id = OLD.id) THEN
+    RAISE EXCEPTION 'gl: entity % has posted entries; its accounting basis cannot change', OLD.id USING ERRCODE = 'restrict_violation';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS gl_entities_guard ON gl_entities;
+CREATE TRIGGER gl_entities_guard
+  BEFORE UPDATE ON gl_entities
+  FOR EACH ROW EXECUTE FUNCTION gl_guard_entity_change();
+
+-- ── Write path ────────────────────────────────────────────────────────────────────────────────
 -- p_lines: JSON array of {"account_id": uuid, "debit_cents": int, "credit_cents": int, "memo": text?}.
--- Returns the new entry id. Every rule above is enforced by the table constraints and triggers;
--- this function only makes the header + lines atomic and holds the period.
+-- Returns the new entry id. Every rule is enforced by the table constraints and triggers; this
+-- function only makes header + lines atomic and surfaces the balance error from this call.
 CREATE OR REPLACE FUNCTION gl_post_entry(
   p_entity_id UUID,
   p_entry_date DATE,
@@ -335,8 +438,10 @@ BEGIN
   IF jsonb_typeof(p_lines) IS DISTINCT FROM 'array' THEN
     RAISE EXCEPTION 'gl: lines must be a JSON array' USING ERRCODE = 'check_violation';
   END IF;
-  PERFORM gl_hold_open_period(p_entity_id, p_entry_date);
 
+  -- The caller may have left these IMMEDIATE (SET CONSTRAINTS persists for the transaction); the
+  -- header goes in before its lines, so defer them here and check them explicitly below.
+  SET CONSTRAINTS gl_journal_entries_balanced, gl_journal_lines_balanced, gl_journal_entries_reversal_mirror DEFERRED;
   INSERT INTO gl_journal_entries (entity_id, entry_date, memo, source, posted_by)
     VALUES (p_entity_id, p_entry_date, p_memo, p_source, p_posted_by)
     RETURNING id INTO v_entry;
@@ -350,9 +455,10 @@ BEGIN
         NULLIF(btrim(v_line->>'memo'), '')
       );
   END LOOP;
-  -- Balance is enforced at COMMIT by the deferred constraint triggers; check now as well so the
-  -- caller gets the error from this call rather than from an opaque commit failure.
+  -- Fire the pending balance checks now so the caller gets the error from this call, then restore
+  -- deferral so a second posting in the same transaction can insert its header (REFUTE D5).
   SET CONSTRAINTS gl_journal_entries_balanced, gl_journal_lines_balanced IMMEDIATE;
+  SET CONSTRAINTS gl_journal_entries_balanced, gl_journal_lines_balanced DEFERRED;
   RETURN v_entry;
 END;
 $$;
@@ -376,11 +482,10 @@ BEGIN
   IF NOT FOUND THEN
     RAISE EXCEPTION 'gl: journal entry % not found', p_entry_id USING ERRCODE = 'no_data_found';
   END IF;
-  IF v_orig.source = 'reversal' THEN
-    RAISE EXCEPTION 'gl: a reversal cannot itself be reversed; post a new entry' USING ERRCODE = 'check_violation';
-  END IF;
-  PERFORM gl_hold_open_period(v_orig.entity_id, p_entry_date);
 
+  -- The caller may have left these IMMEDIATE (SET CONSTRAINTS persists for the transaction); the
+  -- header goes in before its lines, so defer them here and check them explicitly below.
+  SET CONSTRAINTS gl_journal_entries_balanced, gl_journal_lines_balanced, gl_journal_entries_reversal_mirror DEFERRED;
   INSERT INTO gl_journal_entries (entity_id, entry_date, memo, source, reverses_entry_id, posted_by)
     VALUES (v_orig.entity_id, p_entry_date, p_memo, 'reversal', v_orig.id, p_posted_by)
     RETURNING id INTO v_entry;
@@ -389,13 +494,14 @@ BEGIN
     SELECT v_entry, entity_id, account_id, line_no, credit_cents, debit_cents, memo
       FROM gl_journal_lines WHERE entry_id = v_orig.id;
 
-  SET CONSTRAINTS gl_journal_entries_balanced, gl_journal_lines_balanced IMMEDIATE;
+  SET CONSTRAINTS gl_journal_entries_balanced, gl_journal_lines_balanced, gl_journal_entries_reversal_mirror IMMEDIATE;
+  SET CONSTRAINTS gl_journal_entries_balanced, gl_journal_lines_balanced, gl_journal_entries_reversal_mirror DEFERRED;
   RETURN v_entry;
 END;
 $$;
 
--- Locks a month for an entity (creating the period row if needed). Idempotent for an
--- already-locked month only in the sense that it raises: a lock is never re-stamped.
+-- Locks a month for an entity (creating the period row if needed). Only a month that has ENDED
+-- can be locked (a lock is permanent; locking a future month by mistake would be unfixable).
 CREATE OR REPLACE FUNCTION gl_lock_period(p_entity_id UUID, p_period_start DATE, p_locked_by TEXT) RETURNS void
 LANGUAGE plpgsql
 SET search_path = public
@@ -405,6 +511,9 @@ DECLARE
 BEGIN
   IF p_period_start <> date_trunc('month', p_period_start)::date THEN
     RAISE EXCEPTION 'gl: period_start must be the first day of a month' USING ERRCODE = 'check_violation';
+  END IF;
+  IF p_period_start >= date_trunc('month', current_date)::date THEN
+    RAISE EXCEPTION 'gl: only a month that has ended can be locked (% has not)', p_period_start USING ERRCODE = 'check_violation';
   END IF;
   IF p_locked_by IS NULL OR btrim(p_locked_by) = '' THEN
     RAISE EXCEPTION 'gl: locked_by is required' USING ERRCODE = 'check_violation';

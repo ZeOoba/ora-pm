@@ -177,6 +177,10 @@ describe('check-refute-required — migrations', () => {
     // B8: the general-ledger tables are money tables too.
     expect(migrationTouchesFinancialTables('CREATE TABLE IF NOT EXISTS gl_journal_lines (id uuid);')).toBe(true)
     expect(migrationTouchesFinancialTables('ALTER TABLE gl_periods ADD COLUMN note text;')).toBe(true)
+    // REFUTE D6: ledger functions and gl_entities, with no ledger table named.
+    expect(migrationTouchesFinancialTables('CREATE OR REPLACE FUNCTION gl_guard_period_change() RETURNS trigger AS $$ BEGIN RETURN NEW; END $$ LANGUAGE plpgsql;')).toBe(true)
+    expect(migrationTouchesFinancialTables('CREATE OR REPLACE FUNCTION gl_reject_change() RETURNS trigger AS $$ BEGIN RETURN NULL; END $$ LANGUAGE plpgsql;')).toBe(true)
+    expect(migrationTouchesFinancialTables("UPDATE gl_entities SET accounting_basis = 'cash';")).toBe(true)
   })
 
   it('does not flag SQL whose only identifiers merely contain a table name as a substring', () => {
@@ -185,6 +189,7 @@ describe('check-refute-required — migrations', () => {
     expect(migrationTouchesFinancialTables('CREATE TABLE recharges (id uuid);')).toBe(false)
     expect(migrationTouchesFinancialTables('ALTER TABLE properties ALTER COLUMN zip DROP NOT NULL;')).toBe(false)
     expect(migrationTouchesFinancialTables('')).toBe(false)
+    expect(migrationTouchesFinancialTables('ALTER TABLE vendors ADD COLUMN default_gl_code text;')).toBe(false)
   })
 })
 

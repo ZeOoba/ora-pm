@@ -96,13 +96,23 @@ describe('migration 0023 — money-rule triggers, functions and access (textual 
     has(/^CREATE TRIGGER gl_journal_lines_no_truncate\s+BEFORE TRUNCATE ON gl_journal_lines/)
   })
 
-  it('period lock, permanent lock, active accounts, same-transaction lines, db-set posted_at', () => {
-    has(/^CREATE TRIGGER gl_journal_entries_period_open\s+BEFORE INSERT ON gl_journal_entries/)
+  it('insert guards, reversal mirror, period guard, no truncate, frozen type/basis (REFUTE D1–D4)', () => {
+    has(/^CREATE TRIGGER gl_journal_entries_insert_guard\s+BEFORE INSERT ON gl_journal_entries/)
+    has(/^CREATE TRIGGER gl_journal_lines_insert_guard\s+BEFORE INSERT ON gl_journal_lines/)
+    has(/^CREATE CONSTRAINT TRIGGER gl_journal_entries_reversal_mirror\s+AFTER INSERT ON gl_journal_entries\s+DEFERRABLE INITIALLY DEFERRED/)
     has(/^CREATE TRIGGER gl_periods_guard\s+BEFORE UPDATE OR DELETE ON gl_periods/)
-    has(/^CREATE TRIGGER gl_journal_lines_account_active\s+BEFORE INSERT ON gl_journal_lines/)
-    has(/^CREATE TRIGGER gl_journal_lines_same_tx\s+BEFORE INSERT ON gl_journal_lines/)
+    for (const t of ['gl_periods', 'gl_accounts', 'gl_entities']) {
+      has(new RegExp(`^CREATE TRIGGER ${t}_no_truncate BEFORE TRUNCATE ON ${t}`))
+    }
+    has(/^CREATE TRIGGER gl_accounts_guard\s+BEFORE UPDATE/)
+    has(/^CREATE TRIGGER gl_entities_guard\s+BEFORE UPDATE/)
+    // same-transaction lines by top-level transaction id, not now() (D1)
     expect(sql).toMatch(/NEW\.posted_at := now\(\);/)
-    expect(sql).toMatch(/e\.posted_at = now\(\)/)
+    expect(sql).toMatch(/NEW\.posted_txid := pg_current_xact_id\(\)::text::bigint;/)
+    expect(sql).toMatch(/posted_txid IS DISTINCT FROM pg_current_xact_id\(\)::text::bigint/)
+    expect(sql).not.toMatch(/e\.posted_at = now\(\)/)
+    // only ended months lock
+    expect(sql).toMatch(/p_period_start >= date_trunc\('month', current_date\)::date/)
   })
 
   it('write functions: post and lock serialize on the period row', () => {

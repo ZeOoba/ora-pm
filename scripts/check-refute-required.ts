@@ -116,9 +116,14 @@ export function isMigrationPath(p: string): boolean {
 // attest and expensive to miss.
 const FINANCIAL_TABLE_RE = new RegExp(`(^|[^a-z0-9])(${FINANCIAL_TABLES.join('|')})(?![a-z0-9])`, 'i')
 
-/** True when a migration's SQL references any financial table. */
+// Every gl_ identifier is ledger: the tables above, but also gl_entities (accounting basis) and the
+// gl_ trigger/write functions that carry the money rules, which a later migration could replace
+// with CREATE OR REPLACE FUNCTION without naming any table (REFUTE D6, 2026-11-10).
+const GL_IDENTIFIER_RE = /(^|[^a-z0-9_])gl_[a-z0-9_]/i
+
+/** True when a migration's SQL references any financial table or any gl_ ledger object. */
 export function migrationTouchesFinancialTables(sql: string): boolean {
-  return FINANCIAL_TABLE_RE.test(sql)
+  return FINANCIAL_TABLE_RE.test(sql) || GL_IDENTIFIER_RE.test(sql)
 }
 
 /**

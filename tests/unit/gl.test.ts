@@ -47,6 +47,16 @@ describe('validateEntryLines', () => {
     const zero = validateEntryLines([{ account_id: A, debit: '0.00' }, { account_id: B, credit: '0' }])
     expect(zero.ok).toBe(false)
   })
+  it('refuses totals beyond exact JS integer range instead of comparing rounded sums', () => {
+    const max = formatCents(MAX_LINE_CENTS)
+    const lines = [
+      ...Array.from({ length: 91 }, () => ({ account_id: A, debit: max })),
+      ...Array.from({ length: 91 }, () => ({ account_id: B, credit: max })),
+    ]
+    const v = validateEntryLines(lines)
+    expect(v.ok).toBe(false)
+    expect(!v.ok && v.errors[0]).toContain('too large')
+  })
 })
 
 describe('trialBalance', () => {
