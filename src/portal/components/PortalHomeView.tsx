@@ -46,10 +46,16 @@ export function PortalHomeView({ data, preview = false }: { data: PortalHomeData
   const autopayOn = leases.length > 0 && leases.every((l) => l.autopay_enabled)
   const place = leases[0]?.units ? `${leases[0].units.properties?.name ?? ''} · Suite ${leases[0].units.suite}` : null
   const totals = data.aging?.totals
-  const pastDue = totals ? pastDueOf(totals) : 0
   // Aging covers positive-balance leases only; the gap to the signed balance is credit on account.
   // Half-cent tolerance absorbs float noise; formatCurrency rounds for display.
   const credit = totals ? balance - totals.balance : 0
+  // The two reads reconcile only when the gap is a credit (or zero). A positive gap means /me and
+  // /aging were read at different moments (e.g. just after a payment): show no breakdown rather
+  // than rows that do not add up to the balance.
+  const reconciles = !!totals && credit <= 0.005
+  // Past due can exceed the net balance when another lease holds a credit (no payment application
+  // decides which charge a credit retires). Never claim more past due than the tenant owes.
+  const pastDue = totals && reconciles ? Math.min(pastDueOf(totals), Math.max(0, balance)) : 0
 
   return (
     <div className="flex flex-wrap items-start gap-8">
@@ -75,7 +81,7 @@ export function PortalHomeView({ data, preview = false }: { data: PortalHomeData
           )}
         </div>
 
-        {totals && totals.balance > 0 && (
+        {totals && reconciles && totals.balance > 0 && (
           <section aria-label="What makes up your balance" className="overflow-hidden rounded-xl border border-border bg-card">
             <div className="border-b border-border px-4.5 py-3.5">
               <h2 className="font-display text-xl text-navy">What makes up your balance</h2>

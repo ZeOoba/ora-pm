@@ -64,6 +64,24 @@ describe('PortalHomeView: what makes up your balance', () => {
     expect(html).toContain('$18,412.51')
   })
 
+  it('REFUTE finding: past due never exceeds the net balance when another lease holds a credit', () => {
+    // Lease A: +500, all 31–60 past due. Lease B: −300 credit. Net owed 200.
+    const mixed = { data: [], totals: { ...zero, d31_60: 500, balance: 500 } }
+    const html = render(createElement(PortalHomeView, { data: data({ me: { ...data().me, total_balance: 200 }, aging: mixed }) }))
+    expect(html).toContain('You owe <span class="text-status-danger">$200.00</span>.')
+    expect(html).toContain('$200.00 of that is past due.')
+    expect(html).not.toContain('$500.00 of that is past due.')
+    expect(html).toContain('31–60 days past due')
+    expect(html).toContain('Credit on account')
+  })
+
+  it('a balance above the aged total (reads out of step, e.g. just after a payment) shows no breakdown', () => {
+    const html = render(createElement(PortalHomeView, { data: data({ me: { ...data().me, total_balance: 20000 } }) }))
+    expect(html).not.toContain('What makes up your balance')
+    expect(html).not.toContain('past due.')
+    expect(html).toContain('$20,000.00')
+  })
+
   it('preview mode renders portal links as inert text', () => {
     const live = render(createElement(PortalHomeView, { data: data() }))
     const preview = render(createElement(PortalHomeView, { data: data(), preview: true }))
