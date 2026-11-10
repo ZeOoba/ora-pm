@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import type { Env } from '../index'
 import { parseTerms, containsConfidentialTerm } from '../lib/confidentiality'
 import { extractLease } from '../lib/lease-extract'
-import { extractAbstract, ExtractionStopped, type AbstractFlag, type AbstractResult } from '../lib/lease-abstract'
+import { BILLING_PATH, extractAbstract, ExtractionStopped, type AbstractFlag, type AbstractResult } from '../lib/lease-abstract'
 import { inspectPdf, pagesLackingTextLayer, MIN_PAGE_TEXT_CHARS, type PdfInspection } from '../lib/pdf-extract'
 import { checkRateLimit } from '../lib/rate-limit'
 import { ANTHROPIC_MODEL } from '../lib/models'
@@ -180,7 +180,8 @@ intakeRouter.post('/lease', async (c) => {
     const flags: AbstractFlag[] = scrubConfidential(abs.flags, terms, 'flags', scrubbed)
     for (const w of scrubbed) {
       const path = /^"([^"]+)"/.exec(w)?.[1] ?? ''
-      if (/^(rent_schedule|escalation|concessions|recurring_charges|commencement_date|rent_commencement_date|expiration_date)\b/.test(path)) {
+      // Same list as the citation-block rule (lease-abstract.ts BILLING_PATH), never a hand copy.
+      if (BILLING_PATH.test(path)) {
         flags.push({ severity: 'block', path, message: 'A billing value was withheld by the confidentiality guard; enter it manually.' })
       }
     }
@@ -213,10 +214,14 @@ intakeRouter.post('/lease', async (c) => {
   return c.json({ fields, confidence: result.confidence, warnings })
 })
 
-/** Deep copy of `v` with every string that hits the denylist replaced by null (path reported). */
+/**
+ * Deep copy of `v` with every string — and every number, as written — that hits the denylist replaced by
+ * null (path reported). Numbers are included because a denylist may hold numeric terms (deal numbers,
+ * account numbers) and a number field is otherwise the one place such a term could come back (merge gate O-2).
+ */
 export function scrubConfidential<T>(v: T, terms: string[], path: string, warnings: string[]): T {
-  if (typeof v === 'string') {
-    if (containsConfidentialTerm(v, terms)) {
+  if (typeof v === 'string' || typeof v === 'number') {
+    if (containsConfidentialTerm(String(v), terms)) {
       warnings.push(`"${path}" was withheld by the confidentiality guard.`)
       return null as T
     }

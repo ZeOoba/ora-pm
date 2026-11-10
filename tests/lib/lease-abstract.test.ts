@@ -10,6 +10,10 @@ import {
   parseAbstractResponse,
   quoteOnPage,
   wireToShape,
+  amountInQuote,
+  dateInQuote,
+  monthlyAmountEvidence,
+  MIN_QUOTE_CHARS,
 } from '../../server/lib/lease-abstract'
 
 // A synthetic 3-page industrial lease. Every quote in good() comes verbatim from these pages.
@@ -17,6 +21,7 @@ const PAGES = [
   'INDUSTRIAL LEASE AGREEMENT\nThis Lease is made between Landlord and Acme Fabrication LLC, an Ohio limited liability company ("Tenant").\nPremises: Suite 100, containing 10,000 rentable square feet.\nCommencement Date: January 1, 2026. Expiration Date: December 31, 2028.',
   'ARTICLE 4 – RENT\nYear 1: $8,333.33 per month ($10.00 per RSF per year).\nYear 2: $8,583.33 per month. Year 3: $8,840.83 per month.\nBase Rent shall increase three percent (3%) annually on each anniversary.\nTenant shall receive fifty percent (50%) abatement of Base Rent for January 2026.\nTenant shall pay estimated CAM of $1,250.00 per month.',
   'ARTICLE 30 – RENEWAL\nTenant shall have one option to renew for five (5) years upon written notice no later than June 30, 2028.\nHoldover rent shall be 150% of the Base Rent then in effect.',
+  'ARTICLE 6 – TAXES AND UTILITIES\nTenant shall pay a real estate tax escrow of $12,000.00 per annum, payable in equal monthly installments.\nTenant shall pay a water charge of $2,400.00 per lease year.\nRent Commencement Date: March 1, 2026.',
 ]
 
 type Wire = Record<string, unknown> & { facts: Array<Record<string, unknown>>; rent_schedule: Array<Record<string, unknown>> }
@@ -60,7 +65,7 @@ describe('buildAbstractRequest', () => {
     expect(req).not.toHaveProperty('tools')
     expect(req.output_config).toEqual({ effort: 'high', format: { type: 'json_schema', schema: ABSTRACT_SCHEMA } })
     const text = JSON.stringify(req.messages)
-    expect(text).toContain('--- Page 2 of 3 ---')
+    expect(text).toContain('--- Page 2 of 4 ---')
     expect(text).not.toMatch(/"type":"document"|base64/)
   })
   it('refuses a non-array (a raw base64 PDF can never reach the request)', () => {
@@ -178,11 +183,11 @@ describe('quote verification', () => {
     const r = finalizeAbstract(raw, page)
     expect(r.flags).toContainEqual(expect.objectContaining({ path: 'recurring_charges[0]', message: expect.stringMatching(/does not state 1250/) }))
   })
-  it('warns when a recurring charge quote does not state its amount', () => {
+  it('BLOCKS when a recurring charge quote does not state its amount (merge gate F-001)', () => {
     const raw = good()
     ;(raw.recurring_charges as Array<Record<string, unknown>>)[0].amount_monthly = 1500
     const r = finalizeAbstract(raw, PAGES)
-    expect(r.flags).toContainEqual(expect.objectContaining({ severity: 'warn', path: 'recurring_charges[0]', message: expect.stringMatching(/does not state 1500/) }))
+    expect(r.flags).toContainEqual(expect.objectContaining({ severity: 'block', path: 'recurring_charges[0]', message: expect.stringMatching(/does not state 1500 per month/) }))
   })
 })
 
@@ -232,10 +237,9 @@ describe('cross-checks (each mutation must raise a blocking flag)', () => {
     ['a CPI escalation with a stepped schedule', (r) => { Object.assign(esc(r), { kind: 'cpi', value: 0 }) }, /CPI lease can only schedule the current rent/],
     // Re-REFUTE 3: a stated escalation returned malformed must not become "no rule".
     ['a stated escalation the model returned malformed', (r) => { esc(r).first_adjustment_date = '' }, /escalation that could not be read/],
-    ['a recurring charge quoted per year', (r) => {
-      Object.assign((r.recurring_charges as Array<Record<string, unknown>>)[0], { quote: 'Tenant shall pay estimated CAM of $1,250.00 per month.' })
+    ['a recurring charge whose quote states a different figure', (r) => {
       ;(r.recurring_charges as Array<Record<string, unknown>>).push({ type: 'other', description: 'Tax escrow', amount_monthly: 3000, effective_start: '2026-01-01', effective_end: '2028-12-31', page: 2, quote: 'Base Rent shall increase three percent (3%) annually', confidence: 0.9 })
-    }, /states an annual amount/],
+    }, /does not state 3000 per month/],
   ])('%s', (_name, f, msg) => {
     expect(blockText(mutate(f))).toMatch(msg)
   })
@@ -273,5 +277,170 @@ describe('coerceAbstract', () => {
   it('never throws on hostile JSON (prototype keys, wrong types everywhere)', () => {
     const hostile = JSON.parse('{"__proto__":{"x":1},"constructor":1,"facts":[{"field":"__proto__"},null,5],"rent_schedule":"x","escalations":[null],"provisions":[{}]}')
     expect(() => finalizeAbstract(hostile, PAGES)).not.toThrow()
+  })
+})
+
+// ---------------------------------------------------------------------------------------------------
+// Merge gate PR #69, round 1 (adversarial-merge-gate): regression tests for every CONFIRMED finding.
+// F-001/F-002 come from the correctness prover's probes; the rest pin the test-validity auditor's
+// surviving mutants (each test below fails under the mutant that previously survived).
+// ---------------------------------------------------------------------------------------------------
+describe('merge gate F-001: annual amounts entered as monthly', () => {
+  it('classifies quote evidence: monthly, correct annual split, annual misread, absent', () => {
+    expect(monthlyAmountEvidence(1250, 'estimated CAM of $1,250.00 per month')).toBe('monthly')
+    expect(monthlyAmountEvidence(1000, '$12,000.00 per annum, payable in equal monthly installments')).toBe('annual')
+    expect(monthlyAmountEvidence(12000, '$12,000.00 per annum, payable in equal monthly installments')).toBe('annual_misread')
+    expect(monthlyAmountEvidence(2400, 'a water charge of $2,400.00 per lease year')).toBe('annual_misread')
+    expect(monthlyAmountEvidence(200, 'a water charge of $2,400.00 per lease year')).toBe('annual')
+    expect(monthlyAmountEvidence(1000, '$1,000 per month ($12,000 per year)')).toBe('monthly')
+    expect(monthlyAmountEvidence(8333.33, 'Annual Base Rent shall be $100,000.00 per year')).toBe('annual') // within $1 of x12
+    expect(monthlyAmountEvidence(500, 'Year 2: $8,583.33 per month')).toBe('absent')
+  })
+  it('never matches an amount inside a larger number (1000.50 vs 11,000.50)', () => {
+    expect(amountInQuote(1000.5, 'CAM of $11,000.50 per month')).toBe(false)
+    expect(amountInQuote(11000.5, 'CAM of $11,000.50 per month')).toBe(true)
+    expect(amountInQuote(1250, '$1,250.75')).toBe(false)
+  })
+  const charge = (amount: number, quote: string) => ({ type: 'other', description: 'Escrow', amount_monthly: amount, effective_start: '2026-01-01', effective_end: '2028-12-31', page: 4, quote, confidence: 0.9 })
+  it.each([
+    ['tax escrow per annum billed as monthly', 12000, 'real estate tax escrow of $12,000.00 per annum, payable in equal monthly installments'],
+    ['water per lease year billed as monthly', 2400, 'Tenant shall pay a water charge of $2,400.00 per lease year'],
+  ])('%s blocks', (_n, amount, quote) => {
+    const raw = good()
+    ;(raw.recurring_charges as unknown[]).push(charge(amount as number, quote as string))
+    expect(blockText(finalizeAbstract(raw, PAGES))).toMatch(/as an annual amount/)
+  })
+  it('the correct monthly split of an annual charge raises nothing', () => {
+    const raw = good()
+    ;(raw.recurring_charges as unknown[]).push(charge(1000, 'real estate tax escrow of $12,000.00 per annum, payable in equal monthly installments'))
+    expect(finalizeAbstract(raw, PAGES).flags).toEqual([])
+  })
+  it('rent: an annual figure entered as monthly rent blocks', () => {
+    const pages = PAGES.map((p, i) => (i === 1 ? p.replace('Year 1: $8,333.33 per month ($10.00 per RSF per year).', 'Year 1 Annual Base Rent: $99,999.96 per year.') : p))
+    const raw = good()
+    Object.assign(raw.rent_schedule[0], { base_rent_monthly: 99999.96, rent_psf_annual: 0, quote: 'Year 1 Annual Base Rent: $99,999.96 per year' })
+    raw.escalations = []
+    expect(blockText(finalizeAbstract(raw, pages))).toMatch(/as an annual amount/)
+  })
+  it('rent: the earliest period must state its rent', () => {
+    const raw = good()
+    raw.rent_schedule[0].base_rent_monthly = 7000
+    raw.rent_schedule[0].rent_psf_annual = 0
+    expect(blockText(finalizeAbstract(raw, PAGES))).toMatch(/does not state the rent 7000/)
+  })
+})
+
+describe('merge gate F-002: citations must support their values', () => {
+  it('dateInQuote reads the forms leases use', () => {
+    expect(dateInQuote('2026-01-01', 'Commencement Date: January 1, 2026')).toBe(true)
+    expect(dateInQuote('2026-01-01', 'commencing on the 1st day of January, 2026')).toBe(true)
+    expect(dateInQuote('2026-01-01', 'effective Jan. 1, 2026')).toBe(true)
+    expect(dateInQuote('2026-01-01', 'effective 01/01/2026')).toBe(true)
+    expect(dateInQuote('2026-01-01', 'effective 1/1/26')).toBe(true)
+    expect(dateInQuote('2026-01-01', 'January 10, 2026')).toBe(false)
+    expect(dateInQuote('2028-12-31', 'Expiration Date: December 31, 2027')).toBe(false)
+  })
+  it('an expiration date its quote does not state blocks', () => {
+    const raw = good()
+    factOf(raw, 'expiration_date').value = '2029-12-31'
+    raw.rent_schedule[2].end = '2029-12-31'
+    expect(blockText(finalizeAbstract(raw, PAGES))).toMatch(/does not state 2029-12-31/)
+  })
+  it('a concession whose months differ from the months its quote names blocks', () => {
+    const raw = good()
+    ;(raw.concessions as Array<Record<string, unknown>>)[0].period_end = '2026-02-28'
+    expect(blockText(finalizeAbstract(raw, PAGES))).toMatch(/its quote names other months/)
+  })
+  it('a concession quote that names no month is a review warning', () => {
+    const raw = good()
+    Object.assign((raw.concessions as Array<Record<string, unknown>>)[0], { quote: 'fifty percent (50%) abatement of Base Rent' })
+    expect(finalizeAbstract(raw, PAGES).flags).toContainEqual(expect.objectContaining({ severity: 'warn', path: 'concessions[0]' }))
+  })
+})
+
+describe('merge gate F-003: parseAbstractResponse', () => {
+  it.each([null, undefined, 5, 'x', []])('%j stops with no_output, not a TypeError', (v) => {
+    expect(() => parseAbstractResponse(v)).toThrow(ExtractionStopped)
+  })
+})
+
+describe('merge gate F-004: pins for the surviving mutants', () => {
+  const mutate = (f: (raw: Wire) => void, pages = PAGES) => { const raw = good(); f(raw); return finalizeAbstract(raw, pages) }
+  const esc = (r: Wire) => (r.escalations as Array<Record<string, unknown>>)[0]
+  const con = (r: Wire) => (r.concessions as Array<Record<string, unknown>>)[0]
+  const rec = (r: Wire) => (r.recurring_charges as Array<Record<string, unknown>>)[0]
+  const bad = 'this text is nowhere in the lease'
+
+  // LA30: every billing path, not only rent_schedule, blocks on an unverifiable citation.
+  it.each<[string, (r: Wire) => void]>([
+    ['concessions[0]', (r) => { con(r).quote = bad }],
+    ['recurring_charges[0]', (r) => { rec(r).quote = bad }],
+    ['escalation', (r) => { esc(r).quote = bad }],
+    ['expiration_date', (r) => { factOf(r, 'expiration_date').quote = bad }],
+    ['commencement_date', (r) => { factOf(r, 'commencement_date').quote = bad }],
+  ])('unverifiable citation on %s blocks', (path, f) => {
+    expect(mutate(f).flags).toContainEqual(expect.objectContaining({ severity: 'block', path, message: expect.stringMatching(/Quote not found/) }))
+  })
+  // LA22: "per annum" wording on a recurring charge.
+  it('a recurring charge quoted "per annum" and billed as that amount blocks', () => {
+    const r = mutate((raw) => { (raw.recurring_charges as unknown[]).push({ type: 'other', description: 'Tax', amount_monthly: 12000, effective_start: '2026-01-01', effective_end: '2028-12-31', page: 4, quote: 'real estate tax escrow of $12,000.00 per annum', confidence: 0.9 }) })
+    expect(blockText(r)).toMatch(/as an annual amount/)
+  })
+  // LA68: rent commencement takes priority over commencement for the billing term.
+  it('a later rent commencement date than the schedule start blocks', () => {
+    const r = mutate((raw) => { raw.facts.push(fact('rent_commencement_date', '2026-03-01', 4, 'Rent Commencement Date: March 1, 2026')) })
+    expect(blockText(r)).toMatch(/Schedule starts 2026-01-01; the rent term starts 2026-03-01/)
+  })
+  // LA16-LA20: every percentage field is a fraction.
+  it.each<[string, (r: Wire) => void]>([
+    ['cam_cap_pct 5', (r) => { r.facts.push(fact('cam_cap_pct', '5', 1, 'Premises: Suite 100, containing')) }],
+    ['admin_fee_pct 15', (r) => { r.facts.push(fact('admin_fee_pct', '15', 1, 'Premises: Suite 100, containing')) }],
+    ['pro_rata_share 25', (r) => { r.facts.push(fact('pro_rata_share', '25', 1, 'Premises: Suite 100, containing')) }],
+    ['cpi_cap 4', (r) => { Object.assign(esc(r), { kind: 'cpi', value: 0, cpi_cap: 4 }) }],
+    ['cpi_floor 2', (r) => { Object.assign(esc(r), { kind: 'cpi', value: 0, cpi_floor: 2, cpi_cap: 0 }) }],
+  ])('%s blocks as a whole-number percent', (_n, f) => {
+    expect(blockText(mutate(f))).toMatch(/Percentages are fractions/)
+  })
+  // LA28: the billing dry run includes concessions.
+  it('two overlapping rent concessions are caught by the billing dry run', () => {
+    const r = mutate((raw) => { (raw.concessions as unknown[]).push({ ...con(raw), kind: 'full_waiver', value: 0, reason: 'Free rent' }) })
+    expect(blockText(r)).toMatch(/Billing would fail for 2026-01: concession_conflict/)
+  })
+  // LA14: recurring charges are whole cents.
+  it('a sub-cent recurring charge blocks', () => {
+    const r = mutate((raw) => { Object.assign(rec(raw), { amount_monthly: 1250.005 }) })
+    expect(blockText(r)).toMatch(/fractions of a cent/)
+  })
+  // LA09: $/SF tolerance is tight (just over $0.05/SF).
+  it('rent 6 cents per SF off the stated $/SF blocks', () => {
+    expect(blockText(mutate((raw) => { raw.rent_schedule[0].rent_psf_annual = 10.06 }))).toMatch(/the lease states \$10\.06\/SF/)
+  })
+  // LA61-LA64, LA57: the escalation rule's own validity, and concessions past expiration.
+  it.each<[string, (r: Wire) => void, RegExp]>([
+    ['fixed-dollar escalation of 0', (r) => { Object.assign(esc(r), { kind: 'fixed_amount', value: 0 }) }, /needs a positive amount/],
+    ['CPI cap on a fixed rule', (r) => { esc(r).cpi_cap = 0.04 }, /only apply to a CPI escalation/],
+    ['cadence 0', (r) => { esc(r).cadence_months = 0 }, /cadence must be a positive/],
+    ['first adjustment on the term start', (r) => { esc(r).first_adjustment_date = '2026-01-01' }, /cannot be applied to this term/],
+    ['concession ending after expiration', (r) => { con(r).period_end = '2029-01-31' }, /outside the rent term/],
+  ])('%s blocks', (_n, f, msg) => {
+    expect(blockText(mutate(f))).toMatch(msg)
+  })
+  // LA46/LA47: the 0 = "not stated" sentinel never blocks a valid full waiver or a valid CPI lease.
+  it('a full waiver sent with value 0 is valid', () => {
+    const r = mutate((raw) => { Object.assign(con(raw), { kind: 'full_waiver', value: 0 }) })
+    expect(blocks(r)).toEqual([])
+  })
+  it('a single-row CPI lease sent with value 0 has no blocks', () => {
+    const r = mutate((raw) => {
+      Object.assign(esc(raw), { kind: 'cpi', value: 0 })
+      raw.rent_schedule.splice(0, 3, { start: '2026-01-01', end: '2028-12-31', base_rent_monthly: 8333.33, rent_psf_annual: 10, ...src(2, 'Year 1: $8,333.33 per month') })
+    })
+    expect(blocks(r)).toEqual([])
+  })
+  // LA34/LA35: the minimum quote length boundary.
+  it('quotes of MIN_QUOTE_CHARS - 1 are rejected and of MIN_QUOTE_CHARS accepted', () => {
+    expect(MIN_QUOTE_CHARS).toBe(12)
+    expect(quoteOnPage(PAGES, 1, 'Premises: S')).toBe(false) // 11
+    expect(quoteOnPage(PAGES, 1, 'Premises: Su')).toBe(true) // 12
   })
 })

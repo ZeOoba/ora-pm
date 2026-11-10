@@ -16,6 +16,20 @@ const fixture: LeaseFixture = {
   },
 }
 
+// Merge gate PR #69 (blast-radius C9): the `skip` parameter abstract mode passes for ti_allowance.
+describe('scoreExtraction skip', () => {
+  const withTi: LeaseFixture = { ...fixture, groundTruth: { ...fixture.groundTruth, ti_allowance: 25000 } }
+  const extracted = { start_date: '2026-01-01', end_date: '2030-12-31', rent_type: 'nnn', base_rent_monthly: 5000, security_deposit: 5000 }
+  it('counts an unproducible field as missed without skip', () => {
+    expect(scoreExtraction(withTi, extracted).missed).toBe(1)
+  })
+  it('does not score a skipped field at all', () => {
+    const s = scoreExtraction(withTi, extracted, ['ti_allowance'])
+    expect(s.missed).toBe(0)
+    expect(s.outcomes.some((o) => o.field === 'ti_allowance')).toBe(false)
+  })
+})
+
 describe('scoreExtraction', () => {
   it('scores every field correct when the extraction matches exactly', () => {
     const s = scoreExtraction(fixture, {

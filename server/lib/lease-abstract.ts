@@ -315,6 +315,7 @@ export class ExtractionStopped extends Error {
 
 /** Pull the JSON object out of a Messages API response. Throws ExtractionStopped on anything unusable. */
 export function parseAbstractResponse(json: unknown): unknown {
+  if (!json || typeof json !== 'object' || Array.isArray(json)) throw new ExtractionStopped('no_output')
   const res = json as { stop_reason?: string; content?: Array<{ type?: string; text?: string }> }
   if (res.stop_reason === 'refusal') throw new ExtractionStopped('refusal')
   if (res.stop_reason === 'max_tokens') throw new ExtractionStopped('max_tokens')
@@ -361,43 +362,135 @@ export function quoteOnPage(pages: readonly string[], page: number, quote: strin
   return false
 }
 
-/** Paths whose values feed billing: an unverifiable citation there BLOCKS approval (REFUTE C4). */
-const BILLING_PATH = /^(rent_schedule|escalation|concessions|recurring_charges|commencement_date|rent_commencement_date|expiration_date)\b/
+/**
+ * Paths whose values feed billing: an unverifiable citation there BLOCKS approval (REFUTE C4). Exported
+ * so the intake route's post-egress "withheld billing value" rule uses the same list (merge gate O-1).
+ */
+export const BILLING_PATH = /^(rent_schedule|escalation|concessions|recurring_charges|commencement_date|rent_commencement_date|expiration_date)\b/
 
-/** Digits of a money amount as a lease would print it ("8333.33" matches "$8,333.33"; "1250" matches "1,250.00"). */
-function amountInQuote(amount: number, quote: string): boolean {
-  const q = quote.replace(/,/g, '')
-  const fixed = amount.toFixed(2)
-  return q.includes(fixed) || (Number.isInteger(amount) && new RegExp(`(^|[^\\d.])${amount}(?!\\d|\\.\\d)`).test(q))
+/** Every number written in a quote ("$1,250.00" → 1250; "Year 2:" → 2). Commas stripped first. */
+export function numbersInQuote(quote: string): number[] {
+  return (quote.replace(/,/g, '').match(/\d+(?:\.\d+)?/g) ?? []).map(Number)
+}
+
+/** True when `amount` is written in the quote as a whole number (never as a substring of a larger one). */
+export function amountInQuote(amount: number, quote: string): boolean {
+  return Number.isFinite(amount) && numbersInQuote(quote).some((n) => Math.abs(n - amount) < 0.005)
+}
+
+// Merge gate F-001: annual wording, including "per lease year", "per calendar year", "per annum".
+const ANNUAL_CUE = /\b(per\s+(lease\s+|calendar\s+)?year|per\s+annum|annual(ly)?|yearly|each\s+year)\b/i
+
+/**
+ * How a quote supports a MONTHLY amount:
+ *   'monthly'        the amount itself is written in the quote;
+ *   'annual'         the quote is annual and states amount × 12 (within $1 for rounding): a correct split;
+ *   'annual_misread' the quote is annual and states the amount itself, not amount × 12: the annual
+ *                    figure was entered as monthly, a 12× over-bill;
+ *   'absent'         neither.
+ */
+export function monthlyAmountEvidence(monthly: number, quote: string): 'monthly' | 'annual' | 'annual_misread' | 'absent' {
+  const annual = ANNUAL_CUE.test(quote)
+  const nums = numbersInQuote(quote)
+  const statesMonthly = nums.some((n) => Math.abs(n - monthly) < 0.005)
+  const statesTimes12 = nums.some((n) => Math.abs(n - monthly * 12) <= 1)
+  if (annual && statesMonthly && !statesTimes12) return 'annual_misread'
+  if (statesMonthly) return 'monthly'
+  if (annual && statesTimes12) return 'annual'
+  return 'absent'
+}
+
+const MONTH_NAMES = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december']
+
+/** True when the ISO date is written in the quote: ISO, "January 1, 2026", "1 January 2026", "Jan. 1, 2026", "1/1/2026", "01/01/26". */
+export function dateInQuote(iso: string, quote: string): boolean {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso)
+  if (!m) return false
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])]
+  const q = quote.toLowerCase().replace(/\s+/g, ' ')
+  if (q.includes(iso)) return true
+  const full = MONTH_NAMES[mo - 1]
+  const abbr = full.slice(0, 3)
+  const ord = `${d}(?:st|nd|rd|th)?`
+  const patterns = [
+    `\\b(?:${full}|${abbr}\\.?) ${ord},? ${y}\\b`,
+    `\\b${ord} (?:day of )?(?:${full}|${abbr}\\.?),? ${y}\\b`,
+    `\\b0?${mo}[/-]0?${d}[/-](?:${y}|${String(y).slice(2)})\\b`,
+  ]
+  return patterns.some((p) => new RegExp(p).test(q))
 }
 
 function verifyCitations(a: LeaseAbstract, pages: readonly string[], flags: AbstractFlag[]): void {
+  const push = (severity: 'block' | 'warn', path: string, message: string) => flags.push({ severity, path, message })
   const check = (path: string, s: Source) => {
     if (!quoteOnPage(pages, s.page, s.quote)) {
       s.confidence = 0
-      flags.push({
-        severity: BILLING_PATH.test(path) ? 'block' : 'warn',
-        path,
-        message: `Quote not found on cited page ${s.page}; verify this value against the lease.`,
-      })
+      push(BILLING_PATH.test(path) ? 'block' : 'warn', path, `Quote not found on cited page ${s.page}; verify this value against the lease.`)
+      return false
     }
+    return true
   }
   for (const k of Object.keys(SCALARS) as (keyof typeof SCALARS)[]) {
     const v = a[k]
     if (v) check(k, v)
   }
-  a.rent_schedule.forEach((r, i) => check(`rent_schedule[${i}]`, r))
-  if (a.escalation) check('escalation', a.escalation)
-  a.concessions.forEach((r, i) => check(`concessions[${i}]`, r))
-  a.recurring_charges.forEach((r, i) => {
-    check(`recurring_charges[${i}]`, r)
-    // REFUTE C3: a quote proves presence, not the value. A stated monthly amount should appear in it.
-    // A charge the lease states per year must not be billed as that amount per month (×12 over-bill).
-    if (/\b(per (year|annum)|annual(ly)?|yearly)\b/i.test(r.quote) && !/\bmonth/i.test(r.quote)) {
-      flags.push({ severity: 'block', path: `recurring_charges[${i}]`, message: 'The quote states an annual amount; enter the monthly amount.' })
+  // Merge gate F-002: a citation must also SUPPORT its value. The term dates bound everything billed.
+  for (const k of ['commencement_date', 'rent_commencement_date', 'expiration_date'] as const) {
+    const v = a[k]
+    if (v && v.confidence > 0 && !dateInQuote(v.value, v.quote)) {
+      push('block', k, `The quote does not state ${v.value}; confirm the date against the lease.`)
     }
-    if (r.confidence > 0 && !amountInQuote(r.amount_monthly, r.quote)) {
-      flags.push({ severity: 'warn', path: `recurring_charges[${i}]`, message: `The quote does not state ${r.amount_monthly}; confirm the amount against the lease.` })
+  }
+
+  // Merge gate F-001: amounts. The earliest rent period must be stated in its quote (directly, as an
+  // annual figure split correctly, or through a stated $/SF); later periods are either stated or checked
+  // against the escalation rule in crossCheck.
+  const earliest = [...a.rent_schedule].sort((x, y) => x.start.localeCompare(y.start))[0]
+  a.rent_schedule.forEach((r, i) => {
+    const path = `rent_schedule[${i}]`
+    if (!check(path, r)) return
+    const ev = monthlyAmountEvidence(r.base_rent_monthly, r.quote)
+    if (ev === 'annual_misread') {
+      push('block', path, `The quote states ${r.base_rent_monthly} as an annual amount; the monthly rent is ${round2(r.base_rent_monthly / 12)}.`)
+    } else if (ev === 'absent') {
+      const viaPsf = r.rent_psf_annual !== null && amountInQuote(r.rent_psf_annual, r.quote)
+      if (r === earliest && !viaPsf) push('block', path, `The quote does not state the rent ${r.base_rent_monthly}; confirm it against the lease.`)
+      else if (r !== earliest && !a.escalation) push('warn', path, `The quote does not state the rent ${r.base_rent_monthly}; confirm it against the lease.`)
+    }
+  })
+  if (a.escalation) check('escalation', a.escalation)
+
+  a.concessions.forEach((c, i) => {
+    const path = `concessions[${i}]`
+    if (!check(path, c)) return
+    // The months a concession covers must match the months its quote names (when it names any).
+    const named = new Set(MONTH_NAMES.flatMap((name, idx) =>
+      new RegExp(`\\b(${name}|${name.slice(0, 3)}\\.?)\\b`, 'i').test(c.quote) ? [idx + 1] : []))
+    if (named.size === 0) {
+      push('warn', path, `Confirm the concession period ${c.period_start} to ${c.period_end} against the lease.`)
+      return
+    }
+    const covered = new Set<number>()
+    for (let k = 0; k < 13; k++) {
+      const first = addMonthsIso(`${c.period_start.slice(0, 7)}-01`, k)
+      if (first > c.period_end) break
+      covered.add(Number(first.slice(5, 7)))
+    }
+    const missing = [...named].filter((mo) => !covered.has(mo))
+    const extra = [...covered].filter((mo) => !named.has(mo))
+    if (covered.size <= 12 && (missing.length > 0 || extra.length > 0)) {
+      push('block', path, `The concession covers ${c.period_start} to ${c.period_end}, but its quote names other months; confirm the period.`)
+    }
+  })
+
+  a.recurring_charges.forEach((r, i) => {
+    const path = `recurring_charges[${i}]`
+    if (!check(path, r)) return
+    const ev = monthlyAmountEvidence(r.amount_monthly, r.quote)
+    if (ev === 'annual_misread') {
+      push('block', path, `The quote states ${r.amount_monthly} as an annual amount; the monthly amount is ${round2(r.amount_monthly / 12)}.`)
+    } else if (ev === 'absent') {
+      push('block', path, `The quote does not state ${r.amount_monthly} per month; confirm the amount against the lease.`)
     }
   })
   if (a.late_fee) check('late_fee', a.late_fee)

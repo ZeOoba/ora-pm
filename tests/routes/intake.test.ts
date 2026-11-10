@@ -525,6 +525,36 @@ describe("mode: 'abstract' (lease abstraction v2)", () => {
     expect(JSON.stringify(json)).not.toMatch(/zeta/i)
   })
 
+  // Merge gate PR #69 round 1: F-004 (flag scrub was untested), O-2 (numbers were not scrubbed),
+  // F-004/O-1 (withheld-billing-value block was only tested for recurring_charges).
+  it('a denylisted NUMBER is withheld from both the abstract and any flag message that echoes it', async () => {
+    const row = { start: '2026-01-01', end: '2026-12-31', base_rent_monthly: 4500, rent_psf_annual: 99999,
+      page: 1, quote: 'Base rent $4,500.00 per month', confidence: 0.9 }
+    // An RSF fact makes the $/SF tie-out flag quote the stated 99999 in its message.
+    const facts = [
+      { field: 'tenant_legal_name', value: 'Acme Logistics LLC', page: 1, quote: 'Tenant: Acme Logistics LLC', confidence: 0.9 },
+      { field: 'premises_rsf', value: '1000', page: 1, quote: 'Industrial lease. Tenant: Acme', confidence: 0.9 },
+    ]
+    vi.stubGlobal('fetch', abstractFetch(modelJson({ facts, rent_schedule: [row] })))
+    const res = await post(await buildTextPdf(LEASE_TEXT))
+    expect(res.status).toBe(200)
+    const raw = await res.text()
+    expect(raw).not.toMatch(/99999/)
+    const json = JSON.parse(raw) as { abstract: { rent_schedule: Array<{ rent_psf_annual: unknown }> }; warnings: string[] }
+    expect(json.abstract.rent_schedule[0].rent_psf_annual).toBeNull()
+    expect(json.warnings.some((w) => /^"flags\[\d+\]\.message" was withheld/.test(w))).toBe(true)
+  })
+
+  it.each([
+    ['rent_schedule', { rent_schedule: [{ start: '2026-01-01', end: '2026-12-31', base_rent_monthly: 4500, rent_psf_annual: 0, page: 1, quote: 'Zeta rent schedule line', confidence: 0.9 }] }, 'rent_schedule[0].quote'],
+    ['concessions', { concessions: [{ charge_type: 'rent', period_start: '2026-01-01', period_end: '2026-01-31', kind: 'full_waiver', value: 0, reason: 'Zeta free rent', page: 1, quote: 'Renewal option on notice', confidence: 0.9 }] }, 'concessions[0].reason'],
+  ])('a withheld %s value blocks approval', async (_name, over, path) => {
+    vi.stubGlobal('fetch', abstractFetch(modelJson(over)))
+    const res = await post(await buildTextPdf(LEASE_TEXT))
+    const json = await res.json() as { flags: Array<{ severity: string; path: string }> }
+    expect(json.flags).toContainEqual(expect.objectContaining({ severity: 'block', path }))
+  })
+
   it('a refusal or truncated output is a 502 manual-entry error, never a partial abstract', async () => {
     vi.stubGlobal('fetch', abstractFetch(modelJson(), 'refusal'))
     expect((await post(await buildTextPdf(LEASE_TEXT))).status).toBe(502)
