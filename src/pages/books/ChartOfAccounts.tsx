@@ -65,7 +65,8 @@ export function ChartOfAccounts() {
   const [fileErrors, setFileErrors] = useState<string[]>([])
 
   const run = useMutation({
-    mutationFn: (apply: boolean) => api.post<{ data: ImportPlan }>(`/gl/entities/${entityId}/accounts/qb-iif`, { iif: iif?.text, apply }),
+    mutationFn: (apply: boolean) => api.post<{ data: ImportPlan }>(`/gl/entities/${entityId}/accounts/qb-iif`,
+      apply ? { iif: iif?.text, apply, expected_new: preview?.new.length } : { iif: iif?.text, apply }),
     onSuccess: (res, apply) => {
       setPreview(res.data)
       setFileErrors([])

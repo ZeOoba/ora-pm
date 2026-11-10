@@ -242,6 +242,22 @@ describe('POST /api/gl/entities/:id/accounts/qb-iif (QuickBooks chart import)', 
     expect((await post('/api/gl/entities/nope/accounts/qb-iif', { iif: FILE })).status).toBe(422)
   })
 
+  it('REFUTE N5: apply with the preview count refuses if the ledger changed since the preview', async () => {
+    const { insert } = install([])
+    const res = await post(path, { iif: FILE, apply: true, expected_new: 1 })
+    expect(res.status).toBe(409)
+    expect(JSON.stringify(await res.json())).toContain('changed since the preview')
+    expect(insert).not.toHaveBeenCalled()
+    expect((await post(path, { iif: FILE, apply: true, expected_new: 2 })).status).toBe(201)
+    expect((await post(path, { iif: FILE, apply: true, expected_new: -1 })).status).toBe(422)
+  })
+
+  it('an oversized request is refused before its body is read', async () => {
+    install([])
+    const res = await app.request(path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': String(20_000_000) }, body: '{}' }, env)
+    expect(res.status).toBe(413)
+  })
+
   it('a concurrent insert of the same account is a 409, not a 500', async () => {
     install([], { data: null, error: { code: '23505', message: 'duplicate key value violates unique constraint "gl_accounts_entity_qb_name_key"' } })
     expect((await post(path, { iif: FILE, apply: true })).status).toBe(409)

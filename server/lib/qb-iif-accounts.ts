@@ -40,6 +40,9 @@ export const MAX_IIF_CHARS = 2_000_000
 export const MAX_IIF_ACCOUNTS = 2000
 const MAX_NAME = 300 // gl.ts AccountSchema
 const MAX_NUMBER = 40
+/** Stop collecting after this many problems: a damaged file should not cost CPU or a huge response. */
+export const MAX_IIF_ERRORS = 50
+const READ_COLUMNS = ['NAME', 'ACCNTTYPE', 'ACCNUM', 'HIDDEN'] as const
 
 export type IifAccount = {
   line: number
@@ -68,56 +71,80 @@ export function parseIifAccounts(text: string): IifParse {
   const accounts: IifAccount[] = []
   const skipped: IifParse['skipped'] = []
   if (text.length > MAX_IIF_CHARS) return { accounts, skipped, errors: [`file is larger than ${MAX_IIF_CHARS.toLocaleString('en-US')} characters`] }
+  const fail = (msg: string) => { if (errors.length < MAX_IIF_ERRORS) errors.push(msg) }
 
   const lines = text.replace(/^\uFEFF/, '').split(/\r\n|\r|\n/)
-  let header: string[] | null = null
+  // Column positions for the current !ACCNT header, built once per header (first occurrence of a
+  // name wins). `need` is how many fields a row must have to carry every column we read.
+  let cols: Map<string, number> | null = null
+  let need = 0
   let sawAccntHeader = false
 
-  lines.forEach((raw, i) => {
+  for (let i = 0; i < lines.length && errors.length < MAX_IIF_ERRORS; i++) {
+    const raw = lines[i]
     const line = i + 1
-    if (raw.trim() === '') return
+    if (raw.trim() === '') continue
     const fields = raw.split('\t').map(unquote)
     const kind = fields[0].toUpperCase()
     if (kind.startsWith('!')) {
-      header = kind === '!ACCNT' ? fields.map((f) => f.toUpperCase()) : null
-      if (kind === '!ACCNT') sawAccntHeader = true
-      return
+      cols = null
+      if (kind === '!ACCNT') {
+        sawAccntHeader = true
+        cols = new Map()
+        fields.forEach((f, idx) => { const k = f.toUpperCase(); if (idx > 0 && !cols!.has(k)) cols!.set(k, idx) })
+        need = Math.max(0, ...READ_COLUMNS.map((c) => (cols!.get(c) ?? -1) + 1))
+        if (!cols.has('NAME') || !cols.has('ACCNTTYPE')) fail(`line ${line}: the !ACCNT header has no NAME or no ACCNTTYPE column`)
+      }
+      continue
     }
-    if (kind !== 'ACCNT') return
-    if (!header) {
-      errors.push(`line ${line}: ACCNT row before its !ACCNT header`)
-      return
+    if (kind !== 'ACCNT') continue
+    if (!cols) {
+      fail(`line ${line}: ACCNT row before its !ACCNT header`)
+      continue
     }
-    const col = (name: string) => {
-      const idx = header!.indexOf(name)
-      return idx > 0 && idx < fields.length ? fields[idx] : ''
+    // A short row means a field held a line break (or the file was trimmed): the number or the
+    // hidden flag would be lost silently, and a hidden QB account would import as postable.
+    if (fields.length < need) {
+      fail(`line ${line}: row has ${fields.length} fields but the header needs ${need} (a field may contain a line break; re-export from QuickBooks)`)
+      continue
     }
+    const col = (name: string) => { const idx = cols!.get(name); return idx === undefined ? '' : fields[idx] }
     const name = col('NAME')
     const type = col('ACCNTTYPE').toUpperCase()
     if (!name) {
-      errors.push(`line ${line}: account has no NAME`)
-      return
+      fail(`line ${line}: account has no NAME`)
+      continue
     }
     if (name.length > MAX_NAME) {
-      errors.push(`line ${line}: account name is longer than ${MAX_NAME} characters`)
-      return
+      fail(`line ${line}: account name is longer than ${MAX_NAME} characters`)
+      continue
     }
-    if (name.split(':').some((part) => part.trim() === '')) {
-      errors.push(`line ${line}: "${name}" has an empty part in its Parent:Child name`)
-      return
+    const parts = name.split(':')
+    if (parts.some((part) => part.trim() === '')) {
+      fail(`line ${line}: "${name}" has an empty part in its Parent:Child name`)
+      continue
+    }
+    if (parts.some((part) => part !== part.trim())) {
+      fail(`line ${line}: "${name}" has spaces at the start or end of a name part; QuickBooks does not export names that way`)
+      continue
     }
     if (type === NON_POSTING) {
       skipped.push({ line, qb_name: name, reason: 'non-posting (estimates / purchase orders)' })
-      return
+      continue
     }
     if (!(type in QB_ACCOUNT_TYPES)) {
-      errors.push(`line ${line}: "${name}" has an unknown QuickBooks account type "${type || '(blank)'}"`)
-      return
+      fail(`line ${line}: "${name}" has an unknown QuickBooks account type "${type || '(blank)'}"`)
+      continue
     }
     const number = col('ACCNUM')
     if (number.length > MAX_NUMBER) {
-      errors.push(`line ${line}: account number for "${name}" is longer than ${MAX_NUMBER} characters`)
-      return
+      fail(`line ${line}: account number for "${name}" is longer than ${MAX_NUMBER} characters`)
+      continue
+    }
+    const hidden = col('HIDDEN').toUpperCase()
+    if (hidden !== '' && hidden !== 'Y' && hidden !== 'N') {
+      fail(`line ${line}: "${name}" has HIDDEN "${col('HIDDEN')}"; QuickBooks writes Y or N`)
+      continue
     }
     const qbType = type as QbAccountType
     accounts.push({
@@ -126,9 +153,9 @@ export function parseIifAccounts(text: string): IifParse {
       number: number || null,
       qb_account_type: qbType,
       account_type: QB_ACCOUNT_TYPES[qbType],
-      is_active: col('HIDDEN').toUpperCase() !== 'Y',
+      is_active: hidden !== 'Y',
     })
-  })
+  }
 
   if (!sawAccntHeader) errors.push('no chart of accounts found: the file has no !ACCNT header (export Lists → Chart of Accounts to IIF)')
   if (accounts.length > MAX_IIF_ACCOUNTS) errors.push(`more than ${MAX_IIF_ACCOUNTS} accounts in one file`)
@@ -155,10 +182,13 @@ export function parseIifAccounts(text: string): IifParse {
     const parentName = a.qb_name.slice(0, cut)
     const parent = byName.get(parentName.toLowerCase())
     if (!parent) errors.push(`line ${a.line}: sub-account "${a.qb_name}" has no parent "${parentName}" in the file`)
+    else if (parent.qb_name !== parentName) errors.push(`line ${a.line}: sub-account "${a.qb_name}" spells its parent differently from "${parent.qb_name}"`)
     else if (parent.account_type !== a.account_type) {
       errors.push(`line ${a.line}: sub-account "${a.qb_name}" is ${a.account_type} but its parent is ${parent.account_type}`)
     }
   }
+  if (errors.length > MAX_IIF_ERRORS) errors.length = MAX_IIF_ERRORS
+  if (errors.length === MAX_IIF_ERRORS) errors.push(`stopped after ${MAX_IIF_ERRORS} problems; fix these and preview again`)
   return { accounts, skipped, errors }
 }
 
@@ -186,12 +216,16 @@ export type AccountImportPlan = {
 
 export function planAccountImport(file: IifAccount[], existing: ExistingAccount[]): AccountImportPlan {
   const plan: AccountImportPlan = { new: [], unchanged: [], conflicts: [], warnings: [], ledger_only: [] }
-  const byName = new Map(existing.map((e) => [e.qb_name.toLowerCase(), e]))
+  // Exact spelling first: the ledger's unique key is case-sensitive, so it can hold "Checking"
+  // and "checking"; a file row matching one exactly must not be reported against the other.
+  const exact = new Map(existing.map((e) => [e.qb_name, e]))
+  const byName = new Map<string, ExistingAccount>()
+  for (const e of existing) if (!byName.has(e.qb_name.toLowerCase())) byName.set(e.qb_name.toLowerCase(), e)
   const byNumber = new Map(existing.filter((e) => e.number).map((e) => [e.number as string, e]))
   const seen = new Set<string>()
 
   for (const a of file) {
-    const e = byName.get(a.qb_name.toLowerCase())
+    const e = exact.get(a.qb_name) ?? byName.get(a.qb_name.toLowerCase())
     if (!e) {
       const taken = a.number ? byNumber.get(a.number) : undefined
       if (taken) plan.conflicts.push({ qb_name: a.qb_name, line: a.line, reasons: [`number ${a.number} already belongs to "${taken.qb_name}" in the ledger`] })

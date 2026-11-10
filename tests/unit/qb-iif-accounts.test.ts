@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { MAX_IIF_CHARS, QB_ACCOUNT_TYPES, parseIifAccounts, planAccountImport, type ExistingAccount } from '../../server/lib/qb-iif-accounts'
+import { MAX_IIF_CHARS, MAX_IIF_ERRORS, QB_ACCOUNT_TYPES, parseIifAccounts, planAccountImport, type ExistingAccount } from '../../server/lib/qb-iif-accounts'
 
 // Column order as QuickBooks Desktop writes the !ACCNT header in a Lists → Chart of Accounts IIF
 // export. The parser reads columns by header NAME, so order does not matter (tested below).
@@ -73,6 +73,45 @@ describe('parseIifAccounts', () => {
     expect(p.errors.join('\n')).toMatch(re)
   })
 
+  it('REFUTE F2: a short row (line break inside a field) is rejected, never imported without its number or hidden flag', () => {
+    const p = parseIifAccounts(iif('ACCNT\tChecking\t1\t0\tBANK\t0.00\t"a', 'b"\t1000\t0\t\t\tY\t0\tN'))
+    expect(p.accounts).toEqual([])
+    expect(p.errors[0]).toMatch(/row has 7 fields but the header needs 12 \(a field may contain a line break/)
+  })
+
+  it('REFUTE N1: HIDDEN must be Y, N or empty', () => {
+    expect(parseIifAccounts(iif(row('Cash', 'BANK', '1000', 'YES'))).errors[0]).toMatch(/HIDDEN "YES"; QuickBooks writes Y or N/)
+    expect(parseIifAccounts(iif(row('Cash', 'BANK', '1000', ''))).accounts[0].is_active).toBe(true)
+  })
+
+  it('REFUTE N2: no spaces around name parts; a sub-account must spell its parent exactly', () => {
+    expect(parseIifAccounts(iif(row('"Rent "', 'INC'))).errors[0]).toMatch(/spaces at the start or end/)
+    expect(parseIifAccounts(iif(row('Rent', 'INC'), row('Rent: Base', 'INC'))).errors[0]).toMatch(/spaces at the start or end/)
+    expect(parseIifAccounts(iif(row('Utilities', 'EXP'), row('UTILITIES:Water', 'EXP'))).errors[0]).toMatch(/spells its parent differently from "Utilities"/)
+  })
+
+  it('REFUTE F1: a huge header and many bad rows stay cheap and return a capped error list', () => {
+    const hdr = '!ACCNT\t' + 'X\t'.repeat(50_000) + 'NAME\tACCNTTYPE'
+    const text = hdr + '\n' + 'ACCNT\n'.repeat(Math.floor((MAX_IIF_CHARS - hdr.length - 1) / 6))
+    const t0 = performance.now()
+    const p = parseIifAccounts(text)
+    expect(performance.now() - t0).toBeLessThan(2000)
+    expect(p.errors.length).toBe(MAX_IIF_ERRORS + 1)
+    expect(p.errors.at(-1)).toMatch(/stopped after 50 problems/)
+  })
+
+  it('REFUTE F1: many valid-looking rows under a wide header stay fast', () => {
+    const hdr = '!ACCNT\t' + 'X\t'.repeat(100_000) + 'NAME\tACCNTTYPE'
+    const body = Array.from({ length: 1500 }, (_, i) => `ACCNT\tA${i}`).join('\n')
+    const t0 = performance.now()
+    parseIifAccounts(hdr + '\n' + body)
+    expect(performance.now() - t0).toBeLessThan(2000)
+  })
+
+  it('a header without NAME or ACCNTTYPE is reported', () => {
+    expect(parseIifAccounts('!ACCNT\tFOO\nACCNT\tx\n').errors[0]).toMatch(/has no NAME or no ACCNTTYPE column/)
+  })
+
   it('rejects an oversized file without parsing it', () => {
     expect(parseIifAccounts('x'.repeat(MAX_IIF_CHARS + 1)).errors[0]).toMatch(/larger than/)
   })
@@ -124,6 +163,17 @@ describe('planAccountImport', () => {
       Repairs: ['type is liability in the ledger, expense in QuickBooks', 'number is 6150 in the ledger, 6100 in QuickBooks'],
       Utilities: ['number 6200 already belongs to "Office" in the ledger'],
     })
+  })
+
+  it('REFUTE N3: with "Checking" and "checking" both in the ledger, an exact match is unchanged, not a conflict', () => {
+    const one = parseIifAccounts(iif(row('Operating Cash', 'BANK', '1000'))).accounts
+    const plan = planAccountImport(one, [
+      ex({ id: 'b', qb_name: 'operating cash', number: '1001', account_type: 'asset', qb_account_type: 'BANK' }),
+      ex({ id: 'a', qb_name: 'Operating Cash', number: '1000', account_type: 'asset', qb_account_type: 'BANK' }),
+    ])
+    expect(plan.conflicts).toEqual([])
+    expect(plan.unchanged.map((a) => a.qb_name)).toEqual(['Operating Cash'])
+    expect(plan.ledger_only).toEqual([{ qb_name: 'operating cash', number: '1001' }])
   })
 
   it('existing account without a recorded QB type: unchanged, with a warning', () => {
