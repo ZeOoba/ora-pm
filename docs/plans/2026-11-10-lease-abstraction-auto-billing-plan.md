@@ -114,6 +114,22 @@ Phase 2 ships the engine with `cron.ts` unchanged. Before `cron.ts` passes `sche
 6. **`'all'` + `fixed_amount` is rejected by the engine** (`invalid_row`): it has no defined rent/CAM split. Extraction/approval (Phases 3–4) must split such a waiver into one fixed concession per charge class; consider a matching 0020-follow-up CHECK.
 7. Confirm the hosted PostgREST `max_rows` ≥ 1000 (`fetchAllPages` assumption) before the backfill runs.
 
+### 5b. Phase 4 hard requirement: every billing value is confirmed by a human (merge gate PR #69 redesign, 2026-11-10)
+
+The PR #69 merge gate found, two rounds running, that proving dollar amounts from lease wording with text
+heuristics keeps leaking (12x and 10x over-bills with no flag) and its patches introduced false blocks.
+Gabriel chose a redesign:
+- The model returns every money value **exactly as printed** (`*_as_written`, e.g. "$120,000.00", "3%")
+  plus the **period** printed with it (`month` / `year` / `psf_year`). It never converts or computes.
+- The server parses the printed figure, checks it is written in its own quote, computes the monthly
+  amount deterministically (year / 12; $/SF/yr x RSF / 12, RSF itself verified), derives unprinted
+  escalation steps from the stated rule, and blocks when the quote's own figures contradict the period
+  (e.g. "$120,000.00 ... monthly installments of $10,000.00" entered as monthly).
+- `POST /api/intake/lease` (`mode: 'abstract'`) returns `confirmations`: one entry per billing value with
+  `as_written`, `period`, the computed `monthly` and the quote/page. **Phase 4 approval must require an
+  explicit human confirmation of every entry against its highlighted quote, and must refuse approval while
+  any `block` flag is open.** Flags are triage, not proof.
+
 ## 6. Phases (each a PR; TDD; done bar per Engineering OS)
 
 | # | PR | Contents | Size | Gate |

@@ -174,10 +174,17 @@ intakeRouter.post('/lease', async (c) => {
     // reasons, descriptions) is checked; a hit nulls that string and is reported by path.
     const scrubbed: string[] = []
     const abstract = scrubConfidential(abs.abstract, terms, '', scrubbed)
-    // Flags are scrubbed too (REFUTE C2: no flag message echoes document text today, but nothing
-    // enforces that). A withheld value on a billing path leaves a hole the earlier checks never saw,
-    // so it blocks approval until re-entered by hand.
-    const flags: AbstractFlag[] = scrubConfidential(abs.flags, terms, 'flags', scrubbed)
+    // Flag MESSAGES are scrubbed (they echo amounts, dates and figures from the lease). Only the message:
+    // severity and path are fixed server values, and scrubbing them let a term like "lock" null the
+    // severity of every block flag, which fails open (merge gate R2-08).
+    const flags: AbstractFlag[] = abs.flags.map((f, i) => ({
+      ...f,
+      message: scrubConfidential(f.message, terms, `flags[${i}].message`, scrubbed) ?? 'Withheld by the confidentiality guard.',
+    }))
+    // Phase 4 confirmation list: what the lease prints, the period, the computed monthly amount, the quote.
+    const confirmations = scrubConfidential(abs.confirmations, terms, 'confirmations', scrubbed)
+    // A withheld value on a billing path leaves a hole the earlier checks never saw, so it blocks
+    // approval until re-entered by hand.
     for (const w of scrubbed) {
       const path = /^"([^"]+)"/.exec(w)?.[1] ?? ''
       // Same list as the citation-block rule (lease-abstract.ts BILLING_PATH), never a hand copy.
@@ -185,7 +192,7 @@ intakeRouter.post('/lease', async (c) => {
         flags.push({ severity: 'block', path, message: 'A billing value was withheld by the confidentiality guard; enter it manually.' })
       }
     }
-    return c.json({ abstract, flags, warnings: [...warnings, ...scrubbed] })
+    return c.json({ abstract, flags, confirmations, warnings: [...warnings, ...scrubbed] })
   }
 
   let result
