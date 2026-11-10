@@ -22,12 +22,17 @@ import {
 } from 'lucide-react'
 
 export type NavItem = { to: string; label: string; icon: LucideIcon }
-export type NavGroup = { heading: string; items: NavItem[] }
+export type NavGroup = { heading?: string; items: NavItem[] }
 export type Crumb = { label: string; to?: string }
 
-/** Only routes that exist in src/router.tsx (enforced by tests/components/nav-config.test.ts). */
+/**
+ * Information architecture from the Claude Design "ORA PM" prototype: Today, then Portfolio ·
+ * Leasing · Money · Books. Pages the prototype doesn't name are nested under the closest group so
+ * every route stays one click away. Only routes that exist in src/router.tsx (enforced by
+ * tests/components/nav-config.test.ts).
+ */
 export const NAV_GROUPS: NavGroup[] = [
-  { heading: 'Home', items: [{ to: '/', label: 'Dashboard', icon: Home }] },
+  { items: [{ to: '/', label: 'Today', icon: Home }] },
   {
     heading: 'Portfolio',
     items: [
@@ -35,6 +40,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { to: '/units', label: 'Units', icon: Grid2x2 },
       { to: '/tenants', label: 'Tenants', icon: Users },
       { to: '/leases', label: 'Leases', icon: FileText },
+      { to: '/rent-roll', label: 'Rent roll', icon: ScrollText },
       { to: '/insurance', label: 'Insurance', icon: ShieldCheck },
     ],
   },
@@ -42,28 +48,27 @@ export const NAV_GROUPS: NavGroup[] = [
     heading: 'Leasing',
     items: [
       { to: '/renewals', label: 'Renewals', icon: CalendarSync },
-      { to: '/critical-dates', label: 'Critical Dates', icon: CalendarClock },
+      { to: '/critical-dates', label: 'Critical dates', icon: CalendarClock },
     ],
   },
   {
-    heading: 'Accounting',
+    heading: 'Money',
     items: [
-      { to: '/transactions', label: 'Transactions', icon: ArrowLeftRight },
+      { to: '/ar', label: 'Collections', icon: HandCoins },
       { to: '/billing', label: 'Billing', icon: Receipt },
       { to: '/payments', label: 'Payments', icon: Banknote },
-      { to: '/ar', label: 'AR / Collections', icon: HandCoins },
       { to: '/statements', label: 'Statements', icon: FileSpreadsheet },
       { to: '/cam', label: 'CAM', icon: Landmark },
-      { to: '/expenses', label: 'Expenses', icon: ReceiptText },
-      { to: '/budgets', label: 'Budgets', icon: Wallet },
     ],
   },
   {
-    heading: 'Reports',
+    heading: 'Books',
     items: [
-      { to: '/reports', label: 'Report Library', icon: BookOpen },
-      { to: '/rent-roll', label: 'Rent Roll', icon: ScrollText },
-      { to: '/exports', label: 'QB Export', icon: Download },
+      { to: '/transactions', label: 'Transactions', icon: ArrowLeftRight },
+      { to: '/expenses', label: 'Expenses', icon: ReceiptText },
+      { to: '/budgets', label: 'Budgets', icon: Wallet },
+      { to: '/reports', label: 'Reports', icon: BookOpen },
+      { to: '/exports', label: 'QB export', icon: Download },
     ],
   },
 ]
@@ -81,14 +86,14 @@ export function isNavActive(pathname: string, to: string): boolean {
 
 /** Breadcrumb trail derived from nav-config + pathname; [] for paths outside the nav. */
 export function breadcrumbFor(pathname: string): Crumb[] {
-  if (pathname === '/') return [{ label: 'Home', to: '/' }]
+  if (pathname === '/') return [{ label: 'Today', to: '/' }]
   const [first, ...rest] = pathname.split('/').filter(Boolean)
   const base = `/${first}`
   for (const group of NAV_GROUPS) {
     const item = group.items.find((i) => i.to === base)
     if (!item) continue
     return [
-      { label: group.heading },
+      ...(group.heading ? [{ label: group.heading }] : []),
       { label: item.label, to: item.to },
       ...rest.map((seg) => ({ label: SEGMENT_LABELS[seg] ?? 'Detail' })),
     ]

@@ -9,7 +9,7 @@ import { ChunkLoadedMarker } from './components/ChunkLoadedMarker'
 
 // Route-level code splitting: every page loads on demand; only AppShell, the auth guard, AdminLogin and RouteError stay eager.
 // All pages use named exports, so adapt each to React.lazy's default-export contract.
-const Dashboard = lazy(() => import('./pages/Dashboard').then((m) => ({ default: m.Dashboard })))
+const TodayPage = lazy(() => import('./pages/today/TodayPage').then((m) => ({ default: m.TodayPage })))
 const PropertiesList = lazy(() => import('./pages/properties/PropertiesList').then((m) => ({ default: m.PropertiesList })))
 const PropertyForm = lazy(() => import('./pages/properties/PropertyForm').then((m) => ({ default: m.PropertyForm })))
 const PropertyDetail = lazy(() => import('./pages/properties/PropertyDetail').then((m) => ({ default: m.PropertyDetail })))
@@ -60,7 +60,7 @@ function Layout({ children }: { children: React.ReactNode }) {
 export const router = createBrowserRouter([
   { path: '/login', errorElement: <RouteError />, element: <AdminLogin /> },
   { path: '/styleguide', errorElement: <RouteError />, element: <Suspense fallback={<PageSkeleton />}><StyleGuide /></Suspense> },
-  { path: '/', errorElement: <RouteError />, element: <Layout><Dashboard /></Layout> },
+  { path: '/', errorElement: <RouteError />, element: <Layout><TodayPage /></Layout> },
   { path: '/properties', errorElement: <RouteError />, element: <Layout><PropertiesList /></Layout> },
   { path: '/properties/new', errorElement: <RouteError />, element: <Layout><PropertyForm /></Layout> },
   { path: '/properties/:id/edit', errorElement: <RouteError />, element: <Layout><PropertyForm /></Layout> },
