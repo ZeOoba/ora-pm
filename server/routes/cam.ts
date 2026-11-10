@@ -1,6 +1,9 @@
 import { Hono } from 'hono'
 import { getDb } from '../db/client'
-import { assertNoStaleClosedLeases, calculateCAMTrueUp, computeCamPool, CAMTermsError, type CAMPool, type CAMRentType } from '../lib/cam'
+import {
+  assertDenominatorCoversPool, assertNoStaleClosedLeases, calculateCAMTrueUp, computeCamPool, CAMTermsError,
+  overRecoveryWarning, peakConcurrentLeasedSF, resolveTenantShare, type CAMPool, type CAMRentType, type ResolvedShare,
+} from '../lib/cam'
 import { CamCalculateSchema, CamRecoverableQuerySchema } from '../lib/schemas'
 import { dbError } from '../lib/api-error'
 import { fetchAllPages, fetchChunked, POSTGREST_MAX_ROWS } from '../lib/postgrest-paging'
@@ -61,7 +64,13 @@ type PoolLeaseRow = {
   start_date: string
   end_date: string
   rent_type: CAMRentType
+  /** leases.proportionate_share_pct (0021): NUMERIC, may arrive as a string from PostgREST. */
+  proportionate_share_pct: number | string | null
 }
+
+/** NUMERIC columns can arrive from PostgREST as strings; null stays null. A non-numeric value
+ *  becomes NaN, which every consumer in server/lib/cam.ts refuses (fail closed). */
+const numOrNull = (v: number | string | null | undefined): number | null => (v == null ? null : Number(v))
 
 /**
  * The CAM pool for a property/year, from the DB (audit finding cam-denominator-client-snapshot).
@@ -70,14 +79,37 @@ type PoolLeaseRow = {
  * any read error, or a chunk at the PostgREST row cap, is returned as an error, never a partial pool.
  */
 async function loadCamPool(db: Db, propertyId: string, year: number): Promise<
-  { pool: CAMPool; leases: PoolLeaseRow[]; error: null } | { pool: null; leases: null; error: PgErr | CAMTermsError }
+  {
+    pool: CAMPool; leases: PoolLeaseRow[]; denominatorRSF: number | null
+    /** Non-blocking pool-level warnings about the denominator (see H1 below). */
+    denominatorWarnings: string[]
+    /** Holdover flag per lease id (ruling 2026-11-08: holdover excluded from CAM and flagged). */
+    holdover: Map<string, string>
+    error: null
+  }
+  | { pool: null; leases: null; denominatorRSF: null; denominatorWarnings: null; holdover: null; error: PgErr | CAMTermsError }
 > {
+  const fail = (error: PgErr | CAMTermsError) => ({ pool: null, leases: null, denominatorRSF: null, denominatorWarnings: null, holdover: null, error }) as const
+  // Building-RSF ruling (2026-11-08): the denominator is the building/project RSF the lease form
+  // names (properties.cam_denominator_rsf, 0021) — never total_sf, which the importer fills with
+  // summed suite SF. Fail closed on any read error.
+  const { data: prop, error: propErr } = await db
+    .from('properties')
+    .select('id, cam_denominator_rsf')
+    .eq('id', propertyId)
+    .single()
+  if (propErr) return fail(propErr)
+  const denominatorRSF = numOrNull((prop as { cam_denominator_rsf: number | string | null } | null)?.cam_denominator_rsf)
+  if (denominatorRSF !== null && !(Number.isFinite(denominatorRSF) && denominatorRSF > 0)) {
+    return fail(new CAMTermsError('The property\'s CAM denominator rentable SF is not a positive number'))
+  }
+
   const { data: units, error: unitsErr } = await fetchAllPages<{ id: string; sf: number; suite?: string | null }>((after) => {
     let q = db.from('units').select('id, sf, suite').eq('property_id', propertyId)
     if (after !== null) q = q.gt('id', after)
     return q.order('id').limit(POSTGREST_MAX_ROWS)
   }, (u) => u.id)
-  if (unitsErr) return { pool: null, leases: null, error: unitsErr }
+  if (unitsErr) return fail(unitsErr)
 
   const sfByUnit = new Map(units.map((u) => [u.id, Number(u.sf)]))
   const unitLabel = new Map(units.map((u) => [u.id, u.suite ? `${u.suite} (${u.id})` : u.id]))
@@ -85,14 +117,50 @@ async function loadCamPool(db: Db, propertyId: string, year: number): Promise<
     units.map((u) => u.id),
     UNIT_ID_CHUNK,
     (chunk) => db.from('leases')
-      .select('id, unit_id, status, start_date, end_date, rent_type')
+      .select('id, unit_id, status, start_date, end_date, rent_type, proportionate_share_pct')
       .in('unit_id', chunk)
       .in('status', POOL_LEASE_STATUSES)
       .lte('start_date', `${year}-12-31`)
       .gte('end_date', `${year}-01-01`),
     { maxRows: POSTGREST_MAX_ROWS },
   )
-  if (leasesErr) return { pool: null, leases: null, error: leasesErr }
+  if (leasesErr) return fail(leasesErr)
+
+  // Holdover (ruling 2026-11-08: excluded from CAM and flagged). A lease still 'active' whose
+  // end_date has passed is a tenant holding over. computeCamPool clips every lease at end_date, so
+  // the holdover days are already excluded; this makes the exclusion visible instead of silent
+  // (REFUTE C4, 2026-11-10). A lease counts as holding over during `year` when its end_date is
+  // before both today and the year's last day — which includes leases that ended before the year
+  // began and so are not in the pool at all (they would otherwise vanish from the CAM page).
+  const today = new Date().toISOString().slice(0, 10)
+  const yearEnd = `${year}-12-31`
+  const holdoverCutoff = today < yearEnd ? today : yearEnd
+  const { data: heldOver, error: heldOverErr } = await fetchChunked<{ id: string; unit_id: string; end_date: string }>(
+    units.map((u) => u.id),
+    UNIT_ID_CHUNK,
+    (chunk) => db.from('leases')
+      .select('id, unit_id, end_date')
+      .in('unit_id', chunk)
+      .eq('status', 'active')
+      .lte('start_date', yearEnd)
+      .lt('end_date', holdoverCutoff),
+    { maxRows: POSTGREST_MAX_ROWS },
+  )
+  if (heldOverErr) return fail(heldOverErr)
+  const holdover = new Map(heldOver.map((l) => [l.id, `Holdover: lease ${l.id} (unit ${unitLabel.get(l.unit_id) ?? l.unit_id}) `
+    + `is still active but its term ended ${l.end_date}. CAM for days after ${l.end_date} is excluded from `
+    + `this ${year} reconciliation, not billed. Decide the holdover terms, then renew/extend the lease or mark it expired.`]))
+
+  // REFUTE H1 (2026-11-10): recoverable expenses are pooled per property row, so the denominator
+  // must cover every unit on that row. A denominator below the summed unit SF (e.g. one building's
+  // RSF entered on a property row that holds two buildings) overstates every computed share once the
+  // units fill. Warning, not refusal: unit SF can legitimately differ from lease-form RSF.
+  const unitSFTotal = units.reduce((s, u) => s + (Number.isFinite(Number(u.sf)) ? Number(u.sf) : 0), 0)
+  const denominatorWarnings = denominatorRSF !== null && unitSFTotal > denominatorRSF
+    ? [`CAM denominator ${denominatorRSF.toLocaleString('en-US')} RSF is less than the ${unitSFTotal.toLocaleString('en-US')} SF of units `
+      + 'on this property. The expense pool covers the whole property row: if it holds more than one building, the '
+      + 'denominator must be the RSF of all of them, or computed shares are overstated. Check before Approve & Bill.']
+    : []
 
   try {
     const pool = computeCamPool(
@@ -107,11 +175,49 @@ async function loadCamPool(db: Db, propertyId: string, year: number): Promise<
       leases.filter((l) => pool.byLease[l.id] !== undefined).map((l) => ({ id: l.id, unit_id: unitLabel.get(l.unit_id) ?? l.unit_id, status: l.status, end_date: l.end_date })),
       new Date().toISOString().slice(0, 10),
     )
-    return { pool, leases, error: null }
+    // Ruling 2026-11-08: a denominator smaller than the SF leased on any day of the year means the
+    // RSF (or a unit's SF) is wrong and every computed share is overstated — fail closed (422).
+    assertDenominatorCoversPool(pool, denominatorRSF)
+    return { pool, leases, denominatorRSF, denominatorWarnings, holdover, error: null }
   } catch (err) {
-    if (err instanceof CAMTermsError) return { pool: null, leases: null, error: err }
+    if (err instanceof CAMTermsError) return fail(err)
     throw err
   }
+}
+
+/** Resolve one pool lease's Proportionate Share (see resolveTenantShare in server/lib/cam.ts). */
+function shareForPoolLease(pool: CAMPool, lease: PoolLeaseRow, denominatorRSF: number | null): ResolvedShare {
+  const inPool = pool.byLease[lease.id]
+  return resolveTenantShare({
+    leaseId: lease.id,
+    statedPct: numOrNull(lease.proportionate_share_pct),
+    premisesSF: inPool.sf,
+    denominatorRSF,
+    overlapDays: inPool.overlapDays,
+    daysInYear: pool.daysInYear,
+  })
+}
+
+/** Every pool lease's resolved share (or the CAMTermsError that refused it), plus the pool-level
+ *  over-recovery warning (stated shares summing above 100% on some day) — warning only. */
+function resolvePoolShares(pool: CAMPool, leases: PoolLeaseRow[], denominatorRSF: number | null): {
+  byLease: Map<string, ResolvedShare | CAMTermsError>
+  poolWarning: string | null
+} {
+  const byLease = new Map<string, ResolvedShare | CAMTermsError>()
+  const annual = new Map<string, number>()
+  for (const l of leases) {
+    if (!pool.byLease[l.id]) continue
+    try {
+      const s = shareForPoolLease(pool, l, denominatorRSF)
+      byLease.set(l.id, s)
+      annual.set(l.id, s.annualPct)
+    } catch (err) {
+      if (!(err instanceof CAMTermsError)) throw err
+      byLease.set(l.id, err)
+    }
+  }
+  return { byLease, poolWarning: overRecoveryWarning(pool, annual) }
 }
 
 camRouter.get('/recoverable-expenses', async (c) => {
@@ -144,22 +250,48 @@ camRouter.get('/pool', async (c) => {
   if (loaded.error instanceof CAMTermsError) return c.json(camTermsJson(loaded.error), 422)
   if (loaded.error) return dbError(c, loaded.error, 'Failed to load CAM pool')
 
+  const { pool: camPool, denominatorRSF } = loaded
+  const shares = resolvePoolShares(camPool, loaded.leases, denominatorRSF)
   return c.json({
     data: {
       recoverable_total: recoverable.total,
       recoverable_count: recoverable.count,
-      days_in_year: loaded.pool.daysInYear,
-      weighted_leased_sf: loaded.pool.weightedLeasedSF,
+      days_in_year: camPool.daysInYear,
+      weighted_leased_sf: camPool.weightedLeasedSF,
+      // Ruling 2026-11-08: the Proportionate Share denominator (building/project RSF) — null when
+      // the property has none entered, in which case only leases with a stated % can be reconciled.
+      denominator_rsf: denominatorRSF,
+      peak_leased_sf: peakConcurrentLeasedSF(camPool).sf,
+      warnings: [
+        ...(shares.poolWarning ? [shares.poolWarning] : []),
+        ...loaded.denominatorWarnings,
+        ...loaded.holdover.values(),
+      ],
       leases: loaded.leases
-        .filter((l) => loaded.pool.byLease[l.id])
-        .map((l) => ({
-          lease_id: l.id,
-          status: l.status,
-          rent_type: l.rent_type,
-          sf: loaded.pool.byLease[l.id].sf,
-          overlap_days: loaded.pool.byLease[l.id].overlapDays,
-          weighted_sf: loaded.pool.byLease[l.id].weightedSF,
-        })),
+        .filter((l) => camPool.byLease[l.id])
+        .map((l) => {
+          const inPool = camPool.byLease[l.id]
+          // A lease with no usable basis is reported on its own row (share_error) so the page can
+          // show which lease needs data, instead of refusing the whole pool; /calculate 422s it.
+          const resolved = shares.byLease.get(l.id)
+          const share = resolved instanceof CAMTermsError || resolved === undefined ? null : resolved
+          const shareError = resolved instanceof CAMTermsError ? resolved.message : null
+          return {
+            lease_id: l.id,
+            status: l.status,
+            rent_type: l.rent_type,
+            sf: inPool.sf,
+            overlap_days: inPool.overlapDays,
+            weighted_sf: inPool.weightedSF,
+            stated_share_pct: numOrNull(l.proportionate_share_pct),
+            computed_share_pct: share ? share.computedPct : null,
+            share_basis: share?.basis ?? null,
+            annual_share_pct: share?.annualPct ?? null,
+            effective_share_pct: share?.effectivePct ?? null,
+            share_error: shareError,
+            warnings: share?.warnings ?? [],
+          }
+        }),
     },
   })
 })
@@ -185,7 +317,7 @@ camRouter.post('/calculate', async (c) => {
   // cam_reconciliations FK constraint on insert).
   const { data: lease, error: leaseErr } = await db
     .from('leases')
-    .select('id, rent_type, expense_stop_amount, units(property_id)')
+    .select('id, rent_type, expense_stop_amount, base_year, base_year_expense_amount, units(property_id)')
     .eq('id', lease_id)
     .single()
   if (leaseErr) {
@@ -200,26 +332,63 @@ camRouter.post('/calculate', async (c) => {
     units: { property_id: string } | null
     rent_type: CAMRentType | null
     expense_stop_amount: number | string | null
+    base_year: number | string | null
+    base_year_expense_amount: number | string | null
   } | null
+  // REFUTE H2 (2026-11-10): a refused recalculation must not leave the previous draft billable. If
+  // the lease's terms changed (base year added, stated share fixed, RSF corrected) and this run is
+  // refused, the old draft was priced on terms that no longer hold. Strip its share_basis so
+  // /:id/approve refuses it until a recalculation succeeds. Only 'draft' rows are touched (billed /
+  // collected rows are history). If the invalidation itself fails, fail closed with a 500 rather
+  // than report a 422 that leaves a stale draft approvable.
+  const refuse = async (message: string, httpStatus: 422 | 400 = 422) => {
+    const { error: invalidateErr } = await db
+      .from('cam_reconciliations')
+      .update({ share_basis: null, basis_warnings: `Last recalculation was refused: ${message}` })
+      .eq('lease_id', lease_id)
+      .eq('reconciliation_year', reconciliation_year)
+      .eq('status', 'draft')
+      .select()
+    if (invalidateErr) return dbError(c, invalidateErr, 'Failed to invalidate the stale CAM draft')
+    return c.json({ error: message }, httpStatus)
+  }
+
   const propertyId = leaseRow?.units?.property_id
-  if (!propertyId) return c.json({ error: 'Lease has no unit/property — cannot build the CAM pool' }, 422)
+  if (!propertyId) return refuse('Lease has no unit/property — cannot build the CAM pool')
   const rentType: CAMRentType = leaseRow?.rent_type ?? 'nnn' // column is NOT NULL DEFAULT 'nnn'
   // NUMERIC can arrive as a string from PostgREST; null stays null (no stop).
   const expenseStopPerSF = leaseRow?.expense_stop_amount == null ? null : Number(leaseRow.expense_stop_amount)
+  // Base year (0021; ruling 2026-11-08): recover only the increase over the base year's total.
+  const baseYear = numOrNull(leaseRow?.base_year)
+  const baseYearExpenseAmount = numOrNull(leaseRow?.base_year_expense_amount)
 
-  // Server-side pool: recoverable total + occupancy-weighted denominator for the property/year.
+  // Server-side pool: recoverable total, the leases in effect during the year (days in effect,
+  // same-unit overlap, stale-end-date and RSF-covers-pool checks) and the property's denominator RSF.
   const recoverable = await loadRecoverableTotal(db, propertyId, reconciliation_year)
   if (recoverable.error) return dbError(c, recoverable.error, 'Failed to load recoverable expenses')
   const total_property_recoverable_expenses = recoverable.total
   const loaded = await loadCamPool(db, propertyId, reconciliation_year)
-  if (loaded.error instanceof CAMTermsError) return c.json(camTermsJson(loaded.error), 422)
+  if (loaded.error instanceof CAMTermsError) return refuse(loaded.error.message)
   if (loaded.error) return dbError(c, loaded.error, 'Failed to load CAM pool')
+  const holdoverFlag = loaded.holdover.get(lease_id)
   const tenantInPool = loaded.pool.byLease[lease_id]
   if (!tenantInPool) {
-    return c.json({ error: `Lease was not in effect during ${reconciliation_year} (or is pending) — no CAM reconciliation for that year` }, 422)
+    // A holdover lease that ended before this year is not in the pool: say so rather than
+    // "not in effect" (ruling 2026-11-08: holdover excluded and flagged).
+    return refuse(holdoverFlag
+      ?? `Lease was not in effect during ${reconciliation_year} (or is pending) — no CAM reconciliation for that year`)
   }
-  // Occupancy-weighted: a tenant in place for part of the year bears that part of a full-year share
-  // (and an expense stop is prorated by the same factor — see calculateCAMTrueUp).
+  // Proportionate Share (ruling 2026-11-08): the lease-stated %, else premises RSF / the property's
+  // building/project RSF; neither -> 422. Prorated by days in effect. A stated-vs-computed gap over
+  // 0.5 pp is a warning returned (and saved) with the draft, never a refusal; so is a pool whose
+  // concurrent shares total more than 100% (only reachable through stated percentages).
+  const poolShares = resolvePoolShares(loaded.pool, loaded.leases, loaded.denominatorRSF)
+  const resolved = poolShares.byLease.get(lease_id)
+  if (resolved === undefined) return refuse('Lease is missing from its CAM pool')
+  if (resolved instanceof CAMTermsError) return refuse(resolved.message)
+  const share: ResolvedShare = resolved
+  // Occupancy-weighted premises SF: the basis an expense stop is applied to, prorated by the same
+  // days-in-effect factor as the share (see calculateCAMTrueUp).
   const tenantSF = tenantInPool.weightedSF
 
   // Sum all CAM estimate charges billed this year. OI-278 / migration 0016: a voided estimate was
@@ -245,16 +414,19 @@ camRouter.post('/calculate', async (c) => {
     result = calculateCAMTrueUp({
       totalRecoverableExpenses: total_property_recoverable_expenses,
       tenantSF,
-      totalLeasedSF: loaded.pool.weightedLeasedSF,
+      tenantSharePct: share.effectivePct,
       estimatedCamPaid,
       rentType,
       expenseStopPerSF,
+      baseYear,
+      baseYearExpenseAmount,
+      reconciliationYear: reconciliation_year,
     })
   } catch (err) {
     // Lease-terms problems (e.g. modified_gross with no expense stop) are a 422 the user fixes on
     // the lease; nothing is saved either way.
-    if (err instanceof CAMTermsError) return c.json(camTermsJson(err), 422)
-    return c.json({ error: (err as Error).message }, 400)
+    if (err instanceof CAMTermsError) return refuse(err.message)
+    return refuse((err as Error).message, 400)
   }
 
   const patch = {
@@ -263,8 +435,20 @@ camRouter.post('/calculate', async (c) => {
     estimated_cam_paid: estimatedCamPaid,
     actual_cam_owed: result.actualCamOwed,
     true_up_amount: result.trueUpAmount,
+    share_basis: share.basis,
+    recovery_basis: result.recoveryBasis,
+    basis_warnings: null as string | null,
     status: 'draft' as const,
   }
+  // Non-blocking warnings travel with every successful response (and are saved on the draft).
+  // The denominator warning (H1) only bears on a computed share; a stated share ignores the RSF.
+  const warnings = [
+    ...share.warnings,
+    ...(poolShares.poolWarning ? [poolShares.poolWarning] : []),
+    ...(share.basis === 'premises_rsf_over_denominator' ? loaded.denominatorWarnings : []),
+    ...(holdoverFlag ? [holdoverFlag] : []),
+  ]
+  patch.basis_warnings = warnings.length > 0 ? warnings.join('\n') : null
 
   const ALREADY_BILLED = {
     error: 'This reconciliation has already been billed. Recalculating would silently reopen it '
@@ -305,7 +489,7 @@ camRouter.post('/calculate', async (c) => {
     .select()
 
   if (updateErr) return dbError(c, updateErr, 'Failed to save CAM reconciliation')
-  if (updated && updated.length > 0) return c.json({ data: updated[0] })
+  if (updated && updated.length > 0) return c.json({ data: updated[0], warnings })
 
   // Zero rows updated: either no reconciliation exists yet for this
   // lease/year (first-ever calculation — insert), or one exists and IS
@@ -320,7 +504,7 @@ camRouter.post('/calculate', async (c) => {
     .select()
     .single()
 
-  if (!insertErr) return c.json({ data: inserted })
+  if (!insertErr) return c.json({ data: inserted, warnings })
   if (insertErr.code !== '23505') return dbError(c, insertErr, 'Failed to save CAM reconciliation')
 
   // Insert conflicted — a row already exists. Either it's the 'billed' row
@@ -357,7 +541,7 @@ camRouter.post('/calculate', async (c) => {
   // Vanishingly narrow window: billed between the read above and this
   // retry. Still correctly rejected, not silently reopened.
   if (!retried || retried.length === 0) return c.json(ALREADY_BILLED, 409)
-  return c.json({ data: retried[0] })
+  return c.json({ data: retried[0], warnings })
 })
 
 // Approve CAM reconciliation — posts true-up charge to tenant ledger.
@@ -387,7 +571,18 @@ camRouter.post('/:id/approve', async (c) => {
 
   if (recErr || !rec) return c.json({ error: 'Not found' }, 404)
 
-  const r = rec as { true_up_amount: number; lease_id: string; reconciliation_year: number }
+  const r = rec as { true_up_amount: number; lease_id: string; reconciliation_year: number; share_basis?: string | null; status?: string }
+  // CAM ruling 2026-11-08: a draft with no share_basis is not billable. Either it was saved before
+  // migration 0021 (priced on the superseded leased-SF denominator) or its last recalculation was
+  // refused and /calculate invalidated it (REFUTE H2). Billed/collected rows are unaffected (the
+  // conditional update below rejects them).
+  if (r.status === 'draft' && (r.share_basis === null || r.share_basis === undefined)) {
+    return c.json({
+      error: 'This draft has no valid Proportionate Share basis: it was calculated on the superseded '
+        + 'leased-SF basis, or its last recalculation was refused. Fix the lease/property data and '
+        + 'recalculate it before approving.',
+    }, 409)
+  }
   const trueUp = r.true_up_amount
   if (trueUp === 0) return c.json({ message: 'No true-up required (balanced)', true_up_amount: 0 })
 
