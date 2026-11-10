@@ -1,4 +1,4 @@
-import { Hono } from 'hono'
+import { Hono, type Context } from 'hono'
 import Stripe from 'stripe'
 import { getDb } from '../db/client'
 import { getStripe } from '../lib/stripe'
@@ -6,6 +6,7 @@ import { tenantAuthMiddleware } from '../middleware/tenant-auth'
 import { requireAal2 } from '../middleware/aal-guard'
 import { dbError } from '../lib/api-error'
 import type { Env } from '../index'
+import { PORTAL_TENANT_SELECT, portalAging, portalBalance, portalCharges, portalLeases, portalPayments, type PortalResult } from '../lib/portal-data'
 
 // OI-043: payment_method_id must look like a Stripe PaymentMethod id before
 // it's ever sent to Stripe or persisted.
@@ -16,113 +17,66 @@ export const portalRouter = new Hono<{ Bindings: Env }>()
 // All portal routes require a valid tenant JWT
 portalRouter.use('/*', tenantAuthMiddleware)
 
-// GET /api/portal/me — tenant profile + AR balance
-portalRouter.get('/me', async (c) => {
-  const userId = c.get('tenantUserId')
-  const db = getDb(c.env)
+// The per-tenant reads live in server/lib/portal-data.ts (B13) so the admin "View as tenant"
+// preview runs the same code. Each route still resolves the tenant from the JWT itself, inline
+// (tests/routes/portal-scoping.test.ts checks every handler body for that guard), then delegates.
+function send<T>(c: Context<{ Bindings: Env }>, r: PortalResult<T>, wrap: (d: T) => unknown) {
+  if (r.ok) return c.json(wrap(r.data))
+  if (r.kind === 'raw') return c.json({ error: r.text }, 500)
+  return dbError(c, r.error, r.publicMsg)
+}
 
+// GET /api/portal/me — tenant profile + AR balance (signed sum of ar_ledger, credits included)
+portalRouter.get('/me', async (c) => {
+  const db = getDb(c.env)
   const { data: tenant, error } = await db
     .from('tenants')
-    .select('id, name, contact_email, stripe_customer_id, auth_user_id')
-    .eq('auth_user_id', userId)
+    .select(PORTAL_TENANT_SELECT)
+    .eq('auth_user_id', c.get('tenantUserId'))
     .single()
-
   if (error || !tenant) return c.json({ error: 'Tenant not found for this user' }, 404)
-
-  const { data: arRows } = await db.from('ar_ledger').select('balance').eq('tenant_id', tenant.id)
-  const totalBalance = (arRows ?? []).reduce((sum, r) => sum + (r.balance ?? 0), 0)
-
-  return c.json({ tenant, total_balance: totalBalance })
+  return send(c, await portalBalance(db, tenant.id), (total_balance) => ({ tenant, total_balance }))
 })
 
-// GET /api/portal/charges — open charges for tenant's active leases
+// GET /api/portal/charges — non-voided charges for the tenant's active leases
 portalRouter.get('/charges', async (c) => {
-  const userId = c.get('tenantUserId')
   const db = getDb(c.env)
-
-  const { data: tenant, error: tenantErr } = await db.from('tenants').select('id').eq('auth_user_id', userId).single()
+  // OI-048: re-derive the caller's tenant from the JWT before any other read.
+  const { data: tenant, error: tenantErr } = await db.from('tenants').select('id').eq('auth_user_id', c.get('tenantUserId')).single()
   if (tenantErr) return c.json({ error: 'DB error' }, 500)
   if (!tenant) return c.json({ error: 'Tenant not found' }, 404)
-
-  const { data: leases, error: leasesErr } = await db.from('leases').select('id').eq('tenant_id', tenant.id).eq('status', 'active')
-  if (leasesErr) return c.json({ error: 'DB error' }, 500)
-  const leaseIds = (leases ?? []).map((l: { id: string }) => l.id)
-  if (!leaseIds.length) return c.json({ data: [] })
-
-  // OI-278 / migration 0016: voided charges are audit rows — never shown to (or payable by) the
-  // tenant, and never part of the balance ar_ledger reports.
-  const { data, error } = await db
-    .from('charges')
-    .select('*, leases(units(properties(name,address)))')
-    .in('lease_id', leaseIds)
-    .is('voided_at', null)
-    .order('due_date', { ascending: false })
-
-  if (error) return dbError(c, error, 'Failed to load charges')
-  return c.json({ data })
+  return send(c, await portalCharges(db, tenant.id), (data) => ({ data }))
 })
 
 // GET /api/portal/payments — payment history
 portalRouter.get('/payments', async (c) => {
-  const userId = c.get('tenantUserId')
   const db = getDb(c.env)
-
-  const { data: tenant, error: tenantErr } = await db.from('tenants').select('id').eq('auth_user_id', userId).single()
+  // OI-048: re-derive the caller's tenant from the JWT before any other read.
+  const { data: tenant, error: tenantErr } = await db.from('tenants').select('id').eq('auth_user_id', c.get('tenantUserId')).single()
   if (tenantErr) return c.json({ error: 'DB error' }, 500)
   if (!tenant) return c.json({ error: 'Tenant not found' }, 404)
-
-  const { data: leases, error: leasesErr } = await db.from('leases').select('id').eq('tenant_id', tenant.id)
-  if (leasesErr) return c.json({ error: 'DB error' }, 500)
-  const leaseIds = (leases ?? []).map((l: { id: string }) => l.id)
-  if (!leaseIds.length) return c.json({ data: [] })
-
-  const { data, error } = await db
-    .from('payments')
-    .select('*')
-    .in('lease_id', leaseIds)
-    .order('payment_date', { ascending: false })
-
-  if (error) return dbError(c, error, 'Failed to load payment history')
-  return c.json({ data })
+  return send(c, await portalPayments(db, tenant.id), (data) => ({ data }))
 })
 
-// M8 (2026-11-08 audit): an explicit tenant-safe projection, never `*`. leases.* carried the
-// landlord's internal `notes`, renewal `options`, TI and expense-stop terms (and any column a
-// future migration adds); lease_amendments(*) carried the raw `changes` JSON and storage path.
-// These are exactly the fields the portal renders (src/portal/pages/PortalMyLease.tsx,
-// PortalAccount.tsx); autopay_payment_method_id is the tenant's own saved method, tested only
-// for presence. Add a column here deliberately, with the page that needs it.
-const PORTAL_LEASE_SELECT = [
-  'id',
-  'start_date',
-  'end_date',
-  'status',
-  'rent_type',
-  'base_rent_monthly',
-  'cam_estimate_monthly',
-  'autopay_enabled',
-  'autopay_payment_method_id',
-  'units(suite, sf, properties(name, address, city, state))',
-  'lease_amendments(id, effective_date, description)',
-].join(', ')
-
-// GET /api/portal/lease — active lease terms
+// GET /api/portal/lease — active lease terms (tenant-safe projection, PORTAL_LEASE_SELECT)
 portalRouter.get('/lease', async (c) => {
-  const userId = c.get('tenantUserId')
   const db = getDb(c.env)
-
-  const { data: tenant, error: tenantErr } = await db.from('tenants').select('id').eq('auth_user_id', userId).single()
+  // OI-048: re-derive the caller's tenant from the JWT before any other read.
+  const { data: tenant, error: tenantErr } = await db.from('tenants').select('id').eq('auth_user_id', c.get('tenantUserId')).single()
   if (tenantErr) return c.json({ error: 'DB error' }, 500)
   if (!tenant) return c.json({ error: 'Tenant not found' }, 404)
+  return send(c, await portalLeases(db, tenant.id), (data) => ({ data }))
+})
 
-  const { data, error } = await db
-    .from('leases')
-    .select(PORTAL_LEASE_SELECT)
-    .eq('tenant_id', tenant.id)
-    .eq('status', 'active')
-
-  if (error) return dbError(c, error, 'Failed to load lease information')
-  return c.json({ data })
+// GET /api/portal/aging — what makes up the balance: the tenant's own aging (same allocator as the
+// admin AR report), tenant-safe fields only. B13.
+portalRouter.get('/aging', async (c) => {
+  const db = getDb(c.env)
+  // OI-048: re-derive the caller's tenant from the JWT before any other read.
+  const { data: tenant, error: tenantErr } = await db.from('tenants').select('id').eq('auth_user_id', c.get('tenantUserId')).single()
+  if (tenantErr) return c.json({ error: 'DB error' }, 500)
+  if (!tenant) return c.json({ error: 'Tenant not found' }, 404)
+  return send(c, await portalAging(db, tenant.id), (d) => d)
 })
 
 // GET /api/portal/documents — document list

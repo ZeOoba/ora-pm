@@ -74,18 +74,27 @@ export const FINANCIAL_SOURCE_PATHS: ReadonlySet<string> = new Set([
   'server/lib/iif-export.ts',
   // AR-aging oldest-first allocation of payments to charges (the aging buckets and their totals).
   'server/lib/ar-aging.ts',
+  // AR-aging report read (2026-11-10, B13): the ledger + charges reads, snapshot cross-check and
+  // bucket totals behind /api/reports/ar-aging AND the tenant-facing /api/portal/aging. A paging or
+  // filter bug here misstates what a tenant is told they owe.
+  'server/lib/ar-aging-report.ts',
   // Tenant account statements (2026-11-09): opening/closing balance, counted-vs-pending payment
   // classification, as-of-end aging, the ar_ledger cross-check, and the rendered figures and
   // signing entity that go out to tenants as Outlook drafts.
   'server/lib/statement.ts',
   'server/lib/statement-render.ts',
   'server/routes/statements.ts',
+  // B8 native general ledger core (2026-11-10): journal posting, reversal, period lock and the
+  // trial balance. The ledger becomes the book of record at QB cutover.
+  'server/lib/gl.ts',
+  'server/routes/gl.ts',
 ])
 
 // Tables whose schema/view/index changes are financial: charges (what tenants owe), payments
 // (what was collected / debited), ar_ledger (the balance view the autopay debit and delinquency
 // sweep read).
-export const FINANCIAL_TABLES: readonly string[] = ['charges', 'payments', 'ar_ledger']
+// gl_* (B8): the native general ledger's accounts, periods and journal.
+export const FINANCIAL_TABLES: readonly string[] = ['charges', 'payments', 'ar_ledger', 'gl_accounts', 'gl_periods', 'gl_journal_entries', 'gl_journal_lines']
 
 const MIGRATION_RE = /^supabase\/migrations\/[^/]+\.sql$/
 
@@ -111,9 +120,14 @@ export function isMigrationPath(p: string): boolean {
 // attest and expensive to miss.
 const FINANCIAL_TABLE_RE = new RegExp(`(^|[^a-z0-9])(${FINANCIAL_TABLES.join('|')})(?![a-z0-9])`, 'i')
 
-/** True when a migration's SQL references any financial table. */
+// Every gl_ identifier is ledger: the tables above, but also gl_entities (accounting basis) and the
+// gl_ trigger/write functions that carry the money rules, which a later migration could replace
+// with CREATE OR REPLACE FUNCTION without naming any table (REFUTE D6, 2026-11-10).
+const GL_IDENTIFIER_RE = /(^|[^a-z0-9_])gl_[a-z0-9_]/i
+
+/** True when a migration's SQL references any financial table or any gl_ ledger object. */
 export function migrationTouchesFinancialTables(sql: string): boolean {
-  return FINANCIAL_TABLE_RE.test(sql)
+  return FINANCIAL_TABLE_RE.test(sql) || GL_IDENTIFIER_RE.test(sql)
 }
 
 /**
