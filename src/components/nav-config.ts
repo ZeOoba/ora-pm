@@ -11,6 +11,7 @@ import {
   Grid2x2,
   HandCoins,
   Home,
+  LayoutList,
   Landmark,
   Receipt,
   ReceiptText,
@@ -36,6 +37,7 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     heading: 'Portfolio',
     items: [
+      { to: '/portfolio', label: 'Overview', icon: LayoutList },
       { to: '/properties', label: 'Properties', icon: Building2 },
       { to: '/units', label: 'Units', icon: Grid2x2 },
       { to: '/tenants', label: 'Tenants', icon: Users },
