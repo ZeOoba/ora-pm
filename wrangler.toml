@@ -18,16 +18,27 @@ pages_build_output_dir = "./dist"
 # Scheduled HTTP crons — POSTed with `Authorization: Bearer <CRON_SECRET>`
 # (Cloudflare Pages has no native cron triggers, and this account has no
 # workers.dev subdomain either, so a cron Worker can't attach schedules).
-# Driven by a standalone Windows Task Scheduler task ("ORA PM Crons",
-# Interactive logon, independent of whether Claude Desktop is open) running
-# C:\Users\Owner\ora-pm-cron\ping-crons.ps1 — NOT the Claude dual-fleet
-# scheduled-task registry. Since OI-047 (2026-08-04), critical-dates-alerts
-# and delinquency-check return an `email` field instead of sending email
-# themselves; ping-crons.ps1 sends it via Outlook COM. monthly-billing is
-# not currently pinged by ping-crons.ps1 (no email path, not part of OI-047).
-#   POST /api/cron/monthly-billing            — monthly, 1st of month (not yet wired to a trigger)
-#   POST /api/cron/critical-dates-alerts      — daily ~09:00 ET
-#   POST /api/cron/delinquency-check          — daily ~09:00 ET
+# Callers (the live ORA CC/MCP scheduled-task registry is the authority for
+# the two laptop tasks; they fire only while the Claude Desktop app is open,
+# else as a catch-up at next open). The old standalone Windows Task Scheduler
+# task "ORA PM Crons" is disabled, superseded 2026-08-16.
+#   POST /api/cron/monthly-billing
+#       laptop:  ora-pm-monthly-billing, cron `10 11 1-3 * *` local, runs
+#                scripts/trigger-billing.ps1 (re-invokes until remaining = 0)
+#       backup:  .github/workflows/monthly-billing-backup.yml, `40 17 1 * *` UTC
+#   POST /api/cron/critical-dates-alerts
+#       laptop:  ora-pm-daily-crons, cron `40 9 * * 1` (WEEKLY, Mondays 09:40
+#                ET, despite the id), runs C:\Users\Owner\ora-pm-cron\ping-crons.ps1
+#       backup:  none by design — dedup rows are written before the digest is
+#                returned, so only the laptop run can deliver it (OI-229)
+#   POST /api/cron/delinquency-check
+#       laptop:  ora-pm-daily-crons (same weekly run as above)
+#       backup:  .github/workflows/delinquency-backup.yml, `10 16 * * *` UTC
+#                (scripts/delinquency-backup.sh) — the daily path
+# Since OI-047 (2026-08-04), critical-dates-alerts and delinquency-check
+# return an `email` field instead of sending email; ping-crons.ps1 sends it
+# via Outlook COM. All writes are idempotent, so a laptop + backup double
+# fire posts nothing twice. Full detail: README "Cron jobs" paragraph.
 
 # OI-038 remainder: durable, cross-isolate rate-limit counter storage (see
 # server/lib/rate-limit.ts for the eventually-consistent throttle-not-hard-
