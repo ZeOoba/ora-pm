@@ -121,7 +121,7 @@ export function ArPosting() {
         )}
         {s && cash && (
           <p className="text-sm text-muted-foreground">
-            Cash basis: a charge is income only as cash pays it. Payments apply to the oldest charges first (deposit, rent, CAM, utilities, other, late fees last on one due date); cash beyond that is a tenant credit in prepaid rent.
+            Cash basis: a charge is income only as cash pays it. Cash pays charges in the order they were billed, oldest due date first within a billing date (deposit, rent, CAM, utilities, other, late fees last); cash beyond that is a tenant credit in prepaid rent.
           </p>
         )}
       </Card>
@@ -168,7 +168,7 @@ export function ArPosting() {
               <h2 className="text-base font-semibold text-foreground">AR tie-out</h2>
               <p className="text-sm text-muted-foreground">
                 {cash
-                  ? 'Before anything posts, the app\'s tenant credits as of the day before the start date (cash received beyond charges, lease by lease) must equal the prepaid rent account in the opening balance, to the cent. Map prepaid rent and assign this LLC\'s properties first.'
+                  ? 'Before anything posts, the app\'s tenant credits as of the day before the start date (cash received beyond charges, lease by lease) must equal the prepaid rent account in the opening balance, and paid pre-start security deposits the deposits account, to the cent. Map prepaid rent and security deposits and assign this LLC\'s properties first.'
                   : 'Before anything posts, the app\'s open AR as of the day before the start date must equal the AR account in the opening balance, to the cent. Map the AR account and assign this LLC\'s properties first.'}
                 {' '}If it does not tie, the message gives both numbers; fix the difference in QuickBooks or the app and re-import the opening balance. Once confirmed, the opening balance can no longer be reversed.
               </p>

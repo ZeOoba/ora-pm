@@ -38,7 +38,19 @@ describe('migration 0029 — cash posting rules (textual pins)', () => {
     expect(sql).toMatch(/PERFORM 1 FROM gl_entities WHERE id = NEW\.entity_id FOR UPDATE;\s+NEW\.seq := pg_catalog\.nextval/)
     expect(sql).toMatch(/REVOKE UPDATE ON SEQUENCE gl_ar_cash_events_seq FROM service_role/)
     expect(sql).toMatch(/REVOKE TRIGGER, TRUNCATE, REFERENCES, UPDATE, DELETE ON gl_ar_cash_events, gl_ar_cash_entries FROM service_role/)
-    for (const m of sql.matchAll(/SET CONSTRAINTS ([^;]+);/g)) expect(m[1]).toMatch(/gl_ar_cash_events_verify, gl_ar_cash_entries_verify/)
+    for (const m of sql.matchAll(/SET CONSTRAINTS (gl_journal_entries_balanced[^;]+);/g)) expect(m[1]).toMatch(/gl_ar_cash_events_verify, gl_ar_cash_entries_verify/)
+  })
+
+  it('REFUTE-7: replay dates monotonic per lease; billing-order allocation; tie-outs re-verified at commit; cash roles fixed', () => {
+    expect(sql).toMatch(/CONSTRAINT gl_ar_cash_events_dates CHECK \(alloc_date >= event_date\)/)
+    expect(sql).toMatch(/ORDER BY live\.live, live\.due_date, gl_ar_cash_priority\(live\.type\), live\.id/)
+    has(/^CREATE CONSTRAINT TRIGGER gl_ar_tieouts_verify\s+AFTER INSERT ON gl_ar_tieouts\s+DEFERRABLE INITIALLY DEFERRED/)
+    has(/^CREATE TRIGGER gl_ar_tieout_items_stamp BEFORE INSERT ON gl_ar_tieout_items/)
+    expect(sql).toMatch(/fixed once the AR tie-out is confirmed for this cash-basis entity/)
+    expect(sql).toMatch(/deposits do not tie/)
+    // The tie-out leaves its commit-time check queued (SET ... IMMEDIATE would consume it).
+    const confirm = sql.slice(sql.indexOf('CREATE OR REPLACE FUNCTION gl_confirm_ar_tieout'))
+    expect(confirm.slice(0, confirm.indexOf('$$;'))).not.toMatch(/gl_ar_tieouts_verify IMMEDIATE/)
   })
 
   it('C3–C5: cash ahead of a live charge refused; tie-out for both bases; guards extended', () => {

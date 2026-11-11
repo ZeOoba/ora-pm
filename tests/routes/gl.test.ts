@@ -435,7 +435,9 @@ describe('AR posting (B8 slice 3)', () => {
     expect((await post(`${base}/run`, { through: '2026-10-31', apply: true, expected_plan_hash: d.plan_hash })).status).toBe(201)
     expect(mockRpc).toHaveBeenCalledWith('gl_post_ar_cash_batch', expect.objectContaining({ p_items: [{ kind: 'charge', source_id: 'c1' }, { kind: 'payment', source_id: 'p1' }] }))
     // Already in the replay: nothing more to post.
-    install({ basis: 'cash', events: [{ id: 'e1', entity_id: E, kind: 'charge', source_id: 'c1' }, { id: 'e2', entity_id: E, kind: 'payment', source_id: 'p1' }] })
+    install({ basis: 'cash', events: [
+      { id: 'e1', entity_id: E, kind: 'charge', source_id: 'c1', lease_id: L1, event_date: '2026-10-01', alloc_date: '2026-10-01' },
+      { id: 'e2', entity_id: E, kind: 'payment', source_id: 'p1', lease_id: L1, event_date: '2026-10-03', alloc_date: '2026-10-03' }] })
     expect((await preview()).items).toEqual([])
   })
 

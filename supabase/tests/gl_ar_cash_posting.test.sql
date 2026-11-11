@@ -161,14 +161,14 @@ INSERT INTO payments (id, lease_id, payment_date, amount, method, stripe_status)
 CREATE FUNCTION pg_temp.forge(p_date DATE, p_entry BOOLEAN) RETURNS void LANGUAGE plpgsql AS $$
 DECLARE v UUID; e UUID;
 BEGIN
-  INSERT INTO gl_ar_cash_events (entity_id, lease_id, kind, source_id, event_date, posted_by, seq)
-    VALUES ('a8000000-0000-4000-8000-000000000001', 'a8300000-0000-4000-8000-000000000002', 'payment', 'a8d00000-0000-4000-8000-000000000021', p_date, 'x', 1) RETURNING id INTO v;
+  INSERT INTO gl_ar_cash_events (entity_id, lease_id, kind, source_id, event_date, alloc_date, posted_by, seq)
+    VALUES ('a8000000-0000-4000-8000-000000000001', 'a8300000-0000-4000-8000-000000000002', 'payment', 'a8d00000-0000-4000-8000-000000000021', p_date, p_date, 'x', 1) RETURNING id INTO v;
   IF p_entry THEN  -- right amount, wrong split: all of it to rent
     INSERT INTO gl_journal_entries (entity_id, entry_date, memo, source, posted_by) VALUES ('a8000000-0000-4000-8000-000000000001', p_date, 'forged', 'ar_posting', 'x') RETURNING id INTO e;
     INSERT INTO gl_journal_lines (entry_id, entity_id, account_id, line_no, debit_cents, credit_cents) VALUES
       (e, 'a8000000-0000-4000-8000-000000000001', 'a8a00000-0000-4000-8000-000000000002', 1, 40000, 0),
       (e, 'a8000000-0000-4000-8000-000000000001', 'a8a00000-0000-4000-8000-000000000006', 2, 0, 40000);
-    INSERT INTO gl_ar_cash_entries (event_id, entity_id, entry_id) VALUES (v, 'a8000000-0000-4000-8000-000000000001', e);
+    INSERT INTO gl_ar_cash_entries (event_id, leg, entity_id, entry_id) VALUES (v, 'alloc', 'a8000000-0000-4000-8000-000000000001', e);
   END IF;
 END $$;
 CREATE FUNCTION pg_temp.extra_lines() RETURNS void LANGUAGE plpgsql AS $$
@@ -226,6 +226,119 @@ DO $$ BEGIN
     RAISE EXCEPTION 'a payment dated in a locked month should post on the first day of the next open month';
   END IF;
   RAISE NOTICE 'ok: locked-month cash posts on the first day of the next open month';
+END $$;
+
+-- ── REFUTE-7 regressions ─────────────────────────────────────────────────────────────────────
+-- Two more leases on the cash LLC (October is locked by now; everything here is in November).
+INSERT INTO leases (id, unit_id) VALUES
+  ('a8300000-0000-4000-8000-000000000003', 'a8200000-0000-4000-8000-000000000001'),
+  ('a8300000-0000-4000-8000-000000000004', 'a8200000-0000-4000-8000-000000000001');
+INSERT INTO charges (id, lease_id, charge_date, due_date, type, amount) VALUES
+  ('a8c00000-0000-4000-8000-000000000031', 'a8300000-0000-4000-8000-000000000003', '2026-11-05', '2026-11-05', 'rent', 1000.00);
+SELECT gl_post_ar_cash_batch('a8000000-0000-4000-8000-000000000001', '2026-11-06', '[{"kind":"charge","source_id":"a8c00000-0000-4000-8000-000000000031"}]', 'tester') AS n5 \gset
+-- H1 (payment): an ACH received 11-03 is entered after the 11-05 charge posted. Its cash posts on
+-- 11-03 into prepaid rent; it pays the rent on 11-05, not before (the same books one run would give).
+INSERT INTO payments (id, lease_id, payment_date, amount, method, stripe_status) VALUES
+  ('a8d00000-0000-4000-8000-000000000041', 'a8300000-0000-4000-8000-000000000003', '2026-11-03', 1000.00, 'ach_stripe', 'succeeded');
+SELECT gl_post_ar_cash_batch('a8000000-0000-4000-8000-000000000001', '2026-11-06', '[{"kind":"payment","source_id":"a8d00000-0000-4000-8000-000000000041"}]', 'tester') AS n6 \gset
+-- H1 (charge): lease 4 prepays 500 on 11-06; a charge dated 11-02 is entered afterwards: it takes
+-- the credit on 11-06, never income dated 11-02 with no cash yet.
+INSERT INTO payments (id, lease_id, payment_date, amount, method, stripe_status) VALUES
+  ('a8d00000-0000-4000-8000-000000000042', 'a8300000-0000-4000-8000-000000000004', '2026-11-06', 500.00, 'check', NULL);
+SELECT gl_post_ar_cash_batch('a8000000-0000-4000-8000-000000000001', '2026-11-06', '[{"kind":"payment","source_id":"a8d00000-0000-4000-8000-000000000042"}]', 'tester') AS n7 \gset
+INSERT INTO charges (id, lease_id, charge_date, due_date, type, amount) VALUES
+  ('a8c00000-0000-4000-8000-000000000042', 'a8300000-0000-4000-8000-000000000004', '2026-11-02', '2026-11-02', 'rent', 500.00);
+SELECT gl_post_ar_cash_batch('a8000000-0000-4000-8000-000000000001', '2026-11-06', '[{"kind":"charge","source_id":"a8c00000-0000-4000-8000-000000000042"}]', 'tester') AS n8 \gset
+-- M5 (ratified: billing order): a deposit billed 11-07 with an OLD due date (10-01) does not take the
+-- rent lease 3 already paid; a later 300 check pays it.
+INSERT INTO charges (id, lease_id, charge_date, due_date, type, amount) VALUES
+  ('a8c00000-0000-4000-8000-000000000033', 'a8300000-0000-4000-8000-000000000003', '2026-11-07', '2026-10-01', 'security_deposit', 300.00);
+INSERT INTO payments (id, lease_id, payment_date, amount, method, stripe_status) VALUES
+  ('a8d00000-0000-4000-8000-000000000043', 'a8300000-0000-4000-8000-000000000003', '2026-11-09', 300.00, 'check', NULL);
+SELECT gl_post_ar_cash_batch('a8000000-0000-4000-8000-000000000001', '2026-11-10',
+  '[{"kind":"charge","source_id":"a8c00000-0000-4000-8000-000000000033"},{"kind":"payment","source_id":"a8d00000-0000-4000-8000-000000000043"}]', 'tester') AS n9 \gset
+DO $$
+DECLARE r RECORD; d BIGINT;
+BEGIN
+  SELECT e.event_date, e.alloc_date,
+         (SELECT j.entry_date FROM gl_ar_cash_entries x JOIN gl_journal_entries j ON j.id = x.entry_id WHERE x.event_id = e.id AND x.leg = 'cash') AS cash_on,
+         (SELECT j.entry_date FROM gl_ar_cash_entries x JOIN gl_journal_entries j ON j.id = x.entry_id WHERE x.event_id = e.id AND x.leg = 'alloc') AS alloc_on
+    INTO r FROM gl_ar_cash_events e WHERE e.kind = 'payment' AND e.source_id = 'a8d00000-0000-4000-8000-000000000041';
+  IF r.event_date <> '2026-11-03' OR r.alloc_date <> '2026-11-05' OR r.cash_on <> '2026-11-03' OR r.alloc_on <> '2026-11-05' THEN
+    RAISE EXCEPTION 'backdated payment: cash % / applied %', r.cash_on, r.alloc_on;
+  END IF;
+  -- Nothing of lease 3's rent is income before 11-05.
+  SELECT coalesce(sum(l.credit_cents - l.debit_cents), 0) INTO d FROM gl_journal_lines l JOIN gl_journal_entries j ON j.id = l.entry_id
+    JOIN gl_ar_cash_entries x ON x.entry_id = j.id JOIN gl_ar_cash_events e ON e.id = x.event_id
+   WHERE e.lease_id = 'a8300000-0000-4000-8000-000000000003' AND l.account_id = 'a8a00000-0000-4000-8000-000000000006' AND j.entry_date < '2026-11-05';
+  IF d <> 0 THEN RAISE EXCEPTION 'rent recognized before it was billed: %', d; END IF;
+  IF (SELECT alloc_date FROM gl_ar_cash_events WHERE kind = 'charge' AND source_id = 'a8c00000-0000-4000-8000-000000000042') <> '2026-11-06'
+     OR (SELECT count(*) FROM gl_ar_cash_entries x JOIN gl_journal_entries j ON j.id = x.entry_id JOIN gl_ar_cash_events e ON e.id = x.event_id
+          WHERE e.source_id = 'a8c00000-0000-4000-8000-000000000042' AND j.entry_date = '2026-11-06') <> 1 THEN
+    RAISE EXCEPTION 'a backdated charge should take the credit on the replay date';
+  END IF;
+  -- Billing order: the late deposit posted no entry; the check went to the deposit, rent untouched.
+  IF EXISTS (SELECT 1 FROM gl_ar_cash_entries x JOIN gl_ar_cash_events e ON e.id = x.event_id WHERE e.source_id = 'a8c00000-0000-4000-8000-000000000033') THEN
+    RAISE EXCEPTION 'a late-billed charge must not take cash already applied';
+  END IF;
+  IF (SELECT sum(cents) FROM gl_ar_cash_alloc('a8300000-0000-4000-8000-000000000003', 9223372036854775807) WHERE role = 'security_deposit') <> 30000
+     OR (SELECT sum(cents) FROM gl_ar_cash_alloc('a8300000-0000-4000-8000-000000000003', 9223372036854775807) WHERE role = 'rent') <> 100000 THEN
+    RAISE EXCEPTION 'lease 3 allocation';
+  END IF;
+  -- M4: every role is fixed on a cash-basis LLC once tied out.
+  PERFORM pg_temp.expect_error($q$UPDATE gl_ar_accounts SET account_id = 'a8a00000-0000-4000-8000-000000000007' WHERE entity_id = 'a8000000-0000-4000-8000-000000000001' AND role = 'rent'$q$, 'fixed once the AR tie-out is confirmed for this cash-basis entity');
+  PERFORM pg_temp.expect_error($q$DELETE FROM gl_ar_accounts WHERE entity_id = 'a8000000-0000-4000-8000-000000000001' AND role = 'late_fee'$q$, 'fixed once the AR tie-out is confirmed for this cash-basis entity');
+  -- L: received ACH cash cannot be "canceled".
+  PERFORM pg_temp.expect_error($q$UPDATE payments SET stripe_status = 'canceled' WHERE id = 'a8d00000-0000-4000-8000-000000000041'$q$, 'not be canceled');
+  -- H3: tie-out items and rows cannot be forged.
+  PERFORM pg_temp.expect_error($q$INSERT INTO gl_ar_tieout_items (entity_id, kind, source_id, cents, counted) VALUES ('a8000000-0000-4000-8000-000000000001', 'payment', 'a8d00000-0000-4000-8000-000000000043', 30000, true)$q$, 'written only with their tie-out');
+  RAISE NOTICE 'ok: REFUTE-7 H1 backdated cash and charges replay forward; M5 billing order; M4 roles fixed; canceled refused; H3 items unforgeable';
+END $$;
+
+-- Deposit gate and tie-out integrity on a second cash LLC: lease 9 paid a 300 deposit in September.
+INSERT INTO gl_entities (id, name, accounting_basis) VALUES ('a8000000-0000-4000-8000-000000000002', 'Cash Two LLC', 'cash');
+INSERT INTO properties (id, name, gl_entity_id) VALUES ('a8100000-0000-4000-8000-000000000002', 'Lee''s Summit Flex', 'a8000000-0000-4000-8000-000000000002');
+INSERT INTO units (id, property_id, suite) VALUES ('a8200000-0000-4000-8000-000000000002', 'a8100000-0000-4000-8000-000000000002', 'B');
+INSERT INTO leases (id, unit_id) VALUES ('a8300000-0000-4000-8000-000000000009', 'a8200000-0000-4000-8000-000000000002');
+INSERT INTO gl_accounts (id, entity_id, number, qb_name, account_type) VALUES
+  ('a8b00000-0000-4000-8000-000000000001', 'a8000000-0000-4000-8000-000000000002', '1000', 'Operating Cash', 'asset'),
+  ('a8b00000-0000-4000-8000-000000000002', 'a8000000-0000-4000-8000-000000000002', '1499', 'Undeposited Funds', 'asset'),
+  ('a8b00000-0000-4000-8000-000000000003', 'a8000000-0000-4000-8000-000000000002', '2200', 'Security Deposits Held', 'liability'),
+  ('a8b00000-0000-4000-8000-000000000004', 'a8000000-0000-4000-8000-000000000002', '2300', 'Prepaid Rent', 'liability'),
+  ('a8b00000-0000-4000-8000-000000000005', 'a8000000-0000-4000-8000-000000000002', '3000', 'Members'' Equity', 'equity');
+INSERT INTO gl_ar_accounts (entity_id, role, account_id, updated_by) VALUES
+  ('a8000000-0000-4000-8000-000000000002', 'undeposited_funds', 'a8b00000-0000-4000-8000-000000000002', 'tester'),
+  ('a8000000-0000-4000-8000-000000000002', 'prepaid_rent', 'a8b00000-0000-4000-8000-000000000004', 'tester'),
+  ('a8000000-0000-4000-8000-000000000002', 'security_deposit', 'a8b00000-0000-4000-8000-000000000003', 'tester');
+INSERT INTO charges (id, lease_id, charge_date, due_date, type, amount) VALUES
+  ('a8c00000-0000-4000-8000-000000000091', 'a8300000-0000-4000-8000-000000000009', '2026-09-01', '2026-09-01', 'security_deposit', 300.00);
+INSERT INTO payments (id, lease_id, payment_date, amount, method, stripe_status) VALUES
+  ('a8d00000-0000-4000-8000-000000000091', 'a8300000-0000-4000-8000-000000000009', '2026-09-02', 300.00, 'check', NULL);
+CREATE FUNCTION pg_temp.race() RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+  PERFORM gl_confirm_ar_tieout('a8000000-0000-4000-8000-000000000002', 'tester');
+  INSERT INTO payments (id, lease_id, payment_date, amount, method, stripe_status) VALUES
+    ('a8d00000-0000-4000-8000-000000000092', 'a8300000-0000-4000-8000-000000000009', '2026-09-20', 700.00, 'check', NULL);
+END $$;
+DO $$ BEGIN
+  PERFORM gl_post_opening_balance('a8000000-0000-4000-8000-000000000002', '2026-10-01',
+    '[{"account_id":"a8b00000-0000-4000-8000-000000000001","debit_cents":100000},{"account_id":"a8b00000-0000-4000-8000-000000000005","credit_cents":100000}]', 'tester');
+  SET CONSTRAINTS ALL IMMEDIATE;
+  PERFORM pg_temp.expect_error($q$SELECT gl_confirm_ar_tieout('a8000000-0000-4000-8000-000000000002', 't')$q$,
+    'deposits do not tie: the app shows 30000 cents of paid security deposits as of 2026-09-30, the ledger''s security deposits account 0 cents');
+  PERFORM gl_reverse_entry((SELECT id FROM gl_journal_entries WHERE entity_id = 'a8000000-0000-4000-8000-000000000002' AND source = 'opening_balance'), '2026-09-30', 'deposits missing', 'tester');
+  PERFORM gl_post_opening_balance('a8000000-0000-4000-8000-000000000002', '2026-10-01',
+    '[{"account_id":"a8b00000-0000-4000-8000-000000000001","debit_cents":130000},{"account_id":"a8b00000-0000-4000-8000-000000000003","credit_cents":30000},{"account_id":"a8b00000-0000-4000-8000-000000000005","credit_cents":100000}]', 'tester');
+  SET CONSTRAINTS ALL IMMEDIATE;
+  -- H2: a pre-start item that lands after the snapshot in the same transaction fails the commit check.
+  PERFORM pg_temp.expect_error('SELECT pg_temp.race()', 'snapshot does not match');
+  -- H3: a tie-out row written directly (no snapshot, wrong opening entry) is refused at commit.
+  PERFORM pg_temp.expect_error($q$INSERT INTO gl_ar_tieouts (entity_id, as_of, app_ar_cents, gl_ar_cents, opening_entry_id, confirmed_by)
+    SELECT 'a8000000-0000-4000-8000-000000000002', '2026-09-30', 0, 0, id, 'x' FROM gl_journal_entries WHERE entity_id = 'a8000000-0000-4000-8000-000000000002' AND source = 'reversal'$q$,
+    'live opening balance|snapshot does not match');
+  IF gl_confirm_ar_tieout('a8000000-0000-4000-8000-000000000002', 'tester') <> 0 THEN RAISE EXCEPTION 'cash LLC 2 credits'; END IF;
+  SET CONSTRAINTS ALL IMMEDIATE;
+  RAISE NOTICE 'ok: REFUTE-7 deposit gate ties paid pre-start deposits; H2 race and H3 forged tie-outs refused at commit';
 END $$;
 
 -- Access.

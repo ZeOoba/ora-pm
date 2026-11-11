@@ -27,15 +27,24 @@ const base = (over: Partial<CashPlanInput>): CashPlanInput => ({
 })
 const kinds = (p: ReturnType<typeof planCashArRun>) => p.items.map((i) => [i.kind, i.source_id, i.date])
 
-describe('allocateCash (oldest due date first; deposit, rent … late fees last on one date)', () => {
+describe('allocateCash (billing order; oldest due date, then deposit, rent … late fees last)', () => {
   it('fills oldest first, then same-date by ratified priority, rest is credit', () => {
+    const live = '2026-10-01'
     const charges = [
-      { id: 'b', type: 'rent', due_date: '2026-10-01', cents: 50000 }, { id: 'a', type: 'security_deposit', due_date: '2026-10-01', cents: 30000 },
-      { id: 'z', type: 'late_fee', due_date: '2026-10-01', cents: 5000 }, { id: 's', type: 'rent', due_date: '2026-09-01', cents: 50000 },
+      { id: 'b', type: 'rent', due_date: '2026-10-01', live, cents: 50000 }, { id: 'a', type: 'security_deposit', due_date: '2026-10-01', live, cents: 30000 },
+      { id: 'z', type: 'late_fee', due_date: '2026-10-01', live, cents: 5000 }, { id: 's', type: 'rent', due_date: '2026-09-01', live, cents: 50000 },
     ]
     expect(Object.fromEntries(allocateCash(110000, charges))).toEqual({ rent: 80000, security_deposit: 30000 })
     expect(Object.fromEntries(allocateCash(140000, charges))).toEqual({ rent: 100000, security_deposit: 30000, late_fee: 5000, prepaid_rent: 5000 })
     expect(allocateCash(0, charges).size).toBe(0)
+  })
+  it('REFUTE-7 M5: a charge billed later never takes cash ahead of earlier-billed ones, whatever its due date', () => {
+    const charges = [
+      { id: 'r', type: 'rent', due_date: '2026-11-05', live: '2026-11-05', cents: 100000 },
+      { id: 'd', type: 'security_deposit', due_date: '2026-10-01', live: '2026-11-07', cents: 30000 },
+    ]
+    expect(Object.fromEntries(allocateCash(100000, charges))).toEqual({ rent: 100000 })
+    expect(Object.fromEntries(allocateCash(130000, charges))).toEqual({ rent: 100000, security_deposit: 30000 })
   })
 })
 
@@ -52,9 +61,10 @@ describe('planCashArRun', () => {
   })
 
   it('a paid charge voided, and an ACH returned: cash moves on, credit absorbs the rest (matches the database)', () => {
+    const ev = (kind: 'charge' | 'payment', id: string, lease: string, date: string) => ({ kind, source_id: id, lease_id: lease, event_date: date, alloc_date: date })
     const done: CashPlanInput['events'] = [
-      ...['c11', 'c12', 'c21', 'c22'].map((id) => ({ kind: 'charge' as const, source_id: id })),
-      ...['p02', 'p11'].map((id) => ({ kind: 'payment' as const, source_id: id })),
+      ev('charge', 'c11', L1, '2026-10-01'), ev('charge', 'c12', L1, '2026-10-06'), ev('charge', 'c21', L2, '2026-10-01'), ev('charge', 'c22', L2, '2026-10-01'),
+      ev('payment', 'p02', L1, '2026-10-01'), ev('payment', 'p11', L1, '2026-10-10'),
     ]
     const p = planCashArRun(base({
       through: '2026-11-11', events: done,
@@ -96,5 +106,27 @@ describe('planCashArRun', () => {
   it('non-cent amounts block only items that would enter', () => {
     expect(planCashArRun(base({ charges: [SEP_RENT_1, SEP_RENT_2, ch('f', L1, '2026-10-03', 'rent', 10.005)], payments: [] })).errors[0]).toMatch(/not a whole number of cents/)
     expect(planCashArRun(base({ charges: [SEP_RENT_1, SEP_RENT_2, ch('f', L1, '2026-11-03', 'rent', 10.005)], payments: [] })).errors).toEqual([])
+  })
+
+  it("REFUTE-7 H1: a backdated payment keeps its cash date but replays after the lease's last event (matches the database)", () => {
+    const L3 = 'lease-3'
+    const p = planCashArRun(base({
+      through: '2026-11-06', tieoutItems: [], charges: [ch('c31', L3, '2026-11-05', 'rent', 1000)],
+      payments: [pay('p41', L3, '2026-11-03', 1000, 'ach_stripe', 'succeeded', '2026-11-11T15:00:00Z')],
+      events: [{ kind: 'charge', source_id: 'c31', lease_id: L3, event_date: '2026-11-05', alloc_date: '2026-11-05' }],
+    }))
+    expect(p.items.map((i) => [i.kind, i.source_id, i.date, i.alloc_date])).toEqual([['payment', 'p41', '2026-11-03', '2026-11-05']])
+    expect(p.by_role).toEqual({ undeposited_funds: 100000, rent: -100000 })
+  })
+
+  it("REFUTE-7 H1: a backdated charge replays on the lease's last date; its void follows from there; a through date before it waits", () => {
+    const L4 = 'lease-4'
+    const events = [{ kind: 'payment' as const, source_id: 'p42', lease_id: L4, event_date: '2026-11-06', alloc_date: '2026-11-06' }]
+    const p = planCashArRun(base({
+      through: '2026-11-08', tieoutItems: [], charges: [ch('c42', L4, '2026-11-02', 'rent', 500, '2026-11-04T15:00:00Z')],
+      payments: [pay('p42', L4, '2026-11-06', 500)], events,
+    }))
+    expect(p.items.map((i) => [i.kind, i.date, i.alloc_date])).toEqual([['charge', '2026-11-02', '2026-11-06'], ['charge_void', '2026-11-06', '2026-11-06']])
+    expect(planCashArRun(base({ through: '2026-11-05', tieoutItems: [], charges: [ch('c42', L4, '2026-11-02', 'rent', 500)], payments: [pay('p42', L4, '2026-11-06', 500)], events })).items).toEqual([])
   })
 })

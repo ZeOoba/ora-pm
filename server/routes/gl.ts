@@ -300,8 +300,8 @@ async function loadArState(db: Db, entityId: string) {
     return q.order('id').limit(POSTGREST_MAX_ROWS)
   }, (r) => r.id)
   if (postings.error) return { error: postings.error }
-  const events = await fetchAllPages<{ id: string; kind: CashKind; source_id: string }>((after) => {
-    let q = db.from('gl_ar_cash_events').select('id, kind, source_id').eq('entity_id', entityId)
+  const events = await fetchAllPages<{ id: string; kind: CashKind; source_id: string; lease_id: string; event_date: string; alloc_date: string }>((after) => {
+    let q = db.from('gl_ar_cash_events').select('id, kind, source_id, lease_id, event_date, alloc_date').eq('entity_id', entityId)
     if (after !== null) q = q.gt('id', after)
     return q.order('id').limit(POSTGREST_MAX_ROWS)
   }, (r) => r.id)
@@ -330,8 +330,8 @@ async function loadArState(db: Db, entityId: string) {
   }
 }
 
-async function arPlanHash(entityId: string, through: string, items: { kind: string; source_id: string; date: string; cents: number }[]): Promise<string> {
-  const canonical = JSON.stringify([entityId, through, items.map((i) => [i.kind, i.source_id, i.date, i.cents])])
+async function arPlanHash(entityId: string, through: string, items: { kind: string; source_id: string; date: string; cents: number; alloc_date?: string }[]): Promise<string> {
+  const canonical = JSON.stringify([entityId, through, items.map((i) => [i.kind, i.source_id, i.date, i.alloc_date ?? null, i.cents])])
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(canonical))
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')
 }
