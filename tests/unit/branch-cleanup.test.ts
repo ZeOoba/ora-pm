@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
-// @ts-expect-error -- plain ESM script, no type declarations
 import { planCleanup, STALE_DAYS } from '../../scripts/branch-cleanup.mjs'
 
 const REPO = 'acme/app'
