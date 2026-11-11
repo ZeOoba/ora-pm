@@ -24,7 +24,7 @@ const PROP = '11111111-1111-4111-8111-111111111111'
 const OTHER_PROP = '22222222-2222-4222-8222-222222222222'
 let seq = 0
 const expense = (over: Row = {}): Row => ({
-  id: `e_${String(seq++).padStart(7, '0')}`, property_id: PROP, expense_date: '2025-06-15', amount: 10, recoverable: true, ...over,
+  id: `e_${String(seq++).padStart(7, '0')}`, property_id: PROP, expense_date: '2025-06-15', amount: 10, recoverable: true, category: 'maintenance', ...over,
 })
 function install(rows: Row[], opts: Parameters<typeof pgTable>[1] = {}) {
   const t = pgTable(rows, opts)
@@ -43,7 +43,7 @@ describe('GET /api/cam/recoverable-expenses', () => {
 
     const res = await get(`property_id=${PROP}&year=2025`)
     expect(res.status).toBe(200)
-    expect((await res.json() as Body).data).toEqual({ total: (PG_MAX_ROWS + 1) * 10, count: PG_MAX_ROWS + 1 })
+    expect((await res.json() as Body).data).toEqual({ total: (PG_MAX_ROWS + 1) * 10, count: PG_MAX_ROWS + 1, by_category: { taxes: 0, insurance: 0, maintenance: (PG_MAX_ROWS + 1) * 10, utilities: 0, management: 0, capital: 0, other: 0 } })
     expect(t.pages).toHaveLength(2)
     for (const page of t.pages) {
       expect(page.find(c => c.method === 'order')?.args[0]).toBe('id')
@@ -64,7 +64,7 @@ describe('GET /api/cam/recoverable-expenses', () => {
     ])
 
     const body = await (await get(`property_id=${PROP}&year=2025`)).json() as Body
-    expect(body.data).toEqual({ total: 3, count: 2 })
+    expect(body.data).toEqual({ total: 3, count: 2, by_category: { taxes: 0, insurance: 0, maintenance: 3, utilities: 0, management: 0, capital: 0, other: 0 } })
   })
 
   it('rounds the float sum to cents', async () => {
@@ -74,7 +74,7 @@ describe('GET /api/cam/recoverable-expenses', () => {
 
   it('returns { total: 0, count: 0 } for a property/year with no recoverable expenses', async () => {
     install([])
-    expect((await (await get(`property_id=${PROP}&year=2025`)).json() as Body).data).toEqual({ total: 0, count: 0 })
+    expect((await (await get(`property_id=${PROP}&year=2025`)).json() as Body).data).toEqual({ total: 0, count: 0, by_category: { taxes: 0, insurance: 0, maintenance: 0, utilities: 0, management: 0, capital: 0, other: 0 } })
   })
 
   it('returns 500 with a generic message and NO total when the read fails', async () => {
