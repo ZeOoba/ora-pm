@@ -1,4 +1,4 @@
-// B8 slice 3: Books › AR posting (accrual-basis LLCs). Per LLC: which properties belong to it,
+// B8 slices 3–4: Books › AR posting (accrual- and cash-basis LLCs). Per LLC: which properties belong to it,
 // which chart account each AR role posts to, the one-time AR tie-out against the opening balance,
 // and "post through <date>" runs with a preview. The server plans the run and the database builds
 // and verifies every entry; this page shows the plan and the result.
@@ -12,7 +12,7 @@ import { Button } from '../../components/ui/Button'
 import { DataTable } from '../../components/data-table/DataTable'
 import { dataTableColumnHelper } from '../../components/data-table/columns'
 import { dollars } from './opening-balance-helpers'
-import { AR_ROLE_LABELS, KIND_LABELS, centralToday, signedDollars } from './ar-posting-helpers'
+import { AR_ROLE_LABELS, KIND_LABELS, centralToday, rolesForBasis, signedDollars } from './ar-posting-helpers'
 import type { GlAccount, GlEntity } from './ChartOfAccounts'
 
 type ArSetup = {
@@ -68,7 +68,7 @@ export function ArPosting() {
   const refresh = () => void qc.invalidateQueries({ queryKey: ['gl', 'ar', entityId] })
 
   const s = setup.data?.data
-  const accrual = s?.accounting_basis === 'accrual'
+  const cash = s?.accounting_basis === 'cash'
   const roleMap = new Map((s?.roles ?? []).map((r) => [r.role, r.account_id]))
   const accounts = chart.data?.data ?? []
 
@@ -116,15 +116,17 @@ export function ArPosting() {
         {s && (
           <p className="text-sm text-muted-foreground">
             Ledger start date: {s.ledger_start_date ?? 'not set'}
-            {s.tieout ? ` · AR tied out at ${dollars(Number(s.tieout.app_ar_cents))} as of ${s.tieout.as_of}` : ' · AR not tied out yet'}
+            {s.tieout ? ` · ${cash ? 'tenant credits' : 'AR'} tied out at ${dollars(Number(s.tieout.app_ar_cents))} as of ${s.tieout.as_of}` : ' · AR not tied out yet'}
           </p>
         )}
-        {s && !accrual && (
-          <p className="text-sm text-status-danger">AR posting for cash-basis LLCs is not available yet. This LLC keeps its AR in QuickBooks for now.</p>
+        {s && cash && (
+          <p className="text-sm text-muted-foreground">
+            Cash basis: a charge is income only as cash pays it. Cash pays charges in the order they were billed, oldest due date first within a billing date (deposit, rent, CAM, utilities, other, late fees last); cash beyond that is a tenant credit in prepaid rent.
+          </p>
         )}
       </Card>
 
-      {s && accrual && (
+      {s && (
         <>
           <Card className="space-y-3 p-6">
             <h2 className="text-base font-semibold text-foreground">Properties</h2>
@@ -145,7 +147,7 @@ export function ArPosting() {
             <h2 className="text-base font-semibold text-foreground">Accounts</h2>
             <p className="text-sm text-muted-foreground">The chart account each kind of AR activity posts to. AR and undeposited funds are fixed once anything has posted.</p>
             <div className="grid gap-3 sm:grid-cols-2">
-              {AR_ROLE_LABELS.map(({ role, label, type }) => (
+              {rolesForBasis(s.accounting_basis).map(({ role, label, type }) => (
                 <div key={role}>
                   <label className="block text-xs text-muted-foreground" htmlFor={`ar-role-${role}`}>{label} ({type})</label>
                   <select id={`ar-role-${role}`} value={roleMap.get(role) ?? ''} disabled={saveRole.isPending}
@@ -165,8 +167,10 @@ export function ArPosting() {
             <Card className="space-y-3 p-6">
               <h2 className="text-base font-semibold text-foreground">AR tie-out</h2>
               <p className="text-sm text-muted-foreground">
-                Before anything posts, the app's open AR as of the day before the start date must equal the AR account in the opening balance, to the cent.
-                Map the AR account and assign this LLC's properties first. If it does not tie, the message gives both numbers; fix the difference in QuickBooks or the app and re-import the opening balance.
+                {cash
+                  ? 'Before anything posts, the app\'s tenant credits as of the day before the start date (cash received beyond charges, lease by lease) must equal the prepaid rent account in the opening balance, and paid pre-start security deposits the deposits account, to the cent. Map prepaid rent and security deposits and assign this LLC\'s properties first.'
+                  : 'Before anything posts, the app\'s open AR as of the day before the start date must equal the AR account in the opening balance, to the cent. Map the AR account and assign this LLC\'s properties first.'}
+                {' '}If it does not tie, the message gives both numbers; fix the difference in QuickBooks or the app and re-import the opening balance. Once confirmed, the opening balance can no longer be reversed.
               </p>
               {tieArmed ? (
                 <div className="flex items-center gap-2">
@@ -175,7 +179,7 @@ export function ArPosting() {
                   <Button variant="ghost" onClick={() => setTieArmed(false)}>Cancel</Button>
                 </div>
               ) : (
-                <Button variant="ghost" onClick={() => setTieArmed(true)} disabled={!s.ledger_start_date || !roleMap.get('ar')}>Check and confirm tie-out…</Button>
+                <Button variant="ghost" onClick={() => setTieArmed(true)} disabled={!s.ledger_start_date || !roleMap.get(cash ? 'prepaid_rent' : 'ar')}>Check and confirm tie-out…</Button>
               )}
             </Card>
           )}
