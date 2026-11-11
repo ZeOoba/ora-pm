@@ -1,22 +1,22 @@
-// B8 slice 2 (supabase/migrations/0026_gl_opening_balance.sql). The start-date CHECK runs on the
+// B8 slice 2 (supabase/migrations/0027_gl_opening_balance.sql). The start-date CHECK runs on the
 // real migration chain in pg-mem; the triggers and functions that carry rules O2–O6 are pinned
 // textually here and exercised on real Postgres by supabase/tests/gl_opening_balance.test.sql.
 import { describe, it, expect, beforeEach } from 'vitest'
 import { freshMigratedDb, migrationFiles, readMigration, splitSqlStatements, statementBody, type MigratedDb } from '../fixtures/pg-migrations'
 import { migrationTouchesFinancialTables } from '../../scripts/check-refute-required'
 
-const FILE = '0026_gl_opening_balance.sql'
+const FILE = '0027_gl_opening_balance.sql'
 const E1 = '00000000-0000-4000-8000-0000000000e1'
 
-describe('migration 0026 — ledger start date', () => {
+describe('migration 0027 — ledger start date', () => {
   let db: MigratedDb
   beforeEach(() => {
     db = freshMigratedDb()
     db.none(`INSERT INTO gl_entities (id, name, accounting_basis) VALUES ('${E1}', 'Raytown Flex Holdings LLC', 'accrual')`)
   })
 
-  it('ships as the only 0026 migration', () => {
-    expect(migrationFiles().filter((f) => f.startsWith('0026_'))).toEqual([FILE])
+  it('ships as the only 0027 migration', () => {
+    expect(migrationFiles().filter((f) => f.startsWith('0027_'))).toEqual([FILE])
   })
 
   it('start date: first of a month, 2000–2100, or NULL', () => {
@@ -27,7 +27,7 @@ describe('migration 0026 — ledger start date', () => {
   })
 })
 
-describe('migration 0026 — opening-balance rules (textual pins)', () => {
+describe('migration 0027 — opening-balance rules (textual pins)', () => {
   const sql = readMigration(FILE)
   const body = splitSqlStatements(sql).map(statementBody)
   const has = (re: RegExp) => expect(body.some((s) => re.test(s)), String(re)).toBe(true)

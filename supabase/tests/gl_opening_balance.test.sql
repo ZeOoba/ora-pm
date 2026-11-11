@@ -1,4 +1,4 @@
--- Real-Postgres tests for 0026_gl_opening_balance.sql (B8 slice 2). Own session, own fixtures
+-- Real-Postgres tests for 0027_gl_opening_balance.sql (B8 slice 2). Own session, own fixtures
 -- (scripts/verify-gl-sql.sh). Rules O1–O6 are described in the migration header. Every block
 -- raises on failure; a clean run prints only NOTICE lines.
 

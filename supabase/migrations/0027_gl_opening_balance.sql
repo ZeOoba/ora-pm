@@ -1,4 +1,4 @@
--- 0026: B8 slice 2 — opening balances and each LLC's ledger start date.
+-- 0027: B8 slice 2 — opening balances and each LLC's ledger start date.
 --
 -- Ratified 2026-11-10: the native ledger starts on a per-LLC ledger_start_date (Jan 1, 2027 for
 -- the parallel run), and each LLC's opening position is its QuickBooks trial balance as of the
@@ -21,7 +21,7 @@
 --   committed opening balance or entry), and serialize on the entity row (FOR UPDATE).
 --
 -- ORDERING: requires 0023 (replaces 0023's gl_assert_line_insert to add O6; nothing else of 0023
--- changes). Independent of 0024/0025. Re-runnable (IF NOT EXISTS, DROP ... IF EXISTS + ADD,
+-- changes). Independent of 0024–0026. Re-runnable (IF NOT EXISTS, DROP ... IF EXISTS + ADD,
 -- CREATE OR REPLACE, DROP TRIGGER IF EXISTS). Every function pins search_path = public, pg_temp
 -- and names pg_catalog functions it could otherwise resolve by overload (REFUTE passes 3–5).
 

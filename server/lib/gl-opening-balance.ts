@@ -6,7 +6,7 @@
 // Nothing here talks to the database. planOpeningBalance matches each row to the LLC's ledger
 // chart (imported from QB in slice 1) and returns the exact lines gl_post_opening_balance would
 // post, or the reasons it must not. The database re-checks balance, accounts, dates and the
-// one-live-opening-balance rule (migration 0026).
+// one-live-opening-balance rule (migration 0027).
 import { MAX_LINE_CENTS, parseCents } from './gl'
 
 export const MAX_TB_CHARS = 2_000_000
