@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import type { Env } from '../index'
 import { parseTerms, containsConfidentialTerm } from '../lib/confidentiality'
 import { extractLease } from '../lib/lease-extract'
+import { BILLING_PATH, extractAbstract, ExtractionStopped, type AbstractFlag, type AbstractResult, type Confirmation } from '../lib/lease-abstract'
 import { inspectPdf, pagesLackingTextLayer, MIN_PAGE_TEXT_CHARS, type PdfInspection } from '../lib/pdf-extract'
 import { checkRateLimit } from '../lib/rate-limit'
 import { ANTHROPIC_MODEL } from '../lib/models'
@@ -47,9 +48,15 @@ intakeRouter.post('/lease', async (c) => {
     return c.json({ error: `Too many lease-intake requests — retry in ${Math.ceil(retryAfterMs / 1000)}s` }, 429)
   }
 
-  const { filename, pdfBase64, tenant_id, unit_id } = await c.req.json().catch(() => ({}))
+  const { filename, pdfBase64, tenant_id, unit_id, mode } = await c.req.json().catch(() => ({}))
   if (!filename || !pdfBase64 || !tenant_id || !unit_id) {
     return c.json({ error: 'filename, pdfBase64, tenant_id, unit_id are required' }, 400)
+  }
+  // 'abstract' = lease abstraction v2 (server/lib/lease-abstract.ts): the full abstract with citations
+  // and cross-check flags. Absent = the original 9-field extraction, unchanged. Every guard below runs
+  // identically for both modes; only the extractor and the post-egress scrub differ.
+  if (mode !== undefined && mode !== 'abstract') {
+    return c.json({ error: "mode must be 'abstract' or omitted" }, 400)
   }
 
   // OI-044 tightening: tenant_id/unit_id were previously only checked for
@@ -147,6 +154,46 @@ intakeRouter.post('/lease', async (c) => {
   }
   const scanned = inspection!
 
+  if (mode === 'abstract') {
+    let abs: AbstractResult
+    try {
+      // Scanned text only — never pdfBase64 (see the REFUTE C1b comment above).
+      abs = await extractAbstract(scanned.pages, { apiKey: c.env.ANTHROPIC_API_KEY, model: resolveModel(c.env.INTAKE_MODEL) })
+    } catch (e) {
+      const msg = e instanceof ExtractionStopped && e.reason === 'max_tokens'
+        ? 'The lease was too long to abstract in one pass. Enter it manually.'
+        : 'Lease abstraction failed. Enter the lease manually.'
+      return c.json({ error: msg }, 502)
+    }
+    const warnings = [...abs.warnings]
+    const notSent = describeNotSent(scanned)
+    if (notSent) {
+      warnings.push(`Only the document's extracted text was sent for extraction; ${notSent} were not. Check the extracted fields against the document.`)
+    }
+    // Post-egress defense, deep: every string anywhere in the abstract (values, quotes, summaries,
+    // reasons, descriptions) is checked; a hit nulls that string and is reported by path.
+    const scrubbed: string[] = []
+    const abstract = scrubConfidential(abs.abstract, terms, '', scrubbed)
+    // Flag MESSAGES are scrubbed (they echo amounts, dates and figures from the lease). Only the message:
+    // severity and path are fixed server values, and scrubbing them let a term like "lock" null the
+    // severity of every block flag, which fails open (merge gate R2-08).
+    const flags: AbstractFlag[] = abs.flags.map((f, i) => ({
+      ...f,
+      message: scrubConfidential(f.message, terms, `flags[${i}].message`, scrubbed) ?? 'Withheld by the confidentiality guard.',
+    }))
+    const confirmations = scrubConfirmations(abs.confirmations, terms, scrubbed, flags)
+    // A withheld value on a billing path leaves a hole the earlier checks never saw, so it blocks
+    // approval until re-entered by hand.
+    for (const w of scrubbed) {
+      const path = /^"([^"]+)"/.exec(w)?.[1] ?? ''
+      // Same list as the citation-block rule (lease-abstract.ts BILLING_PATH), never a hand copy.
+      if (BILLING_PATH.test(path)) {
+        flags.push({ severity: 'block', path, message: 'A billing value was withheld by the confidentiality guard; enter it manually.' })
+      }
+    }
+    return c.json({ abstract, flags, confirmations, warnings: [...warnings, ...scrubbed] })
+  }
+
   let result
   try {
     const model = resolveModel(c.env.INTAKE_MODEL)
@@ -172,6 +219,51 @@ intakeRouter.post('/lease', async (c) => {
   }
   return c.json({ fields, confidence: result.confidence, warnings })
 })
+
+/**
+ * Phase 4 confirmation list scrub. Every field is scrubbed EXCEPT the three fixed labels: path (a schema
+ * path), period and charge (closed enums or server labels such as "date"). Nulling a label, as a term
+ * like "schedule" did to path (merge gate R3-06), would orphan the entry; every other field, page and
+ * cadence included, can carry a model-supplied number and is scrubbed (merge gate R4-03/R4-04). A
+ * withheld field adds a block on the billing value the entry belongs to.
+ */
+export function scrubConfirmations(list: readonly Confirmation[], terms: string[], scrubbed: string[], flags: AbstractFlag[]): Confirmation[] {
+  const LABEL_FIELDS: ReadonlySet<string> = new Set(['path', 'period', 'charge'])
+  return list.map((cf, i) => {
+    const out = { ...cf }
+    for (const k of Object.keys(cf) as Array<keyof Confirmation>) {
+      if (LABEL_FIELDS.has(k)) continue
+      const before = scrubbed.length
+      ;(out as Record<string, unknown>)[k] = scrubConfidential(cf[k], terms, `confirmations[${i}].${k}`, scrubbed)
+      if (scrubbed.length > before) {
+        flags.push({ severity: 'block', path: cf.path, message: "A value in this item's confirmation was withheld by the confidentiality guard; enter it manually." })
+      }
+    }
+    return out
+  })
+}
+
+/**
+ * Deep copy of `v` with every string — and every number, as written — that hits the denylist replaced by
+ * null (path reported). Numbers are included because a denylist may hold numeric terms (deal numbers,
+ * account numbers) and a number field is otherwise the one place such a term could come back (merge gate O-2).
+ */
+export function scrubConfidential<T>(v: T, terms: string[], path: string, warnings: string[]): T {
+  if (typeof v === 'string' || typeof v === 'number') {
+    if (containsConfidentialTerm(String(v), terms)) {
+      warnings.push(`"${path}" was withheld by the confidentiality guard.`)
+      return null as T
+    }
+    return v
+  }
+  if (Array.isArray(v)) return v.map((x, i) => scrubConfidential(x, terms, `${path}[${i}]`, warnings)) as T
+  if (v && typeof v === 'object') {
+    return Object.fromEntries(
+      Object.entries(v as Record<string, unknown>).map(([k, x]) => [k, scrubConfidential(x, terms, path ? `${path}.${k}` : k, warnings)]),
+    ) as T
+  }
+  return v
+}
 
 /** Human-readable list of page content that was NOT sent for extraction (images, form fields,
  *  annotations), or null if none. Informational only: nothing here blocks. */
