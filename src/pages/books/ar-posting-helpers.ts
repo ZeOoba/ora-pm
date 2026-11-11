@@ -3,7 +3,7 @@ export const AR_ROLE_LABELS: { role: string; label: string; type: 'asset' | 'lia
   { role: 'ar', label: 'Accounts receivable', type: 'asset' },
   { role: 'undeposited_funds', label: 'Undeposited funds', type: 'asset' },
   { role: 'security_deposit', label: 'Security deposits held', type: 'liability' },
-  { role: 'prepaid_rent', label: 'Prepaid rent (cash-basis LLCs, later)', type: 'liability' },
+  { role: 'prepaid_rent', label: 'Prepaid rent (tenant credits)', type: 'liability' },
   { role: 'rent', label: 'Rent', type: 'income' },
   { role: 'cam_estimate', label: 'CAM estimates', type: 'income' },
   { role: 'cam_true_up', label: 'CAM true-ups', type: 'income' },
@@ -15,6 +15,11 @@ export const AR_ROLE_LABELS: { role: string; label: string; type: 'asset' | 'lia
   { role: 'percentage_rent', label: 'Percentage rent', type: 'income' },
   { role: 'other', label: 'Other charges', type: 'income' },
 ]
+
+/** The roles an LLC's basis uses: accrual books AR; cash books tenant credits as prepaid rent. */
+export function rolesForBasis(basis: 'accrual' | 'cash') {
+  return AR_ROLE_LABELS.filter((r) => (basis === 'cash' ? r.role !== 'ar' : r.role !== 'prepaid_rent'))
+}
 
 export const KIND_LABELS: Record<string, string> = {
   charge: 'Charge',

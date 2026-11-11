@@ -22,7 +22,8 @@ import {
   type TbAccount,
   type TbLine,
 } from '../lib/gl'
-import { AR_ROLES, planArRun, type ArCharge, type ArKind, type ArPayment, type ArRole } from '../lib/gl-ar-posting'
+import { planCashArRun, type CashCharge, type CashKind } from '../lib/gl-ar-cash-posting'
+import { AR_ROLES, planArRun, type ArKind, type ArPayment, type ArRole } from '../lib/gl-ar-posting'
 import { MAX_TB_CHARS, planOpeningBalance, type ChartAccount } from '../lib/gl-opening-balance'
 import { MAX_IIF_CHARS, parseIifAccounts, planAccountImport, type ExistingAccount } from '../lib/qb-iif-accounts'
 
@@ -289,7 +290,7 @@ async function loadArState(db: Db, entityId: string) {
   const leases = await selectIn<{ id: string }>(db, 'leases', 'id', 'unit_id', units.data.map((u) => u.id))
   if (leases.error) return { error: leases.error }
   const leaseIds = leases.data.map((l) => l.id)
-  const charges = await selectIn<ArCharge>(db, 'charges', 'id, lease_id, charge_date, type, amount, description, voided_at', 'lease_id', leaseIds)
+  const charges = await selectIn<CashCharge>(db, 'charges', 'id, lease_id, charge_date, due_date, type, amount, description, voided_at', 'lease_id', leaseIds)
   if (charges.error) return { error: charges.error }
   const payments = await selectIn<ArPayment>(db, 'payments', 'id, lease_id, payment_date, amount, method, stripe_status, status_changed_at', 'lease_id', leaseIds)
   if (payments.error) return { error: payments.error }
@@ -299,6 +300,12 @@ async function loadArState(db: Db, entityId: string) {
     return q.order('id').limit(POSTGREST_MAX_ROWS)
   }, (r) => r.id)
   if (postings.error) return { error: postings.error }
+  const events = await fetchAllPages<{ id: string; kind: CashKind; source_id: string; lease_id: string; event_date: string; alloc_date: string }>((after) => {
+    let q = db.from('gl_ar_cash_events').select('id, kind, source_id, lease_id, event_date, alloc_date').eq('entity_id', entityId)
+    if (after !== null) q = q.gt('id', after)
+    return q.order('id').limit(POSTGREST_MAX_ROWS)
+  }, (r) => r.id)
+  if (events.error) return { error: events.error }
   const items = await fetchAllPages<{ source_id: string; kind: 'charge' | 'payment'; counted: boolean }>((after) => {
     let q = db.from('gl_ar_tieout_items').select('source_id, kind, counted').eq('entity_id', entityId)
     if (after !== null) q = q.gt('source_id', after)
@@ -317,14 +324,14 @@ async function loadArState(db: Db, entityId: string) {
     data: {
       propertyIds: props.data.map((p) => p.id),
       lockedMonths: locks.data.map((l) => l.period_start),
-      charges: charges.data, payments: payments.data, postings: postings.data, tieoutItems: items.data,
+      charges: charges.data, payments: payments.data, postings: postings.data, events: events.data, tieoutItems: items.data,
       roles: Object.fromEntries((roles.data ?? []).map((r) => [r.role, r.account_id])) as Partial<Record<ArRole, string>>,
     },
   }
 }
 
-async function arPlanHash(entityId: string, through: string, items: { kind: string; source_id: string; date: string; cents: number }[]): Promise<string> {
-  const canonical = JSON.stringify([entityId, through, items.map((i) => [i.kind, i.source_id, i.date, i.cents])])
+async function arPlanHash(entityId: string, through: string, items: { kind: string; source_id: string; date: string; cents: number; alloc_date?: string }[]): Promise<string> {
+  const canonical = JSON.stringify([entityId, through, items.map((i) => [i.kind, i.source_id, i.date, i.alloc_date ?? null, i.cents])])
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(canonical))
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')
 }
@@ -425,7 +432,7 @@ glRouter.post('/entities/:id/ar/run', async (c) => {
   const entity = await db.from('gl_entities').select('id, accounting_basis, ledger_start_date').eq('id', id).maybeSingle()
   if (entity.error) return dbError(c, entity.error, 'Failed to load entity')
   if (!entity.data) return c.json({ error: 'Entity not found' }, 404)
-  if (entity.data.accounting_basis !== 'accrual') return c.json({ error: 'AR posting for cash-basis LLCs is not available yet' }, 422)
+  const cash = entity.data.accounting_basis === 'cash'
   const start = entity.data.ledger_start_date as string | null
   if (!start) return c.json({ error: 'Set the ledger start date and post the opening balance first' }, 422)
   if (through < start || through > ledgerToday()) return c.json({ error: `through must be between the ledger start date (${start}) and today` }, 422)
@@ -435,7 +442,9 @@ glRouter.post('/entities/:id/ar/run', async (c) => {
 
   const state = await loadArState(db, id)
   if (state.error) return dbError(c, state.error, 'Failed to load AR activity')
-  const plan = planArRun({ startDate: start, through, ...state.data })
+  const plan = cash
+    ? planCashArRun({ startDate: start, through, charges: state.data.charges, payments: state.data.payments, events: state.data.events, tieoutItems: state.data.tieoutItems, roles: state.data.roles, lockedMonths: state.data.lockedMonths })
+    : planArRun({ startDate: start, through, ...state.data })
   const result = { ...plan, through, plan_hash: await arPlanHash(id, through, plan.items), applied: false, posted: 0 }
   if (apply !== true) return c.json({ data: result }, plan.errors.length ? 422 : 200)
   if (plan.errors.length) return c.json({ error: 'The run cannot be posted', data: result }, 422)
@@ -443,7 +452,7 @@ glRouter.post('/entities/:id/ar/run', async (c) => {
   if (!plan.items.length) return c.json({ data: { ...result, applied: true } })
   const by = c.get('adminEmail')
   if (!by) return c.json({ error: 'Posting requires an identified admin' }, 403)
-  const { data, error } = await db.rpc('gl_post_ar_batch', {
+  const { data, error } = await db.rpc(cash ? 'gl_post_ar_cash_batch' : 'gl_post_ar_batch', {
     p_entity_id: id, p_through: through, p_posted_by: by,
     p_items: plan.items.map((i) => ({ kind: i.kind, source_id: i.source_id })),
   })
