@@ -13,6 +13,8 @@
 //   ANTHROPIC_API_KEY=sk-... npx tsx evals/lease-intake-model-eval/run-eval.ts
 //   ANTHROPIC_API_KEY=sk-... npx tsx evals/lease-intake-model-eval/run-eval.ts --models=claude-opus-5,claude-sonnet-5
 import { extractLease } from '../../server/lib/lease-extract'
+import { extractAbstract } from '../../server/lib/lease-abstract'
+import { abstractToLegacyFields, ABSTRACT_SKIPPED_FIELDS } from './abstract-adapter'
 import { ANTHROPIC_MODEL } from '../../server/lib/models'
 import { buildSimplePdf } from './build-pdf'
 import { inspectPdf } from '../../server/lib/pdf-extract'
@@ -27,20 +29,29 @@ function parseModelsArg(argv: string[]): string[] {
   return arg.slice('--models='.length).split(',').map(s => s.trim()).filter(Boolean)
 }
 
+// --mode=abstract scores lease abstraction v2 (server/lib/lease-abstract.ts) on the same fixtures and
+// ground truth, mapped onto the v1 fields (abstract-adapter.ts). Default: v1 (extractLease).
+const MODE = process.argv.includes('--mode=abstract') ? 'abstract' : 'v1'
+
 async function runModel(model: string, apiKey: string): Promise<ModelSummary> {
   const fixtureScores = []
   for (const fixture of FIXTURES) {
     // Same path as production intake (REFUTE C1b round 2): scan the PDF, send only its page text.
     const inspection = await inspectPdf(new Uint8Array(buildSimplePdf(fixture.lines)))
     if (!inspection) throw new Error(`fixture ${fixture.id}: PDF could not be inspected`)
-    const result = await extractLease(inspection.pages, { apiKey, model })
-    fixtureScores.push(scoreExtraction(fixture, result.fields))
+    if (MODE === 'abstract') {
+      const result = await extractAbstract(inspection.pages, { apiKey, model })
+      fixtureScores.push(scoreExtraction(fixture, abstractToLegacyFields(result.abstract), ABSTRACT_SKIPPED_FIELDS))
+    } else {
+      const result = await extractLease(inspection.pages, { apiKey, model })
+      fixtureScores.push(scoreExtraction(fixture, result.fields))
+    }
   }
   return summarizeModel(model, fixtureScores)
 }
 
 function printSummary(summaries: ModelSummary[]): void {
-  console.log('── Lease-intake model accuracy eval ─────────────────────────────────')
+  console.log(`── Lease-intake model accuracy eval (${MODE === 'abstract' ? 'abstraction v2' : 'v1 extractor'}) ─────────────`)
   console.log(`${FIXTURES.length} fixture(s), ${summaries.length} model(s) compared\n`)
 
   for (const s of summaries) {

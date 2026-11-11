@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { Hono } from 'hono'
-import { intakeRouter } from '../../server/routes/intake'
+import { intakeRouter, scrubConfidential, scrubConfirmations } from '../../server/routes/intake'
+import type { AbstractFlag, Confirmation } from '../../server/lib/lease-abstract'
 import { createApp } from '../../server/index'
 import { buildTextPdf, buildImageOnlyPdf, buildMultiPagePdf, buildImagePlusFooterPdf, buildFormFieldPdf, toBase64 } from '../fixtures/pdf'
 import { buildRefuteProbes, buildLinkUrlTermPdf, buildZeroPagePdf, BENIGN_LINE } from '../fixtures/refute-pdfs'
@@ -443,5 +444,282 @@ describe('egress is exactly the scanned text (REFUTE C1b, round 2)', () => {
     const res = await post(buildZeroPagePdf())
     expect(res.status).toBe(422)
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Lease abstraction v2 (mode: 'abstract') — same guards, structured-output egress, deep post-egress scrub.
+// ---------------------------------------------------------------------------
+describe("mode: 'abstract' (lease abstraction v2)", () => {
+  const LEASE_TEXT = 'Industrial lease. Tenant: Acme Logistics LLC. Base rent $4,500.00 per month. Renewal option on notice.'
+  const post = (pdfBytes: Uint8Array, extra: object = {}) => app().request('/intake/lease',
+    body({ filename: 'acme-lease.pdf', pdfBase64: toBase64(pdfBytes), tenant_id: 't', unit_id: 'u', mode: 'abstract', ...extra }), env)
+  // WIRE form (lease-abstract.ts: fact list, zero-or-more lists, 0 / "" sentinels).
+  const modelJson = (over: Record<string, unknown> = {}) => ({
+    facts: [{ field: 'tenant_legal_name', value: 'Acme Logistics LLC', page: 1, quote: 'Tenant: Acme Logistics LLC', confidence: 0.9 }],
+    rent_schedule: [], escalations: [], concessions: [], recurring_charges: [], late_fees: [], provisions: [],
+    ...over,
+  })
+  const abstractFetch = (payload: object, stop = 'end_turn') => vi.fn().mockResolvedValue({
+    ok: true,
+    json: async () => ({ stop_reason: stop, content: [{ type: 'text', text: JSON.stringify(payload) }] }),
+  })
+
+  it('rejects an unknown mode before any egress', async () => {
+    const fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock)
+    const res = await post(await buildTextPdf(LEASE_TEXT), { mode: 'full' })
+    expect(res.status).toBe(400)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('the PDF content confidentiality scan still blocks with NO egress', async () => {
+    const fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock)
+    const res = await post(await buildTextPdf('Confidential lease for the Zeta acquisition'))
+    expect(res.status).toBe(422)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('an image-only PDF still blocks with NO egress', async () => {
+    const fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock)
+    const res = await post(await buildImageOnlyPdf())
+    expect(res.status).toBe(422)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('egress is scanned text with structured outputs (no forced tool_choice, no PDF), and returns abstract + flags', async () => {
+    const fetchMock = abstractFetch(modelJson()); vi.stubGlobal('fetch', fetchMock)
+    const pdf = await buildTextPdf(LEASE_TEXT)
+    const res = await post(pdf)
+    expect(res.status).toBe(200)
+    const { raw } = sentBody(fetchMock)
+    const sent = JSON.parse(raw) as { output_config?: { format?: { type?: string } }; tool_choice?: unknown; messages: Array<{ content: Array<{ type: string }> }> }
+    expect(sent.output_config?.format?.type).toBe('json_schema')
+    expect(sent.tool_choice).toBeUndefined()
+    expect(sent.messages[0].content.every((b) => b.type === 'text')).toBe(true)
+    expect(raw).not.toContain(toBase64(pdf).slice(0, 40))
+    expect(raw).not.toMatch(/application\/pdf|"base64"/)
+    const json = await res.json() as { abstract: { tenant_legal_name: { value: string } }; flags: Array<{ severity: string }> }
+    expect(json.abstract.tenant_legal_name.value).toBe('Acme Logistics LLC')
+    expect(json.flags.some((f) => f.severity === 'block')).toBe(true) // no schedule/dates in this tiny lease
+  })
+
+  it('post-egress: any string anywhere in the abstract that hits the denylist is nulled and reported by path', async () => {
+    const leak = { category: 'other', summary: 'Tenant is an affiliate of Zeta Partners', notice_deadline: '',
+      exercise_window_start: '', exercise_window_end: '', page: 1, quote: 'Renewal option on notice', confidence: 0.5 }
+    vi.stubGlobal('fetch', abstractFetch(modelJson({ provisions: [leak] })))
+    const res = await post(await buildTextPdf(LEASE_TEXT))
+    expect(res.status).toBe(200)
+    const json = await res.json() as { abstract: { provisions: Array<{ summary: string | null }> }; warnings: string[] }
+    expect(json.abstract.provisions[0].summary).toBeNull()
+    expect(JSON.stringify(json)).not.toMatch(/zeta/i)
+    expect(json.warnings).toContain('"provisions[0].summary" was withheld by the confidentiality guard.')
+  })
+
+  it('a billing value withheld by the guard becomes a blocking flag (the earlier checks never saw the hole)', async () => {
+    const cam = { type: 'other', description: 'Zeta escrow', amount_as_written: '$4,500.00', amount_period: 'month', effective_start: '2026-01-01', effective_end: '2026-12-31',
+      page: 1, quote: 'Base rent $4,500.00 per month', confidence: 0.5 }
+    vi.stubGlobal('fetch', abstractFetch(modelJson({ recurring_charges: [cam] })))
+    const res = await post(await buildTextPdf(LEASE_TEXT))
+    const json = await res.json() as { abstract: { recurring_charges: Array<{ description: string | null }> }; flags: Array<{ severity: string; path: string; message: string }> }
+    expect(json.abstract.recurring_charges[0].description).toBeNull()
+    expect(json.flags).toContainEqual(expect.objectContaining({ severity: 'block', path: 'recurring_charges[0].description' }))
+    expect(JSON.stringify(json)).not.toMatch(/zeta/i)
+  })
+
+  // Merge gate PR #69 round 1: F-004 (flag scrub was untested), O-2 (numbers were not scrubbed),
+  // F-004/O-1 (withheld-billing-value block was only tested for recurring_charges).
+  it('a denylisted NUMBER is withheld from the abstract and from any flag message that echoes it', async () => {
+    // "$99999" is not in its quote, so a block flag message echoes it; the denylist holds 99999.
+    const row = { start: '2026-01-01', end: '2026-12-31', amount_as_written: '$99999', amount_period: 'month',
+      page: 1, quote: 'Base rent $4,500.00 per month', confidence: 0.9 }
+    vi.stubGlobal('fetch', abstractFetch(modelJson({ rent_schedule: [row] })))
+    const res = await post(await buildTextPdf(LEASE_TEXT))
+    expect(res.status).toBe(200)
+    const raw = await res.text()
+    expect(raw).not.toMatch(/99999/)
+    const json = JSON.parse(raw) as { abstract: { rent_schedule: Array<{ amount_as_written: unknown }> }; warnings: string[] }
+    expect(json.abstract.rent_schedule[0].amount_as_written).toBeNull()
+    expect(json.warnings.some((w) => /^"flags\[\d+\]\.message" was withheld/.test(w))).toBe(true)
+  })
+
+  it('scrubConfidential withholds a number whose digits are a denylist term', () => {
+    const w: string[] = []
+    expect(scrubConfidential({ a: 99999, b: 4500 }, ['99999'], '', w)).toEqual({ a: null, b: 4500 })
+    expect(w).toEqual(['"a" was withheld by the confidentiality guard.'])
+  })
+
+  it.each([
+    ['rent_schedule', { rent_schedule: [{ start: '2026-01-01', end: '2026-12-31', amount_as_written: '$4,500.00', amount_period: 'month', page: 1, quote: 'Zeta rent schedule line', confidence: 0.9 }] }, 'rent_schedule[0].quote'],
+    ['concessions', { concessions: [{ charge_type: 'rent', period_start: '2026-01-01', period_end: '2026-01-31', kind: 'full_waiver', value_as_written: '', value_period: 'none', reason: 'Zeta free rent', page: 1, quote: 'Renewal option on notice', confidence: 0.9 }] }, 'concessions[0].reason'],
+  ])('a withheld %s value blocks approval', async (_name, over, path) => {
+    vi.stubGlobal('fetch', abstractFetch(modelJson(over)))
+    const res = await post(await buildTextPdf(LEASE_TEXT))
+    const json = await res.json() as { flags: Array<{ severity: string; path: string }> }
+    expect(json.flags).toContainEqual(expect.objectContaining({ severity: 'block', path }))
+  })
+
+  // Merge gate R2-08: only flag MESSAGES are scrubbed; a denylist term that is a substring of "block" or
+  // of a schema key must never null a flag's severity or path (that would make every block disappear).
+  it('a denylist term inside "block" or a schema key leaves severity and path intact', async () => {
+    vi.stubGlobal('fetch', abstractFetch(modelJson()))
+    const res = await app().request('/intake/lease',
+      body({ filename: 'acme-lease.pdf', pdfBase64: toBase64(await buildTextPdf(LEASE_TEXT)), tenant_id: 't', unit_id: 'u', mode: 'abstract' }),
+      { ...env, CONFIDENTIAL_TERMS: 'zeta,lock,schedule' })
+    expect(res.status).toBe(200)
+    const json = await res.json() as { flags: Array<{ severity: unknown; path: unknown }> }
+    expect(json.flags.length).toBeGreaterThan(0)
+    for (const f of json.flags) {
+      expect(['block', 'warn']).toContain(f.severity)
+      expect(typeof f.path).toBe('string')
+    }
+    expect(json.flags.some((f) => f.severity === 'block' && f.path === 'rent_schedule')).toBe(true)
+  })
+
+  it('a withheld non-billing value adds no block', async () => {
+    const leak = { category: 'other', summary: 'Tenant is an affiliate of Zeta Partners', notice_deadline: '',
+      exercise_window_start: '', exercise_window_end: '', page: 1, quote: 'Renewal option on notice', confidence: 0.5 }
+    vi.stubGlobal('fetch', abstractFetch(modelJson({ provisions: [leak] })))
+    const json = await (await post(await buildTextPdf(LEASE_TEXT))).json() as { flags: Array<{ severity: string; path: string }>; warnings: string[] }
+    expect(json.warnings).toContain('"provisions[0].summary" was withheld by the confidentiality guard.')
+    expect(json.flags.some((f) => f.severity === 'block' && f.path.startsWith('provisions'))).toBe(false)
+  })
+
+  it('returns the Phase 4 confirmation list: as written, period, computed monthly, quote', async () => {
+    const row = { start: '2026-01-01', end: '2026-12-31', amount_as_written: '$4,500.00', amount_period: 'month',
+      page: 1, quote: 'Base rent $4,500.00 per month', confidence: 0.9 }
+    vi.stubGlobal('fetch', abstractFetch(modelJson({ rent_schedule: [row] })))
+    const json = await (await post(await buildTextPdf(LEASE_TEXT))).json() as { confirmations: unknown[] }
+    expect(json.confirmations).toContainEqual(expect.objectContaining({ path: 'rent_schedule[0]', as_written: '$4,500.00', period: 'month', monthly: 4500 }))
+  })
+
+  // Merge gate PR #69 round 3: R3-06 (the confirmation scrub nulled `path`), IS4/IS7/IS9 survivors.
+  it('a denylist term that is a schema word never nulls a confirmation path; a withheld quote blocks that path', async () => {
+    const row = { start: '2026-01-01', end: '2026-12-31', amount_as_written: '$4,500.00', amount_period: 'month',
+      page: 1, quote: 'Base rent $4,500.00 per month', confidence: 0.9 }
+    vi.stubGlobal('fetch', abstractFetch(modelJson({ rent_schedule: [row] })))
+    const res = await app().request('/intake/lease',
+      body({ filename: 'acme-lease.pdf', pdfBase64: toBase64(await buildTextPdf(LEASE_TEXT)), tenant_id: 't', unit_id: 'u', mode: 'abstract' }),
+      { ...env, CONFIDENTIAL_TERMS: 'zeta,schedule,month' })
+    const json = await res.json() as { confirmations: Array<{ path: unknown; period: unknown; quote: unknown }>; flags: Array<{ severity: string; path: string; message: string }>; warnings: string[] }
+    const cf = json.confirmations.find((c) => c.path === 'rent_schedule[0]')
+    expect(cf).toBeDefined()
+    expect(cf!.period).toBe('month') // the computed period label is not a document field and is not scrubbed
+    expect(cf!.quote).toBeNull() // the document quote contains "month"
+    expect(json.flags).toContainEqual(expect.objectContaining({ severity: 'block', path: 'rent_schedule[0]', message: expect.stringMatching(/confirmation was withheld/) }))
+    expect(json.warnings).toContain('"confirmations[0].quote" was withheld by the confidentiality guard.') // IS7: reported
+  })
+
+  // Merge gate R4-03/R4-04: EVERY confirmation field except the three labels is scrubbed, so a field
+  // added later is covered without editing a list. Values here are not in the lease text (the
+  // pre-egress scan would refuse it), so each can only reach the response through the model output.
+  it('every confirmation field except path, period and charge is scrubbed, and a hit blocks the entry', async () => {
+    const terms = ['77777', '2030-02-03', '2030-11-29', '2031-07-01', '60', '9', '8888']
+    const row = { start: '2030-02-03', end: '2030-11-29', amount_as_written: '$77,777.00', amount_period: 'month',
+      page: 9, quote: 'Base rent $77,777.00 per month', confidence: 0.9 }
+    // A per-square-foot row, so the confirmation carries a (denylisted) RSF (merge gate R5-03, IL-add rsf).
+    const psfRow = { start: '2031-01-01', end: '2031-12-31', amount_as_written: '$12.00', amount_period: 'psf_year',
+      page: 9, quote: 'Base rent $12.00 per RSF per year', confidence: 0.9 }
+    const rsfFact = { field: 'premises_rsf', value: '8888', page: 9, quote: 'The Premises contain 8,888 rentable square feet', confidence: 0.9 }
+    const escalation = { kind: 'fixed_pct', value_as_written: '3%', value_period: 'none', cadence_months: 60, first_adjustment_date: '2031-07-01',
+      cpi_floor: -1, cpi_cap: 0, page: 9, quote: 'Base rent increases 3% every five years', confidence: 0.9 }
+    vi.stubGlobal('fetch', abstractFetch(modelJson({ facts: [rsfFact], rent_schedule: [row, psfRow], escalations: [escalation] })))
+    const res = await app().request('/intake/lease',
+      body({ filename: 'acme-lease.pdf', pdfBase64: toBase64(await buildTextPdf(LEASE_TEXT)), tenant_id: 't', unit_id: 'u', mode: 'abstract' }),
+      { ...env, CONFIDENTIAL_TERMS: ['zeta', ...terms].join(',') })
+    expect(res.status).toBe(200)
+    const json = await res.json() as { confirmations: Array<Record<string, unknown>>; flags: Array<{ severity: string; path: string }> }
+    const rentCf = json.confirmations.find((c) => c.path === 'rent_schedule[0]')!
+    const escCf = json.confirmations.find((c) => c.path === 'escalation')!
+    expect(rentCf).toMatchObject({ period: 'month', charge: 'rent', as_written: null, monthly: null, start: null, end: null, page: null })
+    expect(escCf).toMatchObject({ charge: 'rent', cadence_months: null, first_adjustment_date: null, page: null })
+    expect(json.confirmations.find((c) => c.path === 'rent_schedule[1]')).toMatchObject({ period: 'psf_year', charge: 'rent', rsf: null })
+    for (const cf of json.confirmations) {
+      for (const [k, v] of Object.entries(cf)) {
+        if (k === 'path' || k === 'period' || k === 'charge') continue
+        for (const t of terms) expect(String(v ?? ''), `${String(cf.path)}.${k}`).not.toContain(t)
+      }
+    }
+    expect(json.flags).toContainEqual(expect.objectContaining({ severity: 'block', path: 'rent_schedule[0]' }))
+    expect(json.flags).toContainEqual(expect.objectContaining({ severity: 'block', path: 'escalation' }))
+  })
+
+  // Merge gate R5-03: some fields (rsf) cannot carry a denylisted value end to end, because their quote must
+  // be on a scanned page and the pre-egress scan refuses it first; so the scrub is also pinned directly.
+  it('scrubConfirmations nulls every non-label field that hits the denylist and blocks the entry', () => {
+    const cf: Confirmation = { path: 'rent_schedule[0]', as_written: 'a1', period: 'psf_year', monthly: 11, start: 's1', end: 'e1',
+      charge: 'rent', rsf: 12, first_adjustment_date: 'f1', cadence_months: 13, page: 14, quote: 'q1' }
+    const terms = ['a1', '11', 's1', 'e1', '12', 'f1', '13', '14', 'q1', 'rent', 'psf', 'schedule']
+    const scrubbed: string[] = []
+    const flags: AbstractFlag[] = []
+    const [out] = scrubConfirmations([cf], terms, scrubbed, flags)
+    expect(out).toEqual({ path: 'rent_schedule[0]', period: 'psf_year', charge: 'rent', as_written: null, monthly: null, start: null, end: null,
+      rsf: null, first_adjustment_date: null, cadence_months: null, page: null, quote: null })
+    expect(Object.keys(out).sort()).toEqual(Object.keys(cf).sort())
+    expect(scrubbed).toHaveLength(9)
+    expect(flags.length).toBeGreaterThan(0)
+    expect(flags.every((f) => f.severity === 'block' && f.path === 'rent_schedule[0]')).toBe(true)
+  })
+
+  it('a denylist term inside a charge label never nulls the confirmation charge (merge gate R5-04)', async () => {
+    const cam = { type: 'cam_estimate', description: 'CAM', amount_as_written: '$4,500.00', amount_period: 'month', effective_start: '2026-01-01', effective_end: '2026-12-31',
+      page: 1, quote: 'Base rent $4,500.00 per month', confidence: 0.9 }
+    vi.stubGlobal('fetch', abstractFetch(modelJson({ recurring_charges: [cam] })))
+    const res = await app().request('/intake/lease',
+      body({ filename: 'acme-lease.pdf', pdfBase64: toBase64(await buildTextPdf(LEASE_TEXT)), tenant_id: 't', unit_id: 'u', mode: 'abstract' }),
+      { ...env, CONFIDENTIAL_TERMS: 'zeta,estimate' })
+    expect(res.status).toBe(200)
+    const json = await res.json() as { confirmations: Array<Record<string, unknown>> }
+    expect(json.confirmations.find((c) => c.path === 'recurring_charges[0]')).toMatchObject({ charge: 'cam_estimate', period: 'month' })
+  })
+
+  it('IS4: a flag message withheld by the guard is replaced by a fixed notice, never null', async () => {
+    const row = { start: '2026-01-01', end: '2026-12-31', amount_as_written: '$99999', amount_period: 'month',
+      page: 1, quote: 'Base rent $4,500.00 per month', confidence: 0.9 }
+    vi.stubGlobal('fetch', abstractFetch(modelJson({ rent_schedule: [row] })))
+    const json = await (await post(await buildTextPdf(LEASE_TEXT))).json() as { flags: Array<{ message: unknown }> }
+    expect(json.flags.every((f) => typeof f.message === 'string')).toBe(true)
+    expect(json.flags.some((f) => f.message === 'Withheld by the confidentiality guard.')).toBe(true)
+  })
+
+  it('IS9: content that was not sent (an embedded image) is reported in abstract mode', async () => {
+    vi.stubGlobal('fetch', abstractFetch(modelJson()))
+    const res = await post(await buildImagePlusFooterPdf('CONFIDENTIAL  ORA-000123  Page 3 of 20'))
+    expect(res.status).toBe(200)
+    const json = await res.json() as { warnings: string[] }
+    expect(json.warnings.join(' ')).toMatch(/embedded images on page\(s\) 1 were not/)
+  })
+
+  // Merge gate R2-09 (IN13/IN14): the shared pre-egress guards are exercised in abstract mode too.
+  it('abstract mode fails closed with no denylist configured (503, no egress)', async () => {
+    const fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock)
+    const res = await app().request('/intake/lease',
+      body({ filename: 'acme-lease.pdf', pdfBase64: toBase64(await buildTextPdf(LEASE_TEXT)), tenant_id: 't', unit_id: 'u', mode: 'abstract' }),
+      { ...env, CONFIDENTIAL_TERMS: '' })
+    expect(res.status).toBe(503)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+  it('abstract mode blocks a denylisted filename (422, no egress)', async () => {
+    const fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock)
+    const res = await app().request('/intake/lease',
+      body({ filename: 'zeta-lease.pdf', pdfBase64: toBase64(await buildTextPdf(LEASE_TEXT)), tenant_id: 't', unit_id: 'u', mode: 'abstract' }), env)
+    expect(res.status).toBe(422)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('a refusal or truncated output is a 502 manual-entry error, never a partial abstract', async () => {
+    vi.stubGlobal('fetch', abstractFetch(modelJson(), 'refusal'))
+    expect((await post(await buildTextPdf(LEASE_TEXT))).status).toBe(502)
+    vi.stubGlobal('fetch', abstractFetch(modelJson(), 'max_tokens'))
+    const res = await post(await buildTextPdf(LEASE_TEXT))
+    expect(res.status).toBe(502)
+    expect(((await res.json()) as { error: string }).error).toMatch(/too long/)
+  })
+
+  it('omitting mode keeps the original 9-field response shape', async () => {
+    vi.stubGlobal('fetch', okFetch())
+    const res = await app().request('/intake/lease',
+      body({ filename: 'a.pdf', pdfBase64: toBase64(await buildTextPdf(LEASE_TEXT)), tenant_id: 't', unit_id: 'u' }), env)
+    expect(res.status).toBe(200)
+    expect(Object.keys(await res.json() as object).sort()).toEqual(['confidence', 'fields', 'warnings'])
   })
 })
