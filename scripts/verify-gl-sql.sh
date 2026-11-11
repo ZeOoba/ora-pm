@@ -31,7 +31,7 @@ ALTER ROLE service_role BYPASSRLS;
 SQL
 
 # Apply twice: the migration must be re-runnable.
-for m in supabase/migrations/0023_gl_core.sql supabase/migrations/0025_gl_qb_account_type.sql; do
+for m in supabase/migrations/0023_gl_core.sql supabase/migrations/0025_gl_qb_account_type.sql supabase/migrations/0026_gl_opening_balance.sql; do
   psql "$GL_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f "$m"
   psql "$GL_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f "$m"
 done
@@ -39,4 +39,5 @@ psql "$GL_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f supabase/tests/gl_core.tes
 # A fresh session, so the triggers have no cached plans when the shadowing attack runs.
 psql "$GL_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f supabase/tests/gl_service_role.test.sql
 psql "$GL_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f supabase/tests/gl_shadow_functions.test.sql
+psql "$GL_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f supabase/tests/gl_opening_balance.test.sql
 echo "verify-gl-sql: all GL SQL checks passed"

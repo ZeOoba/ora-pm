@@ -72,10 +72,11 @@ describe('check-refute-required — financial-source classification', () => {
     expect(isFinancialSourcePath('server/lib/gl.ts')).toBe(true)
     expect(isFinancialSourcePath('server/routes/gl.ts')).toBe(true)
     expect(isFinancialSourcePath('server/lib/qb-iif-accounts.ts')).toBe(true)
+    expect(isFinancialSourcePath('server/lib/gl-opening-balance.ts')).toBe(true)
   })
 
   it('exposes the financial path set with the expected membership', () => {
-    expect(FINANCIAL_SOURCE_PATHS.size).toBe(24)
+    expect(FINANCIAL_SOURCE_PATHS.size).toBe(25)
     for (const p of [
       'server/routes/cron.ts',
       'server/routes/stripe.ts',
