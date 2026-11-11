@@ -22,6 +22,7 @@ import {
   type TbAccount,
   type TbLine,
 } from '../lib/gl'
+import { AR_ROLES, planArRun, type ArCharge, type ArKind, type ArPayment, type ArRole } from '../lib/gl-ar-posting'
 import { MAX_TB_CHARS, planOpeningBalance, type ChartAccount } from '../lib/gl-opening-balance'
 import { MAX_IIF_CHARS, parseIifAccounts, planAccountImport, type ExistingAccount } from '../lib/qb-iif-accounts'
 
@@ -254,6 +255,203 @@ glRouter.post('/entities/:id/opening-balance', async (c) => {
   })
   if (error) return writeError(c, error, 'Failed to post the opening balance')
   return c.json({ data: { ...result, applied: true, entry_id: data as string } }, 201)
+})
+
+// ── B8 slice 3: AR posting (accrual LLCs) ─────────────────────────────────────────────────────
+type Db = ReturnType<typeof getDb>
+
+/** `.in()` over many ids, in chunks (PostgREST puts them in the URL), every page of each chunk. */
+async function selectIn<T extends { id: string }>(db: Db, table: string, columns: string, column: string, ids: string[]) {
+  const out: T[] = []
+  for (let i = 0; i < ids.length; i += 100) {
+    const chunk = ids.slice(i, i + 100)
+    const res = await fetchAllPages<T>((after) => {
+      let q = db.from(table).select(columns).in(column, chunk)
+      if (after !== null) q = q.gt('id', after)
+      return q.order('id').limit(POSTGREST_MAX_ROWS) as unknown as PromiseLike<{ data: T[] | null; error: { message: string } | null }>
+    }, (r) => r.id)
+    if (res.error) return { error: res.error }
+    out.push(...res.data)
+  }
+  return { data: out }
+}
+
+/** Everything a run needs for one entity: its leases' charges and payments, postings, snapshot, roles. */
+async function loadArState(db: Db, entityId: string) {
+  const props = await fetchAllPages<{ id: string }>((after) => {
+    let q = db.from('properties').select('id').eq('gl_entity_id', entityId)
+    if (after !== null) q = q.gt('id', after)
+    return q.order('id').limit(POSTGREST_MAX_ROWS)
+  }, (r) => r.id)
+  if (props.error) return { error: props.error }
+  const units = await selectIn<{ id: string }>(db, 'units', 'id', 'property_id', (props.data ?? []).map((p) => p.id))
+  if (units.error) return { error: units.error }
+  const leases = await selectIn<{ id: string }>(db, 'leases', 'id', 'unit_id', units.data.map((u) => u.id))
+  if (leases.error) return { error: leases.error }
+  const leaseIds = leases.data.map((l) => l.id)
+  const charges = await selectIn<ArCharge>(db, 'charges', 'id, lease_id, charge_date, type, amount, description, voided_at', 'lease_id', leaseIds)
+  if (charges.error) return { error: charges.error }
+  const payments = await selectIn<ArPayment>(db, 'payments', 'id, lease_id, payment_date, amount, method, stripe_status, status_changed_at', 'lease_id', leaseIds)
+  if (payments.error) return { error: payments.error }
+  const postings = await fetchAllPages<{ id: string; kind: ArKind; source_id: string }>((after) => {
+    let q = db.from('gl_ar_postings').select('id, kind, source_id').eq('entity_id', entityId)
+    if (after !== null) q = q.gt('id', after)
+    return q.order('id').limit(POSTGREST_MAX_ROWS)
+  }, (r) => r.id)
+  if (postings.error) return { error: postings.error }
+  const items = await fetchAllPages<{ source_id: string; kind: 'charge' | 'payment'; counted: boolean }>((after) => {
+    let q = db.from('gl_ar_tieout_items').select('source_id, kind, counted').eq('entity_id', entityId)
+    if (after !== null) q = q.gt('source_id', after)
+    return q.order('source_id').limit(POSTGREST_MAX_ROWS)
+  }, (r) => r.source_id)
+  if (items.error) return { error: items.error }
+  const roles = await db.from('gl_ar_accounts').select('role, account_id').eq('entity_id', entityId)
+  if (roles.error) return { error: roles.error }
+  const locks = await fetchAllPages<{ period_start: string }>((after) => {
+    let q = db.from('gl_periods').select('period_start').eq('entity_id', entityId).eq('status', 'locked')
+    if (after !== null) q = q.gt('period_start', after)
+    return q.order('period_start').limit(POSTGREST_MAX_ROWS)
+  }, (r) => r.period_start)
+  if (locks.error) return { error: locks.error }
+  return {
+    data: {
+      propertyIds: props.data.map((p) => p.id),
+      lockedMonths: locks.data.map((l) => l.period_start),
+      charges: charges.data, payments: payments.data, postings: postings.data, tieoutItems: items.data,
+      roles: Object.fromEntries((roles.data ?? []).map((r) => [r.role, r.account_id])) as Partial<Record<ArRole, string>>,
+    },
+  }
+}
+
+async function arPlanHash(entityId: string, through: string, items: { kind: string; source_id: string; date: string; cents: number }[]): Promise<string> {
+  const canonical = JSON.stringify([entityId, through, items.map((i) => [i.kind, i.source_id, i.date, i.cents])])
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(canonical))
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+glRouter.get('/entities/:id/ar', async (c) => {
+  const id = c.req.param('id')
+  if (!isUuid(id)) return c.json({ error: 'id must be a uuid' }, 422)
+  const db = getDb(c.env)
+  const entity = await db.from('gl_entities').select('id, accounting_basis, ledger_start_date').eq('id', id).maybeSingle()
+  if (entity.error) return dbError(c, entity.error, 'Failed to load entity')
+  if (!entity.data) return c.json({ error: 'Entity not found' }, 404)
+  const [roles, tieout, props] = await Promise.all([
+    db.from('gl_ar_accounts').select('role, account_id').eq('entity_id', id),
+    db.from('gl_ar_tieouts').select('as_of, app_ar_cents, gl_ar_cents, confirmed_by, confirmed_at').eq('entity_id', id).maybeSingle(),
+    db.from('properties').select('id, name, gl_entity_id').order('name').limit(POSTGREST_MAX_ROWS),
+  ])
+  if (roles.error || tieout.error || props.error) return dbError(c, (roles.error ?? tieout.error ?? props.error)!, 'Failed to load AR setup')
+  return c.json({ data: {
+    accounting_basis: entity.data.accounting_basis, ledger_start_date: entity.data.ledger_start_date,
+    roles: roles.data ?? [], tieout: tieout.data,
+    properties: (props.data ?? []).filter((p) => p.gl_entity_id === id || p.gl_entity_id === null),
+  } })
+})
+
+/** Map account roles: { roles: { ar: <account id>, rent: <account id>, late_fee: null, ... } }. */
+glRouter.put('/entities/:id/ar/accounts', async (c) => {
+  const id = c.req.param('id')
+  if (!isUuid(id)) return c.json({ error: 'id must be a uuid' }, 422)
+  const raw = await body(c) as { roles?: Record<string, unknown> } | undefined
+  const roles = raw?.roles
+  if (!roles || typeof roles !== 'object' || Array.isArray(roles) || Object.keys(raw!).length !== 1) return c.json({ error: 'Body must be { roles: { <role>: <account id> | null } }' }, 422)
+  const set: { entity_id: string; role: string; account_id: string; updated_by: string }[] = []
+  const clear: string[] = []
+  const by = c.get('adminEmail')
+  if (!by) return c.json({ error: 'Changing account roles requires an identified admin' }, 403)
+  for (const [role, acct] of Object.entries(roles)) {
+    if (!(AR_ROLES as readonly string[]).includes(role)) return c.json({ error: `Unknown role ${role}` }, 422)
+    if (acct === null) clear.push(role)
+    else if (typeof acct === 'string' && isUuid(acct)) set.push({ entity_id: id, role, account_id: acct, updated_by: by })
+    else return c.json({ error: `Role ${role} needs an account id or null` }, 422)
+  }
+  const db = getDb(c.env)
+  if (set.length) {
+    const { error } = await db.from('gl_ar_accounts').upsert(set, { onConflict: 'entity_id,role' })
+    if (error) return writeError(c, error, 'Failed to save account roles')
+  }
+  if (clear.length) {
+    const { error } = await db.from('gl_ar_accounts').delete().eq('entity_id', id).in('role', clear)
+    if (error) return writeError(c, error, 'Failed to save account roles')
+  }
+  return c.json({ data: { saved: set.length, cleared: clear.length } })
+})
+
+/** Assign a property to this LLC (or release it): { property_id, assigned }. */
+glRouter.put('/entities/:id/ar/properties', async (c) => {
+  const id = c.req.param('id')
+  const raw = await body(c) as { property_id?: unknown; assigned?: unknown } | undefined
+  if (!isUuid(id) || !raw || typeof raw.property_id !== 'string' || !isUuid(raw.property_id) || typeof raw.assigned !== 'boolean' || Object.keys(raw).length !== 2) {
+    return c.json({ error: 'Body must be { property_id, assigned }' }, 422)
+  }
+  const db = getDb(c.env)
+  let q = db.from('properties').update({ gl_entity_id: raw.assigned ? id : null }).eq('id', raw.property_id)
+  q = raw.assigned ? q.is('gl_entity_id', null) : q.eq('gl_entity_id', id)
+  const { data, error } = await q.select('id')
+  if (error) return writeError(c, error, 'Failed to update the property')
+  if (!data?.length) return c.json({ error: raw.assigned ? 'That property already belongs to another LLC' : 'That property is not in this LLC' }, 409)
+  return c.json({ data: { property_id: raw.property_id, assigned: raw.assigned } })
+})
+
+/** Confirm the AR tie-out (the database computes both sides and refuses unless they match). */
+glRouter.post('/entities/:id/ar/tieout', async (c) => {
+  const id = c.req.param('id')
+  if (!isUuid(id)) return c.json({ error: 'id must be a uuid' }, 422)
+  const by = c.get('adminEmail')
+  if (!by) return c.json({ error: 'Confirming the tie-out requires an identified admin' }, 403)
+  const { data, error } = await getDb(c.env).rpc('gl_confirm_ar_tieout', { p_entity_id: id, p_confirmed_by: by })
+  if (error) return writeError(c, error, 'Failed to confirm the AR tie-out')
+  return c.json({ data: { app_ar_cents: data } }, 201)
+})
+
+/**
+ * Plan (and with apply, post) an AR run through a date: { through, apply?, expected_plan_hash? }.
+ * The response lists every item that would post, anything needing attention, and blocking errors.
+ */
+glRouter.post('/entities/:id/ar/run', async (c) => {
+  const id = c.req.param('id')
+  if (!isUuid(id)) return c.json({ error: 'id must be a uuid' }, 422)
+  const raw = await body(c)
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return c.json({ error: 'Body must be { through, apply?, expected_plan_hash? }' }, 422)
+  const { through, apply, expected_plan_hash: expected, ...extra } = raw as Record<string, unknown>
+  if (Object.keys(extra).length) return c.json({ error: `Unknown field(s): ${Object.keys(extra).join(', ')}` }, 422)
+  if (typeof through !== 'string' || !isRealIsoDate(through)) return c.json({ error: 'through must be a YYYY-MM-DD date' }, 422)
+  if (apply !== undefined && typeof apply !== 'boolean') return c.json({ error: 'apply must be true or false' }, 422)
+  if (expected !== undefined && (typeof expected !== 'string' || !/^[0-9a-f]{64}$/.test(expected))) return c.json({ error: 'expected_plan_hash must be the plan_hash from the preview' }, 422)
+  if (apply === true && expected === undefined) return c.json({ error: 'Posting requires expected_plan_hash from a preview' }, 422)
+
+  const db = getDb(c.env)
+  const entity = await db.from('gl_entities').select('id, accounting_basis, ledger_start_date').eq('id', id).maybeSingle()
+  if (entity.error) return dbError(c, entity.error, 'Failed to load entity')
+  if (!entity.data) return c.json({ error: 'Entity not found' }, 404)
+  if (entity.data.accounting_basis !== 'accrual') return c.json({ error: 'AR posting for cash-basis LLCs is not available yet' }, 422)
+  const start = entity.data.ledger_start_date as string | null
+  if (!start) return c.json({ error: 'Set the ledger start date and post the opening balance first' }, 422)
+  if (through < start || through > ledgerToday()) return c.json({ error: `through must be between the ledger start date (${start}) and today` }, 422)
+  const tie = await db.from('gl_ar_tieouts').select('entity_id').eq('entity_id', id).maybeSingle()
+  if (tie.error) return dbError(c, tie.error, 'Failed to load the AR tie-out')
+  if (!tie.data) return c.json({ error: 'Confirm the AR tie-out before posting' }, 409)
+
+  const state = await loadArState(db, id)
+  if (state.error) return dbError(c, state.error, 'Failed to load AR activity')
+  const plan = planArRun({ startDate: start, through, ...state.data })
+  const result = { ...plan, through, plan_hash: await arPlanHash(id, through, plan.items), applied: false, posted: 0 }
+  if (apply !== true) return c.json({ data: result }, plan.errors.length ? 422 : 200)
+  if (plan.errors.length) return c.json({ error: 'The run cannot be posted', data: result }, 422)
+  if (expected !== result.plan_hash) return c.json({ error: 'AR activity changed since the preview; preview again', data: result }, 409)
+  if (!plan.items.length) return c.json({ data: { ...result, applied: true } })
+  const by = c.get('adminEmail')
+  if (!by) return c.json({ error: 'Posting requires an identified admin' }, 403)
+  const { data, error } = await db.rpc('gl_post_ar_batch', {
+    p_entity_id: id, p_through: through, p_posted_by: by,
+    p_items: plan.items.map((i) => ({ kind: i.kind, source_id: i.source_id })),
+  })
+  if (error) {
+    if (error.code === '23505') return c.json({ error: 'Some of this activity was posted meanwhile; preview again' }, 409)
+    return writeError(c, error, 'Failed to post AR')
+  }
+  return c.json({ data: { ...result, applied: true, posted: data as number } }, 201)
 })
 
 // ── Journal ───────────────────────────────────────────────────────────────────────────────────

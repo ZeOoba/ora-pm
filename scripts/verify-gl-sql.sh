@@ -23,6 +23,19 @@ DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN CREATE ROLE service_role NOLOGIN; END IF;
 END $$;
 CREATE TABLE properties (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), name TEXT);
+-- Minimal app tables 0028 (AR posting) reads: lease → unit → property, charges, payments, with the
+-- columns and checks the ledger relies on (amounts in NUMERIC dollars, as in 0002/0016).
+CREATE TABLE units (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), property_id UUID NOT NULL REFERENCES properties(id), suite TEXT);
+CREATE TABLE leases (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), unit_id UUID NOT NULL REFERENCES units(id));
+CREATE TABLE charges (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(), lease_id UUID NOT NULL REFERENCES leases(id),
+  charge_date DATE NOT NULL, due_date DATE NOT NULL DEFAULT CURRENT_DATE,
+  type TEXT NOT NULL CHECK (type IN ('rent','cam_estimate','cam_true_up','late_fee','security_deposit','utility_water','utility_gas','utility_electric','utility_other','percentage_rent','other')),
+  amount NUMERIC NOT NULL CHECK (amount >= 0), description TEXT, voided_at TIMESTAMPTZ, void_reason TEXT);
+CREATE TABLE payments (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(), lease_id UUID NOT NULL REFERENCES leases(id),
+  payment_date DATE NOT NULL, amount NUMERIC NOT NULL CHECK (amount > 0),
+  method TEXT NOT NULL CHECK (method IN ('ach_stripe','check','wire','other')), stripe_status TEXT);
 -- Supabase's defaults: every new public table is GRANT ALL to the API roles, and service_role
 -- bypasses RLS. The adversarial tests run as service_role against exactly those privileges.
 GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;
@@ -31,7 +44,7 @@ ALTER ROLE service_role BYPASSRLS;
 SQL
 
 # Apply twice: the migration must be re-runnable.
-for m in supabase/migrations/0023_gl_core.sql supabase/migrations/0025_gl_qb_account_type.sql supabase/migrations/0027_gl_opening_balance.sql; do
+for m in supabase/migrations/0023_gl_core.sql supabase/migrations/0025_gl_qb_account_type.sql supabase/migrations/0027_gl_opening_balance.sql supabase/migrations/0028_gl_ar_posting.sql; do
   psql "$GL_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f "$m"
   psql "$GL_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f "$m"
 done
@@ -40,4 +53,5 @@ psql "$GL_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f supabase/tests/gl_core.tes
 psql "$GL_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f supabase/tests/gl_service_role.test.sql
 psql "$GL_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f supabase/tests/gl_shadow_functions.test.sql
 psql "$GL_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f supabase/tests/gl_opening_balance.test.sql
+psql "$GL_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f supabase/tests/gl_ar_posting.test.sql
 echo "verify-gl-sql: all GL SQL checks passed"
