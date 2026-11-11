@@ -19,19 +19,23 @@ export const cronRouter = new Hono<{ Bindings: Env }>()
 
 cronRouter.use('/*', cronAuthMiddleware)
 
-// OI-038 remainder: 10/hour per cron endpoint path (not per caller — the
-// only expected callers are the standalone Windows Task Scheduler triggers
-// (scripts/trigger-billing.ps1; C:\Users\Owner\ora-pm-cron\ping-crons.ps1 —
-// neither is the Claude fleet's own create_scheduled_task registry),
-// authenticated via CRON_SECRET; runs AFTER cronAuthMiddleware so an invalid-secret guess
-// never consumes budget). Sized generous specifically to absorb a
-// legitimate catch-up burst — if the scheduler misses a run (e.g. an
-// outage) it re-triggers the missed cron(s) close together on recovery.
-// This repo has no separate catch-up-burst doc to size precisely against
-// (checked: no match for "catch-up"/"catchup" in any tracked file), so this
-// errs generous per task-6-brief.md's explicit instruction rather than risk
-// breaking legitimate ops; each endpoint's own documented cadence (monthly,
-// or once daily) is nowhere near 10/hour in normal operation.
+// OI-038 remainder: 10/hour per cron endpoint path (not per caller),
+// authenticated via CRON_SECRET; runs AFTER cronAuthMiddleware so an
+// invalid-secret guess never consumes budget. Expected callers (the live ORA
+// CC/MCP scheduled-task registry is the authority; see wrangler.toml and the
+// README "Cron jobs" paragraph):
+//   - ora-pm-monthly-billing (cron 10 11 1-3 * *) -> scripts/trigger-billing.ps1,
+//     which re-invokes monthly-billing until `remaining` is 0 (cap 8 calls);
+//   - ora-pm-daily-crons (cron 40 9 * * 1, WEEKLY despite the id) ->
+//     C:\Users\Owner\ora-pm-cron\ping-crons.ps1 (critical-dates-alerts,
+//     delinquency-check);
+//   - GitHub Actions backups monthly-billing-backup.yml (40 17 1 * * UTC) and
+//     delinquency-backup.yml (10 16 * * * UTC), scheduled in a later hour
+//     bucket than the laptop runs.
+// The fleet tasks fire only while the Claude Desktop app is open, and missed
+// runs fire together as a catch-up burst at the next open, so the limit is
+// sized generously to absorb that burst; normal cadence (monthly, weekly, or
+// once daily for the delinquency backup) is far below 10/hour.
 cronRouter.use('/*', async (c, next) => {
   const { allowed, retryAfterMs } = await checkRateLimit(c.env.RATE_LIMIT_KV, c.req.path, {
     scope: 'cron',
