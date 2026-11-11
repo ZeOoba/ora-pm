@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { Hono } from 'hono'
-import { intakeRouter, scrubConfidential } from '../../server/routes/intake'
+import { intakeRouter, scrubConfidential, scrubConfirmations } from '../../server/routes/intake'
+import type { AbstractFlag, Confirmation } from '../../server/lib/lease-abstract'
 import { createApp } from '../../server/index'
 import { buildTextPdf, buildImageOnlyPdf, buildMultiPagePdf, buildImagePlusFooterPdf, buildFormFieldPdf, toBase64 } from '../fixtures/pdf'
 import { buildRefuteProbes, buildLinkUrlTermPdf, buildZeroPagePdf, BENIGN_LINE } from '../fixtures/refute-pdfs'
@@ -612,12 +613,16 @@ describe("mode: 'abstract' (lease abstraction v2)", () => {
   // added later is covered without editing a list. Values here are not in the lease text (the
   // pre-egress scan would refuse it), so each can only reach the response through the model output.
   it('every confirmation field except path, period and charge is scrubbed, and a hit blocks the entry', async () => {
-    const terms = ['77777', '2030-02-03', '2030-11-29', '2031-07-01', '60', '9']
+    const terms = ['77777', '2030-02-03', '2030-11-29', '2031-07-01', '60', '9', '8888']
     const row = { start: '2030-02-03', end: '2030-11-29', amount_as_written: '$77,777.00', amount_period: 'month',
       page: 9, quote: 'Base rent $77,777.00 per month', confidence: 0.9 }
+    // A per-square-foot row, so the confirmation carries a (denylisted) RSF (merge gate R5-03, IL-add rsf).
+    const psfRow = { start: '2031-01-01', end: '2031-12-31', amount_as_written: '$12.00', amount_period: 'psf_year',
+      page: 9, quote: 'Base rent $12.00 per RSF per year', confidence: 0.9 }
+    const rsfFact = { field: 'premises_rsf', value: '8888', page: 9, quote: 'The Premises contain 8,888 rentable square feet', confidence: 0.9 }
     const escalation = { kind: 'fixed_pct', value_as_written: '3%', value_period: 'none', cadence_months: 60, first_adjustment_date: '2031-07-01',
       cpi_floor: -1, cpi_cap: 0, page: 9, quote: 'Base rent increases 3% every five years', confidence: 0.9 }
-    vi.stubGlobal('fetch', abstractFetch(modelJson({ rent_schedule: [row], escalations: [escalation] })))
+    vi.stubGlobal('fetch', abstractFetch(modelJson({ facts: [rsfFact], rent_schedule: [row, psfRow], escalations: [escalation] })))
     const res = await app().request('/intake/lease',
       body({ filename: 'acme-lease.pdf', pdfBase64: toBase64(await buildTextPdf(LEASE_TEXT)), tenant_id: 't', unit_id: 'u', mode: 'abstract' }),
       { ...env, CONFIDENTIAL_TERMS: ['zeta', ...terms].join(',') })
@@ -627,6 +632,7 @@ describe("mode: 'abstract' (lease abstraction v2)", () => {
     const escCf = json.confirmations.find((c) => c.path === 'escalation')!
     expect(rentCf).toMatchObject({ period: 'month', charge: 'rent', as_written: null, monthly: null, start: null, end: null, page: null })
     expect(escCf).toMatchObject({ charge: 'rent', cadence_months: null, first_adjustment_date: null, page: null })
+    expect(json.confirmations.find((c) => c.path === 'rent_schedule[1]')).toMatchObject({ period: 'psf_year', charge: 'rent', rsf: null })
     for (const cf of json.confirmations) {
       for (const [k, v] of Object.entries(cf)) {
         if (k === 'path' || k === 'period' || k === 'charge') continue
@@ -635,6 +641,35 @@ describe("mode: 'abstract' (lease abstraction v2)", () => {
     }
     expect(json.flags).toContainEqual(expect.objectContaining({ severity: 'block', path: 'rent_schedule[0]' }))
     expect(json.flags).toContainEqual(expect.objectContaining({ severity: 'block', path: 'escalation' }))
+  })
+
+  // Merge gate R5-03: some fields (rsf) cannot carry a denylisted value end to end, because their quote must
+  // be on a scanned page and the pre-egress scan refuses it first; so the scrub is also pinned directly.
+  it('scrubConfirmations nulls every non-label field that hits the denylist and blocks the entry', () => {
+    const cf: Confirmation = { path: 'rent_schedule[0]', as_written: 'a1', period: 'psf_year', monthly: 11, start: 's1', end: 'e1',
+      charge: 'rent', rsf: 12, first_adjustment_date: 'f1', cadence_months: 13, page: 14, quote: 'q1' }
+    const terms = ['a1', '11', 's1', 'e1', '12', 'f1', '13', '14', 'q1', 'rent', 'psf', 'schedule']
+    const scrubbed: string[] = []
+    const flags: AbstractFlag[] = []
+    const [out] = scrubConfirmations([cf], terms, scrubbed, flags)
+    expect(out).toEqual({ path: 'rent_schedule[0]', period: 'psf_year', charge: 'rent', as_written: null, monthly: null, start: null, end: null,
+      rsf: null, first_adjustment_date: null, cadence_months: null, page: null, quote: null })
+    expect(Object.keys(out).sort()).toEqual(Object.keys(cf).sort())
+    expect(scrubbed).toHaveLength(9)
+    expect(flags.length).toBeGreaterThan(0)
+    expect(flags.every((f) => f.severity === 'block' && f.path === 'rent_schedule[0]')).toBe(true)
+  })
+
+  it('a denylist term inside a charge label never nulls the confirmation charge (merge gate R5-04)', async () => {
+    const cam = { type: 'cam_estimate', description: 'CAM', amount_as_written: '$4,500.00', amount_period: 'month', effective_start: '2026-01-01', effective_end: '2026-12-31',
+      page: 1, quote: 'Base rent $4,500.00 per month', confidence: 0.9 }
+    vi.stubGlobal('fetch', abstractFetch(modelJson({ recurring_charges: [cam] })))
+    const res = await app().request('/intake/lease',
+      body({ filename: 'acme-lease.pdf', pdfBase64: toBase64(await buildTextPdf(LEASE_TEXT)), tenant_id: 't', unit_id: 'u', mode: 'abstract' }),
+      { ...env, CONFIDENTIAL_TERMS: 'zeta,estimate' })
+    expect(res.status).toBe(200)
+    const json = await res.json() as { confirmations: Array<Record<string, unknown>> }
+    expect(json.confirmations.find((c) => c.path === 'recurring_charges[0]')).toMatchObject({ charge: 'cam_estimate', period: 'month' })
   })
 
   it('IS4: a flag message withheld by the guard is replaced by a fixed notice, never null', async () => {

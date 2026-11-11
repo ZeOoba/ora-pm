@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import type { Env } from '../index'
 import { parseTerms, containsConfidentialTerm } from '../lib/confidentiality'
 import { extractLease } from '../lib/lease-extract'
-import { BILLING_PATH, extractAbstract, ExtractionStopped, type AbstractFlag, type AbstractResult } from '../lib/lease-abstract'
+import { BILLING_PATH, extractAbstract, ExtractionStopped, type AbstractFlag, type AbstractResult, type Confirmation } from '../lib/lease-abstract'
 import { inspectPdf, pagesLackingTextLayer, MIN_PAGE_TEXT_CHARS, type PdfInspection } from '../lib/pdf-extract'
 import { checkRateLimit } from '../lib/rate-limit'
 import { ANTHROPIC_MODEL } from '../lib/models'
@@ -181,24 +181,7 @@ intakeRouter.post('/lease', async (c) => {
       ...f,
       message: scrubConfidential(f.message, terms, `flags[${i}].message`, scrubbed) ?? 'Withheld by the confidentiality guard.',
     }))
-    // Phase 4 confirmation list. Every field is scrubbed EXCEPT the three fixed labels: path (a schema
-    // path), period and charge (closed enums or server labels such as "date"). Nulling a label, as a term
-    // like "schedule" did to path (merge gate R3-06), would orphan the entry; every other field, page and
-    // cadence included, can carry a model-supplied number and is scrubbed (merge gate R4-03/R4-04). A
-    // withheld field blocks the billing value the entry belongs to.
-    const LABEL_FIELDS: ReadonlySet<string> = new Set(['path', 'period', 'charge'])
-    const confirmations = abs.confirmations.map((cf, i) => {
-      const out = { ...cf }
-      for (const k of Object.keys(cf) as Array<keyof typeof cf>) {
-        if (LABEL_FIELDS.has(k)) continue
-        const before = scrubbed.length
-        ;(out as Record<string, unknown>)[k] = scrubConfidential(cf[k], terms, `confirmations[${i}].${k}`, scrubbed)
-        if (scrubbed.length > before) {
-          flags.push({ severity: 'block', path: cf.path, message: 'A value in this item\'s confirmation was withheld by the confidentiality guard; enter it manually.' })
-        }
-      }
-      return out
-    })
+    const confirmations = scrubConfirmations(abs.confirmations, terms, scrubbed, flags)
     // A withheld value on a billing path leaves a hole the earlier checks never saw, so it blocks
     // approval until re-entered by hand.
     for (const w of scrubbed) {
@@ -236,6 +219,29 @@ intakeRouter.post('/lease', async (c) => {
   }
   return c.json({ fields, confidence: result.confidence, warnings })
 })
+
+/**
+ * Phase 4 confirmation list scrub. Every field is scrubbed EXCEPT the three fixed labels: path (a schema
+ * path), period and charge (closed enums or server labels such as "date"). Nulling a label, as a term
+ * like "schedule" did to path (merge gate R3-06), would orphan the entry; every other field, page and
+ * cadence included, can carry a model-supplied number and is scrubbed (merge gate R4-03/R4-04). A
+ * withheld field adds a block on the billing value the entry belongs to.
+ */
+export function scrubConfirmations(list: readonly Confirmation[], terms: string[], scrubbed: string[], flags: AbstractFlag[]): Confirmation[] {
+  const LABEL_FIELDS: ReadonlySet<string> = new Set(['path', 'period', 'charge'])
+  return list.map((cf, i) => {
+    const out = { ...cf }
+    for (const k of Object.keys(cf) as Array<keyof Confirmation>) {
+      if (LABEL_FIELDS.has(k)) continue
+      const before = scrubbed.length
+      ;(out as Record<string, unknown>)[k] = scrubConfidential(cf[k], terms, `confirmations[${i}].${k}`, scrubbed)
+      if (scrubbed.length > before) {
+        flags.push({ severity: 'block', path: cf.path, message: "A value in this item's confirmation was withheld by the confidentiality guard; enter it manually." })
+      }
+    }
+    return out
+  })
+}
 
 /**
  * Deep copy of `v` with every string — and every number, as written — that hits the denylist replaced by

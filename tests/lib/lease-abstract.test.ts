@@ -9,7 +9,6 @@ import {
   currencyFiguresInQuote,
   dateInQuote,
   finalizeAbstract,
-  labelledPeriod,
   namedMonths,
   normalizeForMatch,
   parseAbstractResponse,
@@ -749,37 +748,42 @@ describe('merge gate R4-02: more than one escalation rule blocks', () => {
   })
 })
 
-describe('merge gate R4-05: ordinary phrasings that falsely blocked', () => {
-  it('labelledPeriod reads the label attached to this figure only', () => {
-    expect(labelledPeriod('$6,000.00', 'Monthly Base Rent: $6,000.00; Monthly CAM Estimate: $500.00')).toBe('month')
-    expect(labelledPeriod('$72,000.00', 'Annual Base Rent of $72,000.00')).toBe('year')
-    expect(labelledPeriod('$6,000.00', 'Base Rent: $6,000.00 per month')).toBe('month')
-    expect(labelledPeriod('$120,000.00', 'Base Rent of $120,000.00, payable in twelve equal monthly installments of $10,000.00')).toBeNull()
-    expect(labelledPeriod('$500.00', 'Annual Base Rent: $6,000.00; Monthly CAM Estimate: $500.00')).toBe('month')
-  })
-  it('a monthly-labelled rent whose quote also prints a CAM figure of exactly 1/12 is a warning, not a block', () => {
-    const q = 'Monthly Base Rent: $6,000.00; Monthly CAM Estimate: $500.00'
-    const r = mutate((raw) => { raw.rent_schedule = [row('2026-01-01', '2028-12-31', '$6,000.00', q)]; raw.escalations = [] }, addLines([q], 1))
-    expect(blockText(r)).not.toMatch(/does not fit/)
-    expect(warnsOf(r)).toContainEqual(expect.objectContaining({ path: 'rent_schedule[0]', message: expect.stringMatching(/Confirm the period "month": the quote also prints \$500/) }))
-    expect(r.abstract.rent_schedule[0].base_rent_monthly).toBe(6000)
-  })
-  it('the arithmetic contradiction still blocks when the figure is unlabelled or labelled the other way', () => {
-    for (const q of ['Base Rent of $120,000.00, payable in twelve equal monthly installments of $10,000.00', 'Annual Base Rent: $120,000.00; Monthly Installment: $10,000.00']) {
+describe('merge gate R4-05 / R5-01 / R5-02: the arithmetic and partial-waiver guards have no wording exceptions', () => {
+  it('an arithmetic month/year contradiction blocks whatever labels the quote carries', () => {
+    for (const q of [
+      'Base Rent of $120,000.00, payable in twelve equal monthly installments of $10,000.00',
+      'Annual Base Rent: $120,000.00; Monthly Installment: $10,000.00',
+      'Base Rent, payable in equal monthly installments, shall be $120,000.00 ($10,000.00 per month)',
+      'Tenant shall pay Base Rent, payable monthly in advance, of $120,000.00 for the first Lease Year, being $10,000.00 per month',
+      'Monthly CAM Estimate $800.00, Base Rent $120,000.00, payable in installments of $10,000.00',
+    ]) {
       const r = mutate((raw) => { raw.rent_schedule = [row('2026-01-01', '2028-12-31', '$120,000.00', q)]; raw.escalations = [] }, addLines([q], 1))
-      expect(blockText(r)).toMatch(/period "month" does not fit/)
+      expect(blockText(r), q).toMatch(/period "month" does not fit/)
+      expect(r.abstract.rent_schedule[0].base_rent_monthly).toBeNull()
     }
   })
-  it('a pro-rata share percentage in a full waiver quote is not a partial waiver', () => {
-    const q = 'Base Rent and Tenant’s Share (8.5%) of Operating Expenses shall be fully abated for January 2026'
-    const r = mutate((raw) => { Object.assign(con(raw), { kind: 'full_waiver', value_as_written: '', quote: q }) }, addLines([q], 1))
-    expect(blockText(r)).not.toMatch(/partial waiver/)
-    const q2 = 'fifty percent (50%) of Base Rent shall be abated for January 2026'
-    expect(blockText(mutate((raw) => { Object.assign(con(raw), { kind: 'full_waiver', value_as_written: '', quote: q2 }) }, addLines([q2], 1)))).toMatch(/partial waiver/)
+  it('a correct monthly rent whose quote prints another figure of exactly 1/12 also blocks (fail closed; entered by hand)', () => {
+    const q = 'Monthly Base Rent: $6,000.00; Monthly CAM Estimate: $500.00'
+    const r = mutate((raw) => { raw.rent_schedule = [row('2026-01-01', '2028-12-31', '$6,000.00', q)]; raw.escalations = [] }, addLines([q], 1))
+    expect(blockText(r)).toMatch(/period "month" does not fit/)
+  })
+  it('any percentage under 100% in a full waiver quote blocks, a share percentage included', () => {
+    for (const q of [
+      "Base Rent and Tenant's Share (8.5%) of Operating Expenses shall be fully abated for January 2026",
+      "Tenant's Share reduced to 50% for January 2026",
+      "Tenant's pro rata share of Base Rent shall be abated at 50% for January 2026",
+      'fifty percent (50%) of Base Rent shall be abated for January 2026',
+    ]) {
+      const r = mutate((raw) => { Object.assign(con(raw), { kind: 'full_waiver', value_as_written: '', quote: q }) }, addLines([q], 1))
+      expect(blockText(r), q).toMatch(/partial waiver/)
+    }
   })
   it('date forms: "Sept. 1", no space after the comma, "twenty first"; and both ISO boundaries (D2/D5)', () => {
     expect(dateInQuote('2027-09-01', 'commences on Sept. 1, 2027')).toBe(true)
     expect(dateInQuote('2027-09-01', 'commences on Sept 1, 2027')).toBe(true)
+    expect(dateInQuote('2027-09-01', 'commences on Sep. 1, 2027')).toBe(true)
+    expect(dateInQuote('2027-01-01', 'commences on January 12027')).toBe(false)
+    expect(dateInQuote('2027-01-01', 'commences on January 1 2027')).toBe(true)
     expect(dateInQuote('2027-01-01', 'commences on January 1,2027')).toBe(true)
     expect(dateInQuote('2027-01-21', 'the twenty first (21st) day of January, 2027')).toBe(true)
     expect(dateInQuote('2027-01-01', 'commences on January 1,20271')).toBe(false)

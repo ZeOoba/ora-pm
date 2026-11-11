@@ -511,24 +511,6 @@ function periodContradiction(n: number, period: string, quote: string): string |
 }
 
 /**
- * The period the lease attaches to this exact figure: a label in the same clause just before it
- * ("Monthly Base Rent: $6,000.00", "Annual Rent of $72,000.00") or the words right after it
- * ("$6,000.00 per month"). null when unlabelled or labelled both ways.
- */
-export function labelledPeriod(written: string, quote: string): 'month' | 'year' | null {
-  const q = normalizeForMatch(quote).toLowerCase()
-  const w = normalizeForMatch(written).toLowerCase()
-  const i = q.indexOf(w)
-  if (i === -1) return null
-  const before = (q.slice(0, i).split(/;|\.\s/).pop() ?? '').slice(-40)
-  const after = q.slice(i + w.length).replace(/^[\s,]*(?:\([^)]*\)\s*)?/, '')
-  const monthly = /\bmonthly\b|\bper month\b/.test(before) || /^(?:per\s+month|a\s+month|monthly|each\s+month)\b/.test(after)
-  const annual = /\b(?:annual|annually|yearly)\b|\bper (?:annum|year)\b/.test(before) ||
-    /^(?:per\s+(?:lease\s+|calendar\s+)?year|per\s+annum|annually|a\s+year|each\s+year|yearly)\b/.test(after)
-  return monthly && !annual ? 'month' : annual && !monthly ? 'year' : null
-}
-
-/**
  * TRIAGE ONLY (a warning, never a block): the words directly after the printed figure name a period
  * different from the one chosen ("$2,400.00 per lease year" entered as "month"). Only the phrase that
  * immediately follows the figure counts, so "$1,000.00 per month, subject to annual reconciliation"
@@ -588,10 +570,10 @@ function resolveAmounts(a: LeaseAbstract, flags: AbstractFlag[]): Confirmation[]
     if (n === null) { block(path, `"${written}" is not a dollar amount as printed (e.g. "$1,250.00"); enter it exactly as the lease prints it.`); return null }
     if (!writtenInQuote(written, s.quote)) { block(path, `"${written}" is not written in its quote; confirm the amount against the lease.`); return null }
     const contradiction = periodContradiction(n, period, s.quote)
-    // Merge gate R4-05: when the figure itself is labelled with the chosen period ("Monthly Base Rent:
-    // $6,000.00; Monthly CAM: $500.00"), the other figure is a different charge, so this is triage only.
-    if (contradiction && labelledPeriod(written, s.quote) === period) warn(path, `Confirm the period "${period}": ${contradiction}.`)
-    else if (contradiction) { block(path, `The period "${period}" does not fit: ${contradiction}.`); return null }
+    // Merge gate R5-01: this stays a hard block with no wording-based exception. A round-4 exception for a
+    // figure "labelled" with its period let $120,000.00 "payable in equal monthly installments" bill as
+    // monthly; the rarer false block ("Monthly Base Rent: $6,000.00; Monthly CAM: $500.00") is entered by hand.
+    if (contradiction) { block(path, `The period "${period}" does not fit: ${contradiction}.`); return null }
     const wording = periodWordingMismatch(written, period, s.quote)
     if (wording) flags.push({ severity: 'warn', path, message: `Confirm the period "${period}": ${wording}.` })
     if (period === 'psf_year') needRsf(path)
@@ -681,11 +663,9 @@ function resolveAmounts(a: LeaseAbstract, flags: AbstractFlag[]): Confirmation[]
       if (c.value_as_written.trim()) block(path, 'A full waiver has no value.')
       // Merge gate R2-04: a quote that prints a percentage under 100% describes a PARTIAL waiver. (A dollar
       // figure alone does not: "Base Rent of $10,000.00 shall be fully abated" is a full waiver.)
-      // Merge gate R4-05: a percentage that labels a share ("Tenant's Share (8.5%) of Operating Expenses")
-      // is not the waiver's extent.
-      const pcts = [...c.quote.matchAll(/(\d+(?:\.\d+)?)\s*%/g)]
-        .filter((m) => !/\b(?:share|pro[- ]?rata|proportionate)\b[^.;%]{0,12}$/i.test(c.quote.slice(Math.max(0, (m.index ?? 0) - 30), m.index)))
-        .map((m) => Number(m[1]))
+      // Merge gate R5-02: no exception for a "share" percentage; "Tenant's Share reduced to 50%" is a
+      // partial waiver. A full waiver quoting a pro-rata share is entered by hand.
+      const pcts = [...c.quote.matchAll(/(\d+(?:\.\d+)?)\s*%/g)].map((m) => Number(m[1]))
       if (pcts.some((p) => p < 100)) block(path, 'The quote prints a percentage under 100%, so this is a partial waiver, not a full one.')
     } else if (c.kind === 'pct') {
       const v = parseWrittenPercent(c.value_as_written)
