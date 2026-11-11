@@ -89,7 +89,7 @@ const state = {
   leaseBaseYear: null as number | null,
   leaseBaseAmount: null as number | null,
   omitOtherLease: false,
-  /** 0025 columns on the tenant lease (recoverable_categories, cam_annual_cap, ...). */
+  /** 0026 columns on the tenant lease (recoverable_categories, cam_annual_cap, ...). */
   leaseExtra: {} as Row,
   expenses: [] as Row[],
   unitsError: null as PgError | null,
@@ -127,7 +127,7 @@ function leaseRows(): Row[] {
   const sfOf = (unitId: string) => unitRows().find((u) => u.id === unitId)
   const row = (r: Row): Row => ({
     proportionate_share_pct: null, base_year: null, base_year_expense_amount: null,
-    // 0025 column defaults (DB: NULL / NULL / NULL / NOT NULL DEFAULT true / NULL).
+    // 0026 column defaults (DB: NULL / NULL / NULL / NOT NULL DEFAULT true / NULL).
     recoverable_categories: null, cam_annual_cap: null, cam_cap_through: null, cam_reconciled: true, cam_exclusion_reason: null,
     ...r,
     units: { sf: sfOf(r.unit_id as string)?.sf, property_id: sfOf(r.unit_id as string)?.property_id },
@@ -1692,10 +1692,10 @@ describe('approve, REFUTE F3 (2026-11-10): balanced drafts, foreign key holders,
 })
 
 // ---------------------------------------------------------------------------
-// 0025 (Gabriel rulings 2026-11-10): recoverable categories, annual cap, not-reconciled leases.
+// 0026 (Gabriel rulings 2026-11-10): recoverable categories, annual cap, not-reconciled leases.
 // Tenant: 1,000 SF of a 50,000 RSF denominator = 2%, full 2025.
 // ---------------------------------------------------------------------------
-describe('POST /api/cam/calculate: recoverable categories, cap, not reconciled (0025)', () => {
+describe('POST /api/cam/calculate: recoverable categories, cap, not reconciled (0026)', () => {
   const BODY = { lease_id: TENANT_LEASE_ID, reconciliation_year: 2025 }
   const savedPatch = () => (camInsertSpy.mock.calls.at(-1)?.[0] ?? camUpdateSpy.mock.calls.at(-1)?.[0]) as Row
   beforeEach(() => {
@@ -1738,7 +1738,7 @@ describe('POST /api/cam/calculate: recoverable categories, cap, not reconciled (
     expect(savedPatch()).toMatchObject({ actual_cam_owed: 200, recovery_basis: 'above_base_year' })
   })
 
-  it('REFUTE 0025: a base amount entered for other categories is refused (422), nothing priced', async () => {
+  it('REFUTE 0026: a base amount entered for other categories is refused (422), nothing priced', async () => {
     state.leaseExtra = { recoverable_categories: ['taxes'], base_year_categories: null }
     state.leaseBaseYear = 2024
     state.leaseBaseAmount = 110000
@@ -1795,7 +1795,7 @@ describe('POST /api/cam/calculate: recoverable categories, cap, not reconciled (
   })
 })
 
-describe('GET /api/cam/pool: 0025 fields', () => {
+describe('GET /api/cam/pool: 0026 fields', () => {
   it('lists categories, the not-reconciled flag and reason; excluded shares are left out of the over-recovery sum', async () => {
     state.leaseStatedPct = 0.6
     state.leaseExtra = { cam_reconciled: false, cam_exclusion_reason: 'Fixed charge in rent' }
@@ -1824,7 +1824,7 @@ describe('GET /api/cam/pool: 0025 fields', () => {
   })
 })
 
-describe('POST /api/cam/:id/approve: 0025 edits after the draft', () => {
+describe('POST /api/cam/:id/approve: 0026 edits after the draft', () => {
   beforeEach(approveFixture)
 
   it('categories narrowed after the draft: 409 stale, nothing posted', async () => {

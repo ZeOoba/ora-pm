@@ -250,7 +250,7 @@ export function LeaseDetail() {
                           {data.base_year_expense_amount != null ? ` · ${formatCurrency(data.base_year_expense_amount)} total` : ' · base-year amount not entered'}
                         </TermRow>
                       )}
-                      {/* 0025: recovery scope, cap and exclusion. */}
+                      {/* 0026: recovery scope, cap and exclusion. */}
                       {data.cam_reconciled === false ? (
                         <TermRow label="CAM">Not reconciled{data.cam_exclusion_reason ? ` · ${data.cam_exclusion_reason}` : ''}</TermRow>
                       ) : data.recoverable_categories != null && (

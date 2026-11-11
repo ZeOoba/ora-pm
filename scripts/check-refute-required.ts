@@ -88,6 +88,9 @@ export const FINANCIAL_SOURCE_PATHS: ReadonlySet<string> = new Set([
   // trial balance. The ledger becomes the book of record at QB cutover.
   'server/lib/gl.ts',
   'server/routes/gl.ts',
+  // B8 slice 1: QuickBooks chart import — maps each QB account type to the ledger type every
+  // posting to that account inherits.
+  'server/lib/qb-iif-accounts.ts',
 ])
 
 // Tables whose schema/view/index changes are financial: charges (what tenants owe), payments

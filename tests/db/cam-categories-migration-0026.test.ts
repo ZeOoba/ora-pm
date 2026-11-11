@@ -1,5 +1,5 @@
 /// <reference types="node" />
-// tests/db/cam-categories-migration-0025.test.ts
+// tests/db/cam-categories-migration-0026.test.ts
 //
 // Gabriel rulings 2026-11-10: lease recoverable categories, annual CAM cap, not-reconciled flag.
 // The CHECKs are exercised on real PostgreSQL (PGlite) — the category CHECK uses a SQL function,
@@ -13,7 +13,7 @@ import { btree_gist } from '@electric-sql/pglite/contrib/btree_gist'
 import { freshMigratedDb, migrationFiles } from '../fixtures/pg-migrations'
 import { EXPENSE_CATEGORIES } from '../../server/lib/cam'
 
-const FILE = '0025_cam_recoverable_categories.sql'
+const FILE = '0026_cam_recoverable_categories.sql'
 const DIR = join(__dirname, '../../supabase/migrations')
 const LEASE = `'40000000-0000-0000-0000-0000000000a1'`
 
@@ -50,13 +50,13 @@ const upd = (set: string) => pg.exec(`UPDATE leases SET ${set} WHERE id = ${LEAS
 const ok = (set: string) => expect(upd(set)).resolves.not.toThrow()
 const bad = (set: string) => expect(upd(set)).rejects.toThrow()
 
-describe('migration 0025 on real Postgres', () => {
+describe('migration 0026 on real Postgres', () => {
   beforeEach(async () => {
     await upd(`recoverable_categories = NULL, base_year_categories = NULL, cam_cap_through = NULL, cam_annual_cap = NULL, cam_reconciled = true, cam_exclusion_reason = NULL`)
   })
 
-  it('ships as the only 0025 migration file', () => {
-    expect(migrationFiles().filter((f) => f.startsWith('0025_'))).toEqual([FILE])
+  it('ships as the only 0026 migration file', () => {
+    expect(migrationFiles().filter((f) => f.startsWith('0026_'))).toEqual([FILE])
   })
 
   it('existing leases default to today\'s behaviour (all categories, no cap, reconciled)', async () => {
@@ -123,7 +123,7 @@ describe('migration 0025 on real Postgres', () => {
   })
 })
 
-describe('migration 0025 on pg-mem (the shared harness)', () => {
+describe('migration 0026 on pg-mem (the shared harness)', () => {
   it('the chain still applies and new lease columns default as today', () => {
     const db = freshMigratedDb()
     db.none(`

@@ -16,13 +16,13 @@ export interface CAMInput {
   baseYear?: number | null
   /** leases.base_year_expense_amount: Base-year TOTAL recoverable expenses ($/yr) for the same pool
    *  the lease is billed on — its recoverable categories, or the whole building/project pool when it
-   *  has none (0025; see assertBaseYearCategoriesMatch) — not the tenant's share. */
+   *  has none (0026; see assertBaseYearCategoriesMatch) — not the tenant's share. */
   baseYearExpenseAmount?: number | null
   /** The calendar year being reconciled. Required when baseYear or annualCap is set. */
   reconciliationYear?: number
-  /** leases.cam_annual_cap (0025): annual $ cap on what the tenant owes. Null/omitted = no cap. */
+  /** leases.cam_annual_cap (0026): annual $ cap on what the tenant owes. Null/omitted = no cap. */
   annualCap?: number | null
-  /** leases.cam_cap_through (0025): last ISO date the cap applies. Null = no end. Needs annualCap. */
+  /** leases.cam_cap_through (0026): last ISO date the cap applies. Null = no end. Needs annualCap. */
   capThrough?: string | null
   /** Days the lease was in effect in the year, and the year's length: prorate the cap. Required
    *  when annualCap is set. */
@@ -52,10 +52,10 @@ export interface CAMOutput {
 export class CAMTermsError extends Error {}
 
 // ---------------------------------------------------------------------------
-// Recoverable categories (migration 0025; Gabriel rulings 2026-11-10)
+// Recoverable categories (migration 0026; Gabriel rulings 2026-11-10)
 //
 // A lease passes through a subset of the expense categories (expenses.category, 0002). NULL = every
-// recoverable expense — the pre-0025 behaviour every existing lease keeps until a human enters its
+// recoverable expense — the pre-0026 behaviour every existing lease keeps until a human enters its
 // categories. The 2026-11-10 extraction found taxes-only (55 New Plant Ct) and CAM-without-taxes
 // (2008/2026 Zettler, 4595 E 5th: "Landlord shall pay all real estate taxes" plus a share of common
 // area maintenance and water/storm/sewer) leases that a whole-pool share overbills.
@@ -67,7 +67,7 @@ export type ExpenseCategory = typeof EXPENSE_CATEGORIES[number]
 const CATEGORY_SET: ReadonlySet<string> = new Set(EXPENSE_CATEGORIES)
 
 /** Throws CAMTermsError unless `categories` is null or a non-empty, duplicate-free subset of
- *  EXPENSE_CATEGORIES (the 0025 CHECK). */
+ *  EXPENSE_CATEGORIES (the 0026 CHECK). */
 export function assertValidCategories(categories: readonly string[] | null): asserts categories is readonly ExpenseCategory[] | null {
   if (categories === null) return
   if (!Array.isArray(categories) || categories.length === 0) {
@@ -103,7 +103,7 @@ export function poolForCategories(
 const catKey = (c: readonly string[] | null) => (c === null ? null : [...c].sort().join(','))
 
 /**
- * REFUTE (0025 pass, 2026-11-10): the base-year amount is a total for ONE set of categories. Compared
+ * REFUTE (0026 pass, 2026-11-10): the base-year amount is a total for ONE set of categories. Compared
  * against a different category pool, the 3x plausibility guard does not catch it, and recovery is
  * silently zeroed or overbilled (taxes base of $41k against an all-category pool billed ~$34.5k too
  * much). leases.base_year_categories records which categories the amount covers (null = every
@@ -125,7 +125,7 @@ export function assertBaseYearCategoriesMatch(
   )
 }
 
-/** A lease marked not CAM-reconciled (leases.cam_reconciled = false, 0025: tenant pays expenses
+/** A lease marked not CAM-reconciled (leases.cam_reconciled = false, 0026: tenant pays expenses
  *  directly, or a fixed charge is bundled in rent) is refused with its recorded reason. */
 export function assertCamReconciled(leaseId: string, reconciled: boolean, reason: string | null): void {
   if (reconciled) return
@@ -285,7 +285,7 @@ export function overRecoveryWarning(pool: CAMPool, annualShareById: ReadonlyMap<
 }
 
 /**
- * overRecoveryWarning per category (0025): a lease only takes a share of its own categories, so the
+ * overRecoveryWarning per category (0026): a lease only takes a share of its own categories, so the
  * shares are summed per category — two 60% leases on taxes-only and CAM-only never over-recover,
  * two on taxes do. `byId` holds each reconciled lease's annual share and categories (null = all);
  * leases marked not CAM-reconciled must be left out by the caller. Returns at most one warning,
@@ -478,7 +478,7 @@ export function resolveTenantShare(input: ShareInput): ResolvedShare {
  * Gross-up is NOT applied: both forms make it permissive ("Landlord may ... gross up"), so it is a
  * landlord election, not a lease requirement. Admin fees are not modelled (no fields).
  *
- * 0025 (rulings 2026-11-10): `totalRecoverableExpenses` is the LEASE's pool — the recoverable
+ * 0026 (rulings 2026-11-10): `totalRecoverableExpenses` is the LEASE's pool — the recoverable
  * expenses in its categories (poolForCategories), so a base-year amount must be the base year's
  * total for those same categories. An annual cap (annualCap / capThrough) is applied last.
  */
@@ -580,7 +580,7 @@ export function calculateCAMTrueUp(input: CAMInput): CAMOutput {
     recoveryBasis = 'none_gross'
   }
 
-  // Annual cap (0025; ruling 2026-11-10), applied LAST — after rent type, expense stop and base
+  // Annual cap (0026; ruling 2026-11-10), applied LAST — after rent type, expense stop and base
   // year — because the lease caps what the tenant pays ("Taxes, Insurance, and CAM expense incurred
   // by the tenant shall not exceed $15,000 annually", 29000 Information Lane 507).
   const uncapped = Math.round(owed * 100) / 100

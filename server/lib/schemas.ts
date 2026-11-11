@@ -46,7 +46,7 @@ export const TenantInsertSchema = z.object({
 }).strict()
 export const TenantUpdateSchema = TenantInsertSchema.partial()
 
-// 0025 cross-field rules the DB CHECKs also enforce, checked here so a bad payload is a 422 with a
+// 0026 cross-field rules the DB CHECKs also enforce, checked here so a bad payload is a 422 with a
 // field message rather than a CHECK violation. Applied only to keys present in the payload (a PUT
 // is partial; the DB still guards a combination split across two requests).
 function camTermsCrossChecks(v: { cam_reconciled?: boolean; cam_exclusion_reason?: string | null; cam_annual_cap?: number | null; cam_cap_through?: string | null }, ctx: z.RefinementCtx) {
@@ -76,13 +76,13 @@ const LeaseObjectSchema = z.object({
   base_year: z.number().int().min(1900).max(2200).nullish(),
   // Base-year TOTAL recoverable expenses for the whole building/project pool ($/yr) — not the tenant's share.
   base_year_expense_amount: nonNegativeAmount.nullish(),
-  // 0025 / CAM rulings 2026-11-10 — same rules as the DB CHECKs. recoverable_categories: null = every
+  // 0026 / CAM rulings 2026-11-10 — same rules as the DB CHECKs. recoverable_categories: null = every
   // recoverable expense; otherwise a non-empty, duplicate-free subset of expenses.category.
   recoverable_categories: z.array(z.enum(EXPENSE_CATEGORIES)).min(1, 'Pick at least one category')
     .refine((a) => new Set(a).size === a.length, 'A category is listed twice').nullish(),
   base_year_categories: z.array(z.enum(EXPENSE_CATEGORIES)).min(1, 'Pick at least one category')
     .refine((a) => new Set(a).size === a.length, 'A category is listed twice').nullish(),
-  // NUMERIC(12,2): whole cents above 0, below the column's range (REFUTE 0025: 0.001 and 1e13 used
+  // NUMERIC(12,2): whole cents above 0, below the column's range (REFUTE 0026: 0.001 and 1e13 used
   // to pass here and fail at the DB as a 500).
   cam_annual_cap: z.number().positive('Amount must be positive').max(9_999_999_999.99)
     .refine((n) => Math.abs(Math.round(n * 100) - n * 100) < 1e-6, 'At most 2 decimal places').nullish(),

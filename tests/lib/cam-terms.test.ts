@@ -13,8 +13,8 @@ const blank: CamTermsForm = {
   cam_reconciled: true, cam_exclusion_reason: '', recoverable_categories: null, cam_annual_cap: '', cam_cap_through: '',
   saved_base_year_categories: null, saved_base_year_expense_amount: '',
 }
-// 0025 defaults in a payload: every recoverable expense, no cap, reconciled.
-const P0025 = { recoverable_categories: null, base_year_categories: null, cam_annual_cap: null, cam_cap_through: null, cam_reconciled: true, cam_exclusion_reason: null }
+// 0026 defaults in a payload: every recoverable expense, no cap, reconciled.
+const P0026 = { recoverable_categories: null, base_year_categories: null, cam_annual_cap: null, cam_cap_through: null, cam_reconciled: true, cam_exclusion_reason: null }
 
 describe('fractionToPercentText', () => {
   it('shows stored fractions as clean percents', () => {
@@ -30,11 +30,11 @@ describe('camTermsFormFromLease -> camTermsPayload round trip', () => {
   it('a stated 11.11% share and a base year survive unchanged', () => {
     const lease = { rent_type: 'nnn' as const, proportionate_share_pct: 0.1111, base_year: 2022, base_year_expense_amount: 185700, expense_stop_amount: null }
     const p = camTermsPayload(camTermsFormFromLease(lease))
-    expect(p).toEqual({ rent_type: 'nnn', proportionate_share_pct: 0.1111, base_year: 2022, base_year_expense_amount: 185700, expense_stop_amount: null, ...P0025 })
+    expect(p).toEqual({ rent_type: 'nnn', proportionate_share_pct: 0.1111, base_year: 2022, base_year_expense_amount: 185700, expense_stop_amount: null, ...P0026 })
   })
 
   it('blank fields clear to null (a share removed falls back to premises SF / building RSF)', () => {
-    expect(camTermsPayload(blank)).toEqual({ rent_type: 'nnn', proportionate_share_pct: null, base_year: null, base_year_expense_amount: null, expense_stop_amount: null, ...P0025 })
+    expect(camTermsPayload(blank)).toEqual({ rent_type: 'nnn', proportionate_share_pct: null, base_year: null, base_year_expense_amount: null, expense_stop_amount: null, ...P0026 })
   })
 
   it('a percent typed as 12.5 is stored as the fraction 0.125, never 12.5', () => {
@@ -97,13 +97,13 @@ describe('validateCamTerms', () => {
   })
 })
 
-// 0025 (Gabriel rulings 2026-11-10): recoverable categories, annual cap, not-reconciled flag.
-describe('0025 CAM terms: categories, cap, not reconciled', () => {
+// 0026 (Gabriel rulings 2026-11-10): recoverable categories, annual cap, not-reconciled flag.
+describe('0026 CAM terms: categories, cap, not reconciled', () => {
   it('the client category list mirrors the server engine', () => {
     expect([...CAM_CATEGORIES]).toEqual([...EXPENSE_CATEGORIES])
   })
 
-  it('a lease read before 0025 (no columns) opens as reconciled, all categories, no cap', () => {
+  it('a lease read before 0026 (no columns) opens as reconciled, all categories, no cap', () => {
     const f = camTermsFormFromLease({ rent_type: 'nnn', proportionate_share_pct: null, base_year: null, base_year_expense_amount: null, expense_stop_amount: null })
     expect(f).toMatchObject({ cam_reconciled: true, recoverable_categories: null, cam_annual_cap: '', cam_cap_through: '', cam_exclusion_reason: '' })
   })
@@ -147,7 +147,7 @@ describe('0025 CAM terms: categories, cap, not reconciled', () => {
     expect(validateCamTerms({ ...blank, cam_annual_cap: '15000', cam_cap_through: '2029-06-30' })).toEqual({})
   })
 
-  it('every valid 0025 payload is accepted by the server LeaseUpdateSchema; invalid ones are not', () => {
+  it('every valid 0026 payload is accepted by the server LeaseUpdateSchema; invalid ones are not', () => {
     const valid: CamTermsForm[] = [
       { ...blank, recoverable_categories: ['taxes'] },
       { ...blank, recoverable_categories: ['maintenance', 'utilities', 'other'] },
@@ -168,7 +168,7 @@ describe('0025 CAM terms: categories, cap, not reconciled', () => {
   })
 })
 
-describe('REFUTE 0025: base-year amount tied to its categories; cap/date bounds', () => {
+describe('REFUTE 0026: base-year amount tied to its categories; cap/date bounds', () => {
   const baseLease = {
     rent_type: 'nnn' as const, proportionate_share_pct: null, base_year: 2024, base_year_expense_amount: 41000, expense_stop_amount: null,
     recoverable_categories: ['taxes'], base_year_categories: ['taxes'],

@@ -1,7 +1,7 @@
 // tests/lib/cam-categories.test.ts
 //
 // Lease-level recoverable categories, the annual CAM cap and the not-reconciled flag (Gabriel
-// rulings 2026-11-10; migration 0025). Cases are the leases the 2026-11-10 extraction found:
+// rulings 2026-11-10; migration 0026). Cases are the leases the 2026-11-10 extraction found:
 // 55 New Plant (taxes only), 2008/2026 Zettler and 4595 E 5th (CAM + water/sewer, no taxes or
 // insurance), 29000 Information Lane 507 ($15,000/yr cap on taxes + insurance + CAM for the initial
 // term), 401 Sunburst / 7658 Fishel (direct pay, never reconciled).
@@ -23,7 +23,7 @@ describe('EXPENSE_CATEGORIES', () => {
 })
 
 describe('poolForCategories', () => {
-  it('null categories = every recoverable expense (pre-0025 behaviour)', () => {
+  it('null categories = every recoverable expense (pre-0026 behaviour)', () => {
     expect(poolForCategories(totals(), null)).toBe(86_000)
   })
 
@@ -194,7 +194,7 @@ describe('overRecoveryWarningByCategory', () => {
     expect(w[0]).toMatch(/120\.00%/)
   })
 
-  it('null categories on both = one combined warning (pre-0025 behaviour, unlabelled per category)', () => {
+  it('null categories on both = one combined warning (pre-0026 behaviour, unlabelled per category)', () => {
     const w = overRecoveryWarningByCategory(pool, new Map([
       ['A', { annualPct: 0.6, categories: null }],
       ['B', { annualPct: 0.6, categories: null }],
@@ -203,7 +203,7 @@ describe('overRecoveryWarningByCategory', () => {
   })
 })
 
-describe('assertBaseYearCategoriesMatch (REFUTE 0025)', () => {
+describe('assertBaseYearCategoriesMatch (REFUTE 0026)', () => {
   it('no base year: nothing to check', () => {
     expect(() => assertBaseYearCategoriesMatch(null, ['taxes'], null)).not.toThrow()
   })

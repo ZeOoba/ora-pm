@@ -112,7 +112,7 @@ export function CamTermsEditor({ leaseId, lease }: {
               <TextInput id="cam-stop" inputMode="decimal" value={form.expense_stop_amount} onChange={e => set('expense_stop_amount', e.target.value)} />
             </Field>
 
-            {/* 0025 (rulings 2026-11-10): what passes through, the annual cap, and exclusion. */}
+            {/* 0026 (rulings 2026-11-10): what passes through, the annual cap, and exclusion. */}
             <fieldset className="mb-4 border-t border-border pt-4">
               <legend className="text-sm font-medium text-navy">Recovery</legend>
               <Checkbox

@@ -28,7 +28,7 @@ type CamPoolLease = {
   stated_share_pct: number | null; computed_share_pct: number | null
   share_basis: ShareBasis | null; annual_share_pct: number | null; effective_share_pct: number | null
   share_error: string | null; warnings: string[]
-  /** 0025: categories passed through (null = all) and the not-reconciled flag with its reason. */
+  /** 0026: categories passed through (null = all) and the not-reconciled flag with its reason. */
   recoverable_categories?: string[] | null; cam_reconciled?: boolean; cam_exclusion_reason?: string | null
 }
 type CamPool = {
@@ -144,7 +144,7 @@ export function CAMList() {
       // recoverable total. allSettled: a lease the server refuses (e.g. modified-gross with no
       // expense stop) must not hide the results of the others.
       const results = await Promise.allSettled(
-        // 0025: a lease marked not CAM-reconciled is skipped (the server would 422 it anyway).
+        // 0026: a lease marked not CAM-reconciled is skipped (the server would 422 it anyway).
         reconciledLeases.map(l =>
           api.post<{ data: CAMReconciliation; warnings?: string[] }>('/cam/calculate', {
             lease_id: l.lease_id,

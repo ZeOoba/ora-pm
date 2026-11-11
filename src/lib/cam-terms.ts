@@ -21,7 +21,7 @@ export const CAM_CATEGORY_LABEL: Record<CamCategory, string> = {
   other: 'Other',
 }
 
-/** Editor presets (0025). "All" stores NULL: every recoverable expense, the pre-0025 behaviour. */
+/** Editor presets (0026). "All" stores NULL: every recoverable expense, the pre-0026 behaviour. */
 export const CAM_CATEGORY_PRESETS: { label: string; categories: CamCategory[] | null }[] = [
   { label: 'All recoverable', categories: null },
   { label: 'Taxes only', categories: ['taxes'] },
@@ -35,16 +35,16 @@ export interface CamTermsForm {
   base_year: string
   base_year_expense_amount: string
   expense_stop_amount: string
-  /** 0025: false = never CAM-reconciled; the reason is then required. */
+  /** 0026: false = never CAM-reconciled; the reason is then required. */
   cam_reconciled: boolean
   cam_exclusion_reason: string
-  /** 0025: null = every recoverable expense; otherwise the categories the lease passes through. */
+  /** 0026: null = every recoverable expense; otherwise the categories the lease passes through. */
   recoverable_categories: CamCategory[] | null
-  /** 0025: annual $ cap and the last ISO date it applies (blank = none / no end). */
+  /** 0026: annual $ cap and the last ISO date it applies (blank = none / no end). */
   cam_annual_cap: string
   cam_cap_through: string
   /** As loaded (read-only): which categories the saved base-year amount covers, and that amount.
-   *  REFUTE 0025: changing the categories of a base-year lease requires re-entering the amount. */
+   *  REFUTE 0026: changing the categories of a base-year lease requires re-entering the amount. */
   saved_base_year_categories: CamCategory[] | null
   saved_base_year_expense_amount: string
 }
@@ -80,7 +80,7 @@ export function camTermsFormFromLease(l: CamTermsLease): CamTermsForm {
     base_year: s(l.base_year),
     base_year_expense_amount: s(l.base_year_expense_amount),
     expense_stop_amount: s(l.expense_stop_amount),
-    // A lease read before 0025 has none of these columns: today's behaviour (reconciled, all).
+    // A lease read before 0026 has none of these columns: today's behaviour (reconciled, all).
     cam_reconciled: l.cam_reconciled !== false,
     cam_exclusion_reason: l.cam_exclusion_reason ?? '',
     recoverable_categories: l.recoverable_categories == null ? null : [...l.recoverable_categories] as CamCategory[],
@@ -129,7 +129,7 @@ export function validateCamTerms(f: CamTermsForm): CamTermsErrors {
   if (f.rent_type === 'modified_gross' && f.expense_stop_amount.trim() === '' && !hasBaseYear && !e.expense_stop_amount) {
     e.expense_stop_amount = 'Modified gross needs an expense stop ($/SF/yr) or a base year'
   }
-  // 0025 — same rules as the DB CHECKs and server/lib/cam.ts.
+  // 0026 — same rules as the DB CHECKs and server/lib/cam.ts.
   if (!f.cam_reconciled && f.cam_exclusion_reason.trim() === '') {
     e.cam_exclusion_reason = 'Say why (e.g. tenant pays taxes directly; fixed charge in rent)'
   }
@@ -141,7 +141,7 @@ export function validateCamTerms(f: CamTermsForm): CamTermsErrors {
       e.recoverable_categories = 'Unknown or repeated category'
     }
   }
-  // REFUTE 0025: the base-year amount is a total for one category set. Changing the categories of a
+  // REFUTE 0026: the base-year amount is a total for one category set. Changing the categories of a
   // base-year lease without re-entering the amount would compare it against a different pool.
   if (hasBaseYear && !e.base_year_expense_amount && f.base_year_expense_amount.trim() !== ''
     && categoriesKey(f.recoverable_categories) !== categoriesKey(f.saved_base_year_categories)

@@ -13,12 +13,12 @@
 --
 -- Columns:
 --   leases.recoverable_categories  TEXT[]: the subset of expenses.category values (0002) the lease
---                                  passes through. NULL = every recoverable expense (the pre-0025
+--                                  passes through. NULL = every recoverable expense (the pre-0026
 --                                  behaviour, kept for every existing lease). Non-empty, no
 --                                  duplicates, every element a 0002 category (cam_categories_valid).
 --   leases.base_year_categories    TEXT[]: the categories base_year_expense_amount covers (NULL = every
 --                                  recoverable expense). /cam/calculate refuses a base-year lease
---                                  whose recoverable_categories differ (REFUTE 0025: a base total
+--                                  whose recoverable_categories differ (REFUTE 0026: a base total
 --                                  for one category set against another pool zeroes or overbills
 --                                  recovery, and the 3x guard does not catch it).
 --   leases.cam_annual_cap          annual $ cap on what the tenant owes for the year, prorated by
@@ -83,7 +83,7 @@ COMMENT ON COLUMN leases.cam_exclusion_reason IS 'Why the lease is not CAM-recon
 -- ---------------------------------------------------------------------------
 -- 3) cam_reconciliations: what a draft billed
 ALTER TABLE cam_reconciliations ADD COLUMN IF NOT EXISTS recoverable_categories TEXT[];
-COMMENT ON COLUMN cam_reconciliations.recoverable_categories IS 'Categories the draft''s pool summed. NULL = every recoverable expense (or calculated before 0025).';
+COMMENT ON COLUMN cam_reconciliations.recoverable_categories IS 'Categories the draft''s pool summed. NULL = every recoverable expense (or calculated before 0026).';
 ALTER TABLE cam_reconciliations ADD COLUMN IF NOT EXISTS cam_annual_cap_applied NUMERIC(12,2);
 ALTER TABLE cam_reconciliations DROP CONSTRAINT IF EXISTS cam_reconciliations_cam_annual_cap_applied_check;
 ALTER TABLE cam_reconciliations ADD CONSTRAINT cam_reconciliations_cam_annual_cap_applied_check
@@ -92,7 +92,7 @@ COMMENT ON COLUMN cam_reconciliations.cam_annual_cap_applied IS 'The prorated an
 
 -- ---------------------------------------------------------------------------
 -- 4) Category CHECKs (DO block: re-runnable, and outside pg-mem, which has no SQL functions;
---    tests/db/cam-categories-migration-0025.test.ts exercises them on real Postgres).
+--    tests/db/cam-categories-migration-0026.test.ts exercises them on real Postgres).
 DO $$
 BEGIN
   ALTER TABLE leases DROP CONSTRAINT IF EXISTS leases_recoverable_categories_check;

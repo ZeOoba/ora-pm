@@ -37,7 +37,7 @@ camRouter.get('/', async (c) => {
 // Keyset-paged on expenses.id (uuid PK) so the total is complete regardless of PostgREST's max_rows
 // cap; the year is an inclusive DATE range compared in Postgres. Shared by GET
 // /recoverable-expenses, GET /pool and POST /calculate (which no longer trusts a client total).
-// 0025 (rulings 2026-11-10): totals are also split by expenses.category, so a lease that passes
+// 0026 (rulings 2026-11-10): totals are also split by expenses.category, so a lease that passes
 // through only some categories is billed a share of those (poolForCategories). An expense whose
 // category is not one of EXPENSE_CATEGORIES (impossible under the 0002 CHECK) fails closed.
 type RecoverableTotals = { total: number; count: number; byCategory: Record<ExpenseCategory, number> }
@@ -83,7 +83,7 @@ type PoolLeaseRow = {
   rent_type: CAMRentType
   /** leases.proportionate_share_pct (0021): NUMERIC, may arrive as a string from PostgREST. */
   proportionate_share_pct: number | string | null
-  /** 0025: categories passed through (null = all), and the not-reconciled flag. */
+  /** 0026: categories passed through (null = all), and the not-reconciled flag. */
   recoverable_categories: string[] | null
   cam_reconciled: boolean
   cam_exclusion_reason: string | null
@@ -224,7 +224,7 @@ function shareForPoolLease(pool: CAMPool, lease: PoolLeaseRow, denominatorRSF: n
 
 /** Every pool lease's resolved share (or the CAMTermsError that refused it), plus the pool-level
  *  over-recovery warning (shares of one category summing above 100% on some day) — warning only.
- *  0025: a lease marked not CAM-reconciled still has its share resolved for display but is left out
+ *  0026: a lease marked not CAM-reconciled still has its share resolved for display but is left out
  *  of the over-recovery sum (it recovers nothing); a lease with invalid categories is refused. */
 function resolvePoolShares(pool: CAMPool, leases: PoolLeaseRow[], denominatorRSF: number | null): {
   byLease: Map<string, ResolvedShare | CAMTermsError>
@@ -319,7 +319,7 @@ camRouter.get('/pool', async (c) => {
             effective_share_pct: share?.effectivePct ?? null,
             share_error: shareError,
             warnings: share?.warnings ?? [],
-            // 0025: the CAM page lists a not-reconciled lease with its reason and skips it in
+            // 0026: the CAM page lists a not-reconciled lease with its reason and skips it in
             // Calculate all; /calculate refuses it (422) regardless.
             recoverable_categories: l.recoverable_categories ?? null,
             cam_reconciled: l.cam_reconciled !== false,
@@ -348,7 +348,7 @@ function draftMismatch(saved: Record<string, unknown>, now: Record<string, unkno
   for (const f of ['share_basis', 'recovery_basis']) {
     if ((saved[f] ?? null) !== (now[f] ?? null)) return `${f} ${String(saved[f])} -> ${String(now[f])}`
   }
-  // 0025: a category or cap edit after the draft changes what it billed even when the dollar
+  // 0026: a category or cap edit after the draft changes what it billed even when the dollar
   // figures happen to match. Categories compared as sorted sets; the cap in cents, null-aware.
   const cats = (v: unknown) => (Array.isArray(v) ? [...v].map(String).sort().join(',') : null)
   if (cats(saved.recoverable_categories) !== cats(now.recoverable_categories)) {
@@ -370,7 +370,7 @@ type ReconciliationPatch = {
   share_basis: ResolvedShare['basis']
   recovery_basis: string
   basis_warnings: string | null
-  /** 0025: the categories the pool summed (null = all) and the prorated cap when it bound. */
+  /** 0026: the categories the pool summed (null = all) and the prorated cap when it bound. */
   recoverable_categories: ExpenseCategory[] | null
   cam_annual_cap_applied: number | null
   status: 'draft'
@@ -422,7 +422,7 @@ async function computeReconciliation(db: Db, lease_id: string, reconciliation_ye
   } | null
   const refused = (message: string, httpStatus: 422 | 400 = 422): Computed => ({ kind: 'refused', message, httpStatus })
 
-  // 0025 (ruling 2026-11-10): a lease marked not CAM-reconciled (direct pay, fixed charge in rent)
+  // 0026 (ruling 2026-11-10): a lease marked not CAM-reconciled (direct pay, fixed charge in rent)
   // is refused before anything else is read, with its recorded reason. cam_reconciled is NOT NULL
   // DEFAULT true; anything but an explicit true is refused (fail closed).
   try {
@@ -449,7 +449,7 @@ async function computeReconciliation(db: Db, lease_id: string, reconciliation_ye
     return refused(`Lease base year "${String(leaseRow?.base_year)}" is not a calendar year`)
   }
   const baseYearExpenseAmount = numOrNull(leaseRow?.base_year_expense_amount)
-  // REFUTE (0025 pass): the base-year amount must cover the categories the lease is billed on.
+  // REFUTE (0026 pass): the base-year amount must cover the categories the lease is billed on.
   try {
     assertBaseYearCategoriesMatch(baseYear, recoverableCategories, leaseRow?.base_year_categories ?? null)
   } catch (err) {
@@ -461,7 +461,7 @@ async function computeReconciliation(db: Db, lease_id: string, reconciliation_ye
   // same-unit overlap, stale-end-date and RSF-covers-pool checks) and the property's denominator RSF.
   const recoverable = await loadRecoverableTotal(db, propertyId, reconciliation_year)
   if (recoverable.error) return { kind: 'db_error', error: recoverable.error, label: 'Failed to load recoverable expenses' }
-  // 0025: the lease's pool — the recoverable expenses in its categories (all when null). Saved as
+  // 0026: the lease's pool — the recoverable expenses in its categories (all when null). Saved as
   // total_property_recoverable_expenses so the draft shows the pool it was billed a share of.
   let total_property_recoverable_expenses: number
   try {
