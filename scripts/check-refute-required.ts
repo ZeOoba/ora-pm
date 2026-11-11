@@ -98,6 +98,7 @@ export const FINANCIAL_SOURCE_PATHS: ReadonlySet<string> = new Set([
   'server/lib/gl-opening-balance.ts',
   // B8 slice 3: AR posting planner — chooses which charges, payments, voids and returns post when.
   'server/lib/gl-ar-posting.ts',
+  'server/lib/gl-ar-cash-posting.ts',
 ])
 
 // Tables whose schema/view/index changes are financial: charges (what tenants owe), payments

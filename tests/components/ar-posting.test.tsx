@@ -15,7 +15,7 @@ vi.mock('@tanstack/react-query', async (orig) => ({
 }))
 
 import { ArPosting } from '../../src/pages/books/ArPosting'
-import { AR_ROLE_LABELS, centralToday, signedDollars } from '../../src/pages/books/ar-posting-helpers'
+import { AR_ROLE_LABELS, centralToday, rolesForBasis, signedDollars } from '../../src/pages/books/ar-posting-helpers'
 import { AR_ROLES } from '../../server/lib/gl-ar-posting'
 import { flatNavItems } from '../../src/components/nav-config'
 
@@ -33,6 +33,12 @@ describe('AR posting page', () => {
   })
   it('role labels cover exactly the server roles', () => {
     expect(AR_ROLE_LABELS.map((r) => r.role).sort()).toEqual([...AR_ROLES].sort())
+  })
+  it('each basis maps only the roles it uses (accrual: AR; cash: prepaid rent)', () => {
+    expect(rolesForBasis('accrual').map((r) => r.role)).toContain('ar')
+    expect(rolesForBasis('accrual').map((r) => r.role)).not.toContain('prepaid_rent')
+    expect(rolesForBasis('cash').map((r) => r.role)).toContain('prepaid_rent')
+    expect(rolesForBasis('cash').map((r) => r.role)).not.toContain('ar')
   })
   it('today is the US Central calendar day', () => {
     expect(centralToday(new Date('2026-11-12T03:30:00Z'))).toBe('2026-11-11')

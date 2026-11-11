@@ -376,19 +376,20 @@ describe('AR posting (B8 slice 3)', () => {
   const P1 = 'f0000000-0000-4000-8000-000000000001'
   const U1 = 'f1000000-0000-4000-8000-000000000001'
   const L1 = 'f2000000-0000-4000-8000-000000000001'
-  function install(opts: { basis?: string; start?: string | null; tieout?: boolean; charges?: Row[]; payments?: Row[]; postings?: Row[]; locked?: string[] } = {}) {
+  function install(opts: { basis?: string; start?: string | null; tieout?: boolean; charges?: Row[]; payments?: Row[]; postings?: Row[]; events?: Row[]; locked?: string[] } = {}) {
     const tables: Record<string, ReturnType<typeof pgTable>> = {
       gl_entities: pgTable([{ id: E, accounting_basis: opts.basis ?? 'accrual', ledger_start_date: opts.start === undefined ? '2026-10-01' : opts.start }]),
       gl_ar_tieouts: pgTable(opts.tieout === false ? [] : [{ entity_id: E }]),
       properties: pgTable([{ id: P1, gl_entity_id: E }]),
       units: pgTable([{ id: U1, property_id: P1 }]),
       leases: pgTable([{ id: L1, unit_id: U1 }]),
-      charges: pgTable(opts.charges ?? [{ id: 'c1', lease_id: L1, charge_date: '2026-10-01', type: 'rent', amount: 1000, description: null, voided_at: null }]),
+      charges: pgTable(opts.charges ?? [{ id: 'c1', lease_id: L1, charge_date: '2026-10-01', due_date: '2026-10-01', type: 'rent', amount: 1000, description: null, voided_at: null }]),
       payments: pgTable(opts.payments ?? [{ id: 'p1', lease_id: L1, payment_date: '2026-10-03', amount: '1000.00', method: 'check', stripe_status: null, status_changed_at: null }]),
       gl_ar_postings: pgTable(opts.postings ?? []),
+      gl_ar_cash_events: pgTable(opts.events ?? [{ id: 'none', entity_id: 'other', kind: 'charge', source_id: 'none' }]),
       gl_ar_tieout_items: pgTable([]),
       gl_periods: pgTable((opts.locked ?? []).map((m) => ({ entity_id: E, period_start: m, status: 'locked' }))),
-      gl_ar_accounts: pgTable([{ entity_id: E, role: 'ar', account_id: A1 }, { entity_id: E, role: 'undeposited_funds', account_id: A2 }, { entity_id: E, role: 'rent', account_id: A2 }]),
+      gl_ar_accounts: pgTable([{ entity_id: E, role: 'ar', account_id: A1 }, { entity_id: E, role: 'undeposited_funds', account_id: A2 }, { entity_id: E, role: 'rent', account_id: A2 }, { entity_id: E, role: 'prepaid_rent', account_id: A1 }]),
     }
     mockFrom.mockImplementation((t: string) => tables[t])
   }
@@ -425,9 +426,20 @@ describe('AR posting (B8 slice 3)', () => {
     expect((await post(`${base}/run`, { through: '2026-10-31', apply: true, expected_plan_hash: (await preview()).plan_hash })).status).toBe(409)
   })
 
-  it('refuses cash-basis LLCs, no tie-out, no start date, and a through date outside start..today', async () => {
+  it('cash-basis LLCs plan replay events and post through gl_post_ar_cash_batch', async () => {
     install({ basis: 'cash' })
-    expect(JSON.stringify(await (await post(`${base}/run`, { through: '2026-10-31' })).json())).toContain('cash-basis LLCs is not available yet')
+    const d = await preview()
+    expect(d.items.map((i) => [i.kind, i.source_id])).toEqual([['charge', 'c1'], ['payment', 'p1']])
+    expect((d as unknown as { by_role: Record<string, number> }).by_role).toEqual({ undeposited_funds: 100000, rent: -100000 })
+    mockRpc.mockResolvedValue({ data: 2, error: null })
+    expect((await post(`${base}/run`, { through: '2026-10-31', apply: true, expected_plan_hash: d.plan_hash })).status).toBe(201)
+    expect(mockRpc).toHaveBeenCalledWith('gl_post_ar_cash_batch', expect.objectContaining({ p_items: [{ kind: 'charge', source_id: 'c1' }, { kind: 'payment', source_id: 'p1' }] }))
+    // Already in the replay: nothing more to post.
+    install({ basis: 'cash', events: [{ id: 'e1', entity_id: E, kind: 'charge', source_id: 'c1' }, { id: 'e2', entity_id: E, kind: 'payment', source_id: 'p1' }] })
+    expect((await preview()).items).toEqual([])
+  })
+
+  it('refuses no tie-out, no start date, and a through date outside start..today', async () => {
     install({ tieout: false })
     expect((await post(`${base}/run`, { through: '2026-10-31' })).status).toBe(409)
     install({ start: null })

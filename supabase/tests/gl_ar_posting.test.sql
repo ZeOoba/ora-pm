@@ -68,7 +68,7 @@ INSERT INTO gl_ar_accounts (entity_id, role, account_id, updated_by) VALUES
 -- A2: the tie-out needs an opening balance, and must tie to the cent (app open AR = 1000 - 600 - 200 = 200.00).
 DO $$ BEGIN
   PERFORM pg_temp.expect_error($q$SELECT gl_confirm_ar_tieout('a7000000-0000-4000-8000-000000000001', 't')$q$, 'post the entity''s opening balance before');
-  PERFORM pg_temp.expect_error($q$SELECT gl_confirm_ar_tieout('a7000000-0000-4000-8000-000000000002', 't')$q$, 'cash-basis entities is not available yet');
+  PERFORM pg_temp.expect_error($q$SELECT gl_confirm_ar_tieout('a7000000-0000-4000-8000-000000000002', 't')$q$, 'post the entity''s opening balance before');
   PERFORM gl_post_opening_balance('a7000000-0000-4000-8000-000000000001', '2026-10-01',
     '[{"account_id":"a7a00000-0000-4000-8000-000000000002","debit_cents":19999},{"account_id":"a7a00000-0000-4000-8000-000000000001","debit_cents":980001},{"account_id":"a7a00000-0000-4000-8000-000000000005","credit_cents":1000000}]', 'tester');
   SET CONSTRAINTS ALL IMMEDIATE;
@@ -100,7 +100,7 @@ UPDATE payments SET stripe_status = 'succeeded' WHERE id = 'a7d00000-0000-4000-8
 DO $$ BEGIN
   PERFORM pg_temp.expect_error($q$SELECT gl_post_ar_batch('a7000000-0000-4000-8000-000000000001', gl_today() + 1, '[]', 't')$q$, 'between the ledger start date and today');
   PERFORM pg_temp.expect_error($q$SELECT gl_post_ar_batch('a7000000-0000-4000-8000-000000000001', '2026-09-30', '[]', 't')$q$, 'between the ledger start date and today');
-  PERFORM pg_temp.expect_error($q$SELECT gl_post_ar_batch('a7000000-0000-4000-8000-000000000002', gl_today(), '[]', 't')$q$, 'cash-basis entities is not available yet');
+  PERFORM pg_temp.expect_error($q$SELECT gl_post_ar_batch('a7000000-0000-4000-8000-000000000002', gl_today(), '[]', 't')$q$, 'is cash-basis; its AR posts through gl_post_ar_cash_batch');
   PERFORM pg_temp.expect_error($q$SELECT gl_post_ar_batch('a7000000-0000-4000-8000-000000000001', '2026-10-31', '[{"kind":"charge","source_id":"a7c00000-0000-4000-8000-000000000000"}]', 't')$q$, 'dated before the ledger start date; its AR is in the opening balance|before the ledger start date');
   PERFORM pg_temp.expect_error($q$SELECT gl_post_ar_batch('a7000000-0000-4000-8000-000000000001', '2026-10-31', '[{"kind":"payment","source_id":"a7d00000-0000-4000-8000-000000000004"}]', 't')$q$, 'is in the opening balance');
   RAISE NOTICE 'ok: A4 through date bounded; cash-basis refused; pre-start charges and counted pre-start payments never post';
@@ -146,7 +146,7 @@ BEGIN
   PERFORM pg_temp.expect_error($q$WITH e AS (INSERT INTO gl_journal_entries (entity_id, entry_date, memo, source, posted_by) VALUES ('a7000000-0000-4000-8000-000000000001', '2026-10-15', 'orphan', 'ar_posting', 't') RETURNING id)
      INSERT INTO gl_journal_lines (entry_id, entity_id, account_id, line_no, debit_cents, credit_cents)
      SELECT id, 'a7000000-0000-4000-8000-000000000001'::uuid, 'a7a00000-0000-4000-8000-000000000002'::uuid, 1, 100::bigint, 0::bigint FROM e
-     UNION ALL SELECT id, 'a7000000-0000-4000-8000-000000000001'::uuid, 'a7a00000-0000-4000-8000-000000000006'::uuid, 2, 0::bigint, 100::bigint FROM e$q$, 'AR posting with no gl_ar_postings link');
+     UNION ALL SELECT id, 'a7000000-0000-4000-8000-000000000001'::uuid, 'a7a00000-0000-4000-8000-000000000006'::uuid, 2, 0::bigint, 100::bigint FROM e$q$, 'AR posting with no AR link');
   -- a direct ar_posting entry with the WRONG amount, linked: refused at commit (A3)
   PERFORM pg_temp.expect_error($q$WITH e AS (INSERT INTO gl_journal_entries (entity_id, entry_date, memo, source, posted_by) VALUES ('a7000000-0000-4000-8000-000000000001', '2026-10-15', 'wrong', 'ar_posting', 't') RETURNING id),
      l AS (INSERT INTO gl_journal_lines (entry_id, entity_id, account_id, line_no, debit_cents, credit_cents)
