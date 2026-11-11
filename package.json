@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint . --max-warnings 0",
     "check:refute": "tsx scripts/check-refute-required.ts",
+    "check:migrations": "node scripts/check-migration-numbers.mjs",
     "eval:lease-intake-model": "tsx evals/lease-intake-model-eval/run-eval.ts",
     "verify:gl-sql": "bash scripts/verify-gl-sql.sh"
   },

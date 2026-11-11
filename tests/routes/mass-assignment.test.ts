@@ -317,7 +317,7 @@ describe('POST /api/charges — idempotency_key gap closure (OI-046)', () => {
     expect(inserted.idempotency_key).toBe('manual:client-retry-token-1')
   })
 
-  // REFUTE 0022 (C1b): a hand-posted cam_true_up is invisible to approve_cam_reconciliation(), which
+  // REFUTE 0024 (C1b): a hand-posted cam_true_up is invisible to approve_cam_reconciliation(), which
   // only sees the reserved cam_true_up:<lease>:<year> key: approving the draft would double-charge.
   it.each([
     ['type cam_true_up with a generated key', { ...VALID, type: 'cam_true_up' }],

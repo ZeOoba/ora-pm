@@ -45,10 +45,10 @@ chargesRouter.post('/', async (c) => {
   const parsed = ChargeInsertSchema.safeParse({ ...raw, source: 'manual' })
   if (!parsed.success) return c.json({ error: parsed.error.flatten().fieldErrors }, 422)
   // CAM true-ups are posted ONLY by POST /cam/:id/approve, through approve_cam_reconciliation()
-  // (migration 0022), which keys them cam_true_up:<lease>:<year> and bills the reconciliation in the
+  // (migration 0024), which keys them cam_true_up:<lease>:<year> and bills the reconciliation in the
   // same transaction. A hand-posted cam_true_up (any key) is invisible to that check, so approving the
   // draft would post a second true-up (a double charge) or bill a credit while it is live; a charge
-  // holding a reserved cam_true_up: key blocks the real one. Refuse both (REFUTE 0022, C1b).
+  // holding a reserved cam_true_up: key blocks the real one. Refuse both (REFUTE 0024, C1b).
   if (parsed.data.type === 'cam_true_up' || parsed.data.idempotency_key?.startsWith('cam_true_up:')) {
     return c.json({
       error: 'CAM true-up charges are posted only by approving the CAM reconciliation (CAM page, Approve & Bill). '
@@ -113,7 +113,7 @@ type CamGuard =
   | { kind: 'refuse'; status: 409 | 500; reason: string }
   | { kind: 'db_error'; error: { code?: string; message: string } }
 
-// Only a UUID-shaped lease part: 0022 builds the key from lease_id::text, and a malformed legacy key
+// Only a UUID-shaped lease part: 0024 builds the key from lease_id::text, and a malformed legacy key
 // would otherwise reach the uuid column filter and 500 (22P02) on every delete attempt (REFUTE D2).
 const CAM_KEY = /^cam_true_up:([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}):(\d{4})$/
 
@@ -123,7 +123,7 @@ const VOID_HOW = 'Void the charge instead: an administrator sets voided_at and v
   + 'database (migration 0016). The charge stays on record as an audit row.'
 
 // A billed CAM reconciliation's true-up must not be hard-deleted. approve_cam_reconciliation()
-// (migration 0022) posts it under cam_true_up:<lease>:<year> and marks the reconciliation billed in
+// (migration 0024) posts it under cam_true_up:<lease>:<year> and marks the reconciliation billed in
 // one transaction; approve then refuses any non-draft row (not_draft). Deleting the charge afterwards
 // left the row billed with nothing on the ledger and no way to re-post — the true-up was lost.
 //
@@ -139,9 +139,9 @@ const VOID_HOW = 'Void the charge instead: an administrator sets voided_at and v
 // Fail closed: a missing `type` (column dropped from the select) or an undeterminable year on a
 // cam_true_up refuses; any read error on cam_reconciliations is a 500, never a delete.
 //
-// Concurrency: no gap for rows 0022 posts — the charge becomes visible only in the same commit that
+// Concurrency: no gap for rows 0024 posts — the charge becomes visible only in the same commit that
 // bills the reconciliation, so a delete that can see the charge also sees `billed`. The residual
-// window is a PRE-0022 row left mid-approve (live keyed charge, draft reconciliation): an approve
+// window is a PRE-0024 row left mid-approve (live keyed charge, draft reconciliation): an approve
 // committing between this read and the DELETE bills it, then the delete removes it. Closing that
 // fully needs the delete inside a function holding the reconciliation lock (see PR body).
 async function billedCamTrueUpGuard(db: ReturnType<typeof getDb>, row: ChargeGuardRow): Promise<CamGuard> {

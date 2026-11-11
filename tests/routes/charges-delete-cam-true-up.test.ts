@@ -1,6 +1,6 @@
 // DELETE /api/charges/:id must not hard-delete the CAM true-up behind a billed reconciliation.
 //
-// approve_cam_reconciliation() (migration 0022) posts the true-up under cam_true_up:<lease>:<year>
+// approve_cam_reconciliation() (migration 0024) posts the true-up under cam_true_up:<lease>:<year>
 // and marks the reconciliation billed in one transaction. Deleting that charge afterwards left the
 // row billed with nothing on the ledger, and approve refuses a billed row (not_draft), so the
 // true-up was lost with no path back. The route now refuses (409) while the matching reconciliation
@@ -151,6 +151,10 @@ describe('DELETE /api/charges/:id — CAM true-up behind a billed reconciliation
 
     expect(res.status).toBe(500)
     expect(w.deleteSpy).not.toHaveBeenCalled()
+    // The raw DB message stays server-side (dbError); the client gets only the public text.
+    const body = (await res.json()) as { error: string }
+    expect(body.error).toBe('Failed to load CAM reconciliation')
+    expect(JSON.stringify(body)).not.toContain('statement timeout')
   })
 
   it('checks the reconciliation named by the reserved key, even when the charge row disagrees', async () => {

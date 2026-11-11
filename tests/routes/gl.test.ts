@@ -183,3 +183,83 @@ describe('chart of accounts import', () => {
     expect((await post(`/api/gl/entities/${E}/accounts`, { accounts: [{ qb_name: 'X', account_type: 'revenue' }] })).status).toBe(422)
   })
 })
+
+describe('POST /api/gl/entities/:id/accounts/qb-iif (QuickBooks chart import)', () => {
+  const HDR = '!ACCNT\tNAME\tREFNUM\tTIMESTAMP\tACCNTTYPE\tOBAMOUNT\tDESC\tACCNUM\tSCD\tBANKNUM\tEXTRA\tHIDDEN\tDELCOUNT\tUSEID'
+  const r = (name: string, type: string, num: string) => `ACCNT\t${name}\t1\t0\t${type}\t0.00\t\t${num}\t0\t\t\t N\t0\tN`.replace('\t N', '\tN')
+  const FILE = [HDR, r('Operating Cash', 'BANK', '1000'), r('Rental Income', 'INC', '4000')].join('\r\n')
+  const path = `/api/gl/entities/${E}/accounts/qb-iif`
+
+  function install(existing: Row[], insertResult: { data?: Row[] | null; error?: { code: string; message: string } | null } = {}) {
+    const select = vi.fn().mockResolvedValue({ data: insertResult.data ?? [{ id: 'n1' }, { id: 'n2' }], error: insertResult.error ?? null })
+    const insert = vi.fn(() => ({ select }))
+    const tables: Record<string, ReturnType<typeof pgTable>> = {
+      gl_entities: pgTable([{ id: E }]),
+      gl_accounts: pgTable(existing, { insert }),
+    }
+    mockFrom.mockImplementation((t: string) => tables[t])
+    return { insert }
+  }
+
+  it('dry run by default: returns the plan and writes nothing', async () => {
+    const { insert } = install([])
+    const res = await post(path, { iif: FILE })
+    expect(res.status).toBe(200)
+    const body = await res.json() as { data: { applied: boolean; new: { qb_name: string; account_type: string; qb_account_type: string }[] } }
+    expect(body.data.applied).toBe(false)
+    expect(body.data.new.map((a) => [a.qb_name, a.account_type, a.qb_account_type])).toEqual([['Operating Cash', 'asset', 'BANK'], ['Rental Income', 'income', 'INC']])
+    expect(insert).not.toHaveBeenCalled()
+  })
+
+  it('apply inserts only the new accounts, in one statement, with the QB type', async () => {
+    const { insert } = install([{ id: 'a1', entity_id: E, qb_name: 'Operating Cash', number: '1000', account_type: 'asset', qb_account_type: 'BANK', is_active: true }],
+      { data: [{ id: 'n2' }] })
+    const res = await post(path, { iif: FILE, apply: true })
+    expect(res.status).toBe(201)
+    expect(insert).toHaveBeenCalledTimes(1)
+    expect(insert).toHaveBeenCalledWith([{ entity_id: E, qb_name: 'Rental Income', number: '4000', account_type: 'income', qb_account_type: 'INC', is_active: true }])
+    expect((await res.json() as { data: { inserted: number } }).data.inserted).toBe(1)
+  })
+
+  it('apply refuses the whole file on any conflict (409) and writes nothing', async () => {
+    const { insert } = install([{ id: 'a1', entity_id: E, qb_name: 'Operating Cash', number: '1000', account_type: 'liability', qb_account_type: null, is_active: true }])
+    const res = await post(path, { iif: FILE, apply: true })
+    expect(res.status).toBe(409)
+    expect(insert).not.toHaveBeenCalled()
+  })
+
+  it('a bad file is a 422 with the reasons; unknown entity 404; bad body 422', async () => {
+    install([])
+    const bad = await post(path, { iif: [HDR, r('Cash', 'SAVINGS', '1')].join('\n') })
+    expect(bad.status).toBe(422)
+    expect(JSON.stringify(await bad.json())).toContain('unknown QuickBooks account type')
+    mockFrom.mockImplementation((t: string) => (t === 'gl_entities' ? pgTable([]) : pgTable([])))
+    expect((await post(path, { iif: FILE })).status).toBe(404)
+    install([])
+    expect((await post(path, { iif: '' })).status).toBe(422)
+    expect((await post(path, { iif: FILE, apply: 'yes' })).status).toBe(422)
+    expect((await post(path, { iif: FILE, entity_id: E })).status).toBe(422)
+    expect((await post('/api/gl/entities/nope/accounts/qb-iif', { iif: FILE })).status).toBe(422)
+  })
+
+  it('REFUTE N5: apply with the preview count refuses if the ledger changed since the preview', async () => {
+    const { insert } = install([])
+    const res = await post(path, { iif: FILE, apply: true, expected_new: 1 })
+    expect(res.status).toBe(409)
+    expect(JSON.stringify(await res.json())).toContain('changed since the preview')
+    expect(insert).not.toHaveBeenCalled()
+    expect((await post(path, { iif: FILE, apply: true, expected_new: 2 })).status).toBe(201)
+    expect((await post(path, { iif: FILE, apply: true, expected_new: -1 })).status).toBe(422)
+  })
+
+  it('an oversized request is refused before its body is read', async () => {
+    install([])
+    const res = await app.request(path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': String(20_000_000) }, body: '{}' }, env)
+    expect(res.status).toBe(413)
+  })
+
+  it('a concurrent insert of the same account is a 409, not a 500', async () => {
+    install([], { data: null, error: { code: '23505', message: 'duplicate key value violates unique constraint "gl_accounts_entity_qb_name_key"' } })
+    expect((await post(path, { iif: FILE, apply: true })).status).toBe(409)
+  })
+})

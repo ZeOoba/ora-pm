@@ -137,7 +137,7 @@ BEGIN
       IF NOT (v_rec.true_up_amount > 0 AND v_charge.amount = v_rec.true_up_amount) THEN
         RETURN jsonb_build_object('outcome', 'live_mismatch', 'charge_amount', v_charge.amount, 'true_up_amount', v_rec.true_up_amount);
       END IF;
-      -- Live and equal: already posted (rows left mid-approve by the pre-0022 code). Bill it.
+      -- Live and equal: already posted (rows left mid-approve by the pre-0024 code). Bill it.
       UPDATE cam_reconciliations SET status = 'billed', billed_date = p_today WHERE id = p_id;
       RETURN jsonb_build_object('outcome', 'billed', 'inserted', false, 'true_up_amount', v_rec.true_up_amount);
     END IF;
