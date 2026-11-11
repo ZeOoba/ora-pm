@@ -3,8 +3,11 @@ import { useSaveMutation } from '../../lib/mutations'
 import { Button } from '../../components/ui/Button'
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '../../components/ui/sheet'
 import { Field } from '../../components/form/Field'
-import { TextInput, Select } from '../../components/form/inputs'
-import { camTermsFormFromLease, camTermsPayload, validateCamTerms, type CamRentType, type CamTermsErrors, type CamTermsForm } from '../../lib/cam-terms'
+import { TextInput, Select, Checkbox } from '../../components/form/inputs'
+import {
+  CAM_CATEGORIES, CAM_CATEGORY_LABEL, CAM_CATEGORY_PRESETS, camTermsFormFromLease, camTermsPayload, validateCamTerms,
+  type CamCategory, type CamRentType, type CamTermsErrors, type CamTermsForm, type CamTermsLease,
+} from '../../lib/cam-terms'
 import type { Lease } from '../../types'
 
 /**
@@ -15,7 +18,7 @@ import type { Lease } from '../../types'
  */
 export function CamTermsEditor({ leaseId, lease }: {
   leaseId: string
-  lease: Pick<Lease, 'rent_type' | 'proportionate_share_pct' | 'base_year' | 'base_year_expense_amount' | 'expense_stop_amount'>
+  lease: CamTermsLease
 }) {
   const [open, setOpen] = useState(false)
   const [form, setForm] = useState<CamTermsForm>(() => camTermsFormFromLease(lease))
@@ -49,6 +52,20 @@ export function CamTermsEditor({ leaseId, lease }: {
     }
     mutation.mutate(camTermsPayload(form))
   }
+
+  function toggleCategory(c: CamCategory, on: boolean) {
+    // Unticking from "All" starts from the full list minus this one.
+    const current = form.recoverable_categories ?? [...CAM_CATEGORIES]
+    const next = on ? [...new Set([...current, c])] : current.filter(x => x !== c)
+    set('recoverable_categories', next.length === CAM_CATEGORIES.length ? null : next)
+  }
+
+  const presetActive = (cats: CamCategory[] | null) =>
+    cats === null
+      ? form.recoverable_categories === null
+      : form.recoverable_categories !== null
+        && form.recoverable_categories.length === cats.length
+        && cats.every(c => form.recoverable_categories!.includes(c))
 
   return (
     <>
@@ -87,13 +104,61 @@ export function CamTermsEditor({ leaseId, lease }: {
               label="Base-year recoverable total ($)"
               htmlFor="cam-base-amount"
               error={errors.base_year_expense_amount}
-              hint="The whole pool's recoverable Operating Costs + Taxes for the base year — not the tenant's share."
+              hint="The base year's recoverable total for the categories ticked below (the whole pool only when All recoverable) — not the tenant's share."
             >
               <TextInput id="cam-base-amount" inputMode="decimal" value={form.base_year_expense_amount} onChange={e => set('base_year_expense_amount', e.target.value)} />
             </Field>
             <Field label="Expense stop ($/SF/yr)" htmlFor="cam-stop" error={errors.expense_stop_amount}>
               <TextInput id="cam-stop" inputMode="decimal" value={form.expense_stop_amount} onChange={e => set('expense_stop_amount', e.target.value)} />
             </Field>
+
+            {/* 0026 (rulings 2026-11-10): what passes through, the annual cap, and exclusion. */}
+            <fieldset className="mb-4 border-t border-border pt-4">
+              <legend className="text-sm font-medium text-navy">Recovery</legend>
+              <Checkbox
+                id="cam-reconciled"
+                label="CAM-reconciled (untick if the tenant pays expenses directly or a fixed charge is in rent)"
+                checked={form.cam_reconciled}
+                onChange={e => set('cam_reconciled', e.target.checked)}
+              />
+              {!form.cam_reconciled && (
+                <Field label="Why it is not reconciled" htmlFor="cam-exclusion-reason" error={errors.cam_exclusion_reason}
+                  hint="Shown on the CAM page. Any CAM estimate already billed must be credited manually.">
+                  <TextInput id="cam-exclusion-reason" value={form.cam_exclusion_reason} onChange={e => set('cam_exclusion_reason', e.target.value)} />
+                </Field>
+              )}
+              {/* Always shown (also when not reconciled) so no validation error is ever hidden. */}
+              <>
+                  <Field label="Recoverable categories" htmlFor="cam-cat-taxes" error={errors.recoverable_categories}
+                    hint="Only recoverable expenses in these categories form this lease's pool. A base-year amount must cover the same categories.">
+                    <div className="mb-2 flex flex-wrap gap-2">
+                      {CAM_CATEGORY_PRESETS.map(p => (
+                        <Button key={p.label} type="button" variant="ghost"
+                          className={`border text-xs ${presetActive(p.categories) ? 'border-navy' : 'border-border'}`}
+                          aria-pressed={presetActive(p.categories)}
+                          onClick={() => set('recoverable_categories', p.categories === null ? null : [...p.categories])}>
+                          {p.label}
+                        </Button>
+                      ))}
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2">
+                      {CAM_CATEGORIES.map(c => (
+                        <Checkbox key={c} id={`cam-cat-${c}`} label={CAM_CATEGORY_LABEL[c]}
+                          checked={form.recoverable_categories === null || form.recoverable_categories.includes(c)}
+                          onChange={e => toggleCategory(c, e.target.checked)} />
+                      ))}
+                    </div>
+                  </Field>
+                  <Field label="Annual cap ($)" htmlFor="cam-cap" error={errors.cam_annual_cap}
+                    hint="The most the tenant pays for the year; prorated for a partial year. Blank = no cap.">
+                    <TextInput id="cam-cap" inputMode="decimal" value={form.cam_annual_cap} onChange={e => set('cam_annual_cap', e.target.value)} />
+                  </Field>
+                  <Field label="Cap applies through" htmlFor="cam-cap-through" error={errors.cam_cap_through}
+                    hint="e.g. the initial term's end. Blank = for the whole term.">
+                    <TextInput id="cam-cap-through" type="date" value={form.cam_cap_through} onChange={e => set('cam_cap_through', e.target.value)} />
+                  </Field>
+              </>
+            </fieldset>
             {mutation.error && (
               <p role="alert" className="mb-3 rounded-md border border-status-danger/30 bg-status-danger/5 p-2 text-sm text-status-danger">
                 {mutation.error.message}
