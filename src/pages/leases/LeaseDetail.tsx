@@ -250,6 +250,17 @@ export function LeaseDetail() {
                           {data.base_year_expense_amount != null ? ` · ${formatCurrency(data.base_year_expense_amount)} total` : ' · base-year amount not entered'}
                         </TermRow>
                       )}
+                      {/* 0026: recovery scope, cap and exclusion. */}
+                      {data.cam_reconciled === false ? (
+                        <TermRow label="CAM">Not reconciled{data.cam_exclusion_reason ? ` · ${data.cam_exclusion_reason}` : ''}</TermRow>
+                      ) : data.recoverable_categories != null && (
+                        <TermRow label="CAM recovers">{data.recoverable_categories.join(', ')}</TermRow>
+                      )}
+                      {data.cam_annual_cap != null && (
+                        <TermRow label="CAM annual cap">
+                          {formatCurrency(data.cam_annual_cap)}{data.cam_cap_through ? ` through ${data.cam_cap_through}` : ''}
+                        </TermRow>
+                      )}
                     </dl>
                   </SectionCard>
                   <SectionCard title="Property">
