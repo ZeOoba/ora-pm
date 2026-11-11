@@ -65,6 +65,10 @@ pg-mem tests skip: DO blocks, extensions, EXCLUDE constraints, plpgsql, views. S
 not available on this project's plan, so this test is the real-Postgres gate; keep new migrations
 re-runnable (IF NOT EXISTS, conname-guarded DO blocks, DROP IF EXISTS + ADD for constraints).
 
+## Numbering
+
+Take the next number above the highest on `main` **when you open the PR**, and re-check before merging: parallel sessions can pick the same number (#75 and #76 both took 0024 on 2026-11-10). `npm run check:migrations -- --base=origin/main` (after `git fetch origin main`) fails on a duplicate number, on a new migration numbered at or below `main`'s highest, or on a deleted or renamed migration that `main` already had. CI runs it on every PR and, through `migration-numbers.yml`, on every branch push, because a PR that conflicts with `main` gets no pull-request CI at all. When renumbering, also rename the migration's test file, its README row and any verify script that applies it.
+
 ## How migrations actually get applied to production
 
 **Preferred: the "DB Migrate (manual)" GitHub Actions workflow**

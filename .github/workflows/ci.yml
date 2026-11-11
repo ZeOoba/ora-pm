@@ -127,6 +127,21 @@ jobs:
           # if such a tag exists, which would let a tag shadow the real base and empty the range.
           npm run check:refute -- --strict --base="refs/remotes/origin/${{ github.base_ref }}"
 
+      # Migration-number collision gate (scripts/check-migration-numbers.mjs): unique NNNN numbers,
+      # and every migration this PR adds is numbered above everything on the base. Two sessions
+      # picked 0024 in parallel on 2026-11-10 (#75/#76). On pushes to main it still checks
+      # uniqueness. migration-numbers.yml runs the same check on every branch push, because a PR
+      # that conflicts with main gets no pull_request run at all.
+      - name: Migration numbers
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch --no-tags origin "${{ github.base_ref }}"
+            npm run check:migrations -- --base="refs/remotes/origin/${{ github.base_ref }}"
+          else
+            npm run check:migrations
+          fi
+
       - name: Check commit is still the tip of main
         id: tip
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
