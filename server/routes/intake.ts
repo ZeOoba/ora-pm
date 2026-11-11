@@ -181,14 +181,16 @@ intakeRouter.post('/lease', async (c) => {
       ...f,
       message: scrubConfidential(f.message, terms, `flags[${i}].message`, scrubbed) ?? 'Withheld by the confidentiality guard.',
     }))
-    // Phase 4 confirmation list. Only the lease-derived fields are scrubbed (as written, quote, amounts,
-    // dates, RSF); path, period, charge class, cadence and page are server values, and nulling them (as a
-    // term like "schedule" did to path, merge gate R3-06) would orphan the entry. A withheld field blocks
-    // the billing value the entry belongs to.
-    const DOC_FIELDS = ['as_written', 'quote', 'monthly', 'start', 'end', 'rsf', 'first_adjustment_date'] as const
+    // Phase 4 confirmation list. Every field is scrubbed EXCEPT the three fixed labels: path (a schema
+    // path), period and charge (closed enums or server labels such as "date"). Nulling a label, as a term
+    // like "schedule" did to path (merge gate R3-06), would orphan the entry; every other field, page and
+    // cadence included, can carry a model-supplied number and is scrubbed (merge gate R4-03/R4-04). A
+    // withheld field blocks the billing value the entry belongs to.
+    const LABEL_FIELDS: ReadonlySet<string> = new Set(['path', 'period', 'charge'])
     const confirmations = abs.confirmations.map((cf, i) => {
       const out = { ...cf }
-      for (const k of DOC_FIELDS) {
+      for (const k of Object.keys(cf) as Array<keyof typeof cf>) {
+        if (LABEL_FIELDS.has(k)) continue
         const before = scrubbed.length
         ;(out as Record<string, unknown>)[k] = scrubConfidential(cf[k], terms, `confirmations[${i}].${k}`, scrubbed)
         if (scrubbed.length > before) {

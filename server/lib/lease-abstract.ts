@@ -473,12 +473,15 @@ export function dateInQuote(iso: string, quote: string): boolean {
   const q = quote.toLowerCase().replace(/\s+/g, ' ')
   if (new RegExp(`(?<![\\d-])${iso}(?![\\d])`).test(q)) return true
   const full = MONTH_NAMES[mo - 1]
-  const month = `(?:${full}|${full.slice(0, 3)}\\.?)`
+  // Merge gate R4-05: "Sept. 1, 2027", "January 1,2027" (no space, common in extracted PDF text) and
+  // "twenty first" (no hyphen) are ordinary forms.
+  const month = `(?:${full}|${full.slice(0, 3)}${mo === 9 ? 't?' : ''}\\.?)`
   const ord = `0?${d}(?:st|nd|rd|th)?`
-  const dayToken = `(?:${ord}|${ORDINAL_WORDS[d - 1]})(?: ?\\( ?${ord} ?\\))?`
+  const dayToken = `(?:${ord}|${ORDINAL_WORDS[d - 1].replace('-', '[- ]')})(?: ?\\( ?${ord} ?\\))?`
+  const yr = `(?:, ?| )${y}\\b`
   const patterns = [
-    `\\b${month} ${ord},? ${y}\\b`,
-    `\\b${dayToken} (?:(?:day )?of )?${month},? ${y}\\b`,
+    `\\b${month} ${ord}${yr}`,
+    `\\b${dayToken} (?:(?:day )?of )?${month}${yr}`,
     `(?<![\\d/-])0?${mo}[/-]0?${d}[/-](?:${y}|${String(y).slice(2)})(?![\\d/-])`,
   ]
   return patterns.some((p) => new RegExp(p).test(q))
@@ -505,6 +508,24 @@ function periodContradiction(n: number, period: string, quote: string): string |
     if (period === 'year' && Math.abs(n * 12 - f) <= 1) return `the quote also prints $${f}, which is ${n} × 12, so ${n} is a monthly figure`
   }
   return null
+}
+
+/**
+ * The period the lease attaches to this exact figure: a label in the same clause just before it
+ * ("Monthly Base Rent: $6,000.00", "Annual Rent of $72,000.00") or the words right after it
+ * ("$6,000.00 per month"). null when unlabelled or labelled both ways.
+ */
+export function labelledPeriod(written: string, quote: string): 'month' | 'year' | null {
+  const q = normalizeForMatch(quote).toLowerCase()
+  const w = normalizeForMatch(written).toLowerCase()
+  const i = q.indexOf(w)
+  if (i === -1) return null
+  const before = (q.slice(0, i).split(/;|\.\s/).pop() ?? '').slice(-40)
+  const after = q.slice(i + w.length).replace(/^[\s,]*(?:\([^)]*\)\s*)?/, '')
+  const monthly = /\bmonthly\b|\bper month\b/.test(before) || /^(?:per\s+month|a\s+month|monthly|each\s+month)\b/.test(after)
+  const annual = /\b(?:annual|annually|yearly)\b|\bper (?:annum|year)\b/.test(before) ||
+    /^(?:per\s+(?:lease\s+|calendar\s+)?year|per\s+annum|annually|a\s+year|each\s+year|yearly)\b/.test(after)
+  return monthly && !annual ? 'month' : annual && !monthly ? 'year' : null
 }
 
 /**
@@ -567,7 +588,10 @@ function resolveAmounts(a: LeaseAbstract, flags: AbstractFlag[]): Confirmation[]
     if (n === null) { block(path, `"${written}" is not a dollar amount as printed (e.g. "$1,250.00"); enter it exactly as the lease prints it.`); return null }
     if (!writtenInQuote(written, s.quote)) { block(path, `"${written}" is not written in its quote; confirm the amount against the lease.`); return null }
     const contradiction = periodContradiction(n, period, s.quote)
-    if (contradiction) { block(path, `The period "${period}" does not fit: ${contradiction}.`); return null }
+    // Merge gate R4-05: when the figure itself is labelled with the chosen period ("Monthly Base Rent:
+    // $6,000.00; Monthly CAM: $500.00"), the other figure is a different charge, so this is triage only.
+    if (contradiction && labelledPeriod(written, s.quote) === period) warn(path, `Confirm the period "${period}": ${contradiction}.`)
+    else if (contradiction) { block(path, `The period "${period}" does not fit: ${contradiction}.`); return null }
     const wording = periodWordingMismatch(written, period, s.quote)
     if (wording) flags.push({ severity: 'warn', path, message: `Confirm the period "${period}": ${wording}.` })
     if (period === 'psf_year') needRsf(path)
@@ -657,7 +681,11 @@ function resolveAmounts(a: LeaseAbstract, flags: AbstractFlag[]): Confirmation[]
       if (c.value_as_written.trim()) block(path, 'A full waiver has no value.')
       // Merge gate R2-04: a quote that prints a percentage under 100% describes a PARTIAL waiver. (A dollar
       // figure alone does not: "Base Rent of $10,000.00 shall be fully abated" is a full waiver.)
-      const pcts = [...c.quote.matchAll(/(\d+(?:\.\d+)?)\s*%/g)].map((m) => Number(m[1]))
+      // Merge gate R4-05: a percentage that labels a share ("Tenant's Share (8.5%) of Operating Expenses")
+      // is not the waiver's extent.
+      const pcts = [...c.quote.matchAll(/(\d+(?:\.\d+)?)\s*%/g)]
+        .filter((m) => !/\b(?:share|pro[- ]?rata|proportionate)\b[^.;%]{0,12}$/i.test(c.quote.slice(Math.max(0, (m.index ?? 0) - 30), m.index)))
+        .map((m) => Number(m[1]))
       if (pcts.some((p) => p < 100)) block(path, 'The quote prints a percentage under 100%, so this is a partial waiver, not a full one.')
     } else if (c.kind === 'pct') {
       const v = parseWrittenPercent(c.value_as_written)
@@ -898,6 +926,11 @@ export function crossCheck(a: LeaseAbstract): AbstractFlag[] {
   a.recurring_charges.forEach((r, i) => {
     const p = `recurring_charges[${i}]`
     if (day(r.effective_end) < day(r.effective_start)) block(p, 'Ends before it starts.')
+    // Merge gate R4-01: billing runs from rent commencement, so months of a charge that starts earlier
+    // (CAM payable from commencement during free base rent) would silently never bill.
+    if (term && day(r.effective_start) < day(term.start)) {
+      block(p, `Starts ${r.effective_start}, before billing starts on ${term.start}; the months before ${term.start} would not be billed. Bill them by hand or correct the start.`)
+    }
     const amt = r.amount_monthly
     if (amt !== null && !(amt > 0)) block(p, 'Monthly amount must be positive.')
     else if (amt !== null && !isCents(amt)) block(p, `Amount ${amt} has fractions of a cent.`)
@@ -958,6 +991,11 @@ export function finalizeAbstract(raw: unknown, pages: readonly string[]): Abstra
   const sent = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>).escalations : undefined
   if (Array.isArray(sent) && sent.length > 0 && abstract.escalation === null) {
     flags.push({ severity: 'block', path: 'escalation', message: 'The lease states an escalation that could not be read; enter it manually.' })
+  }
+  // Merge gate R4-02: only one escalation rule can be applied. A second rule (3% to 2028, then 5%) would be
+  // dropped and every later step derived at the first rule's rate, so more than one rule blocks.
+  if (Array.isArray(sent) && sent.length > 1) {
+    flags.push({ severity: 'block', path: 'escalation', message: `The lease states ${sent.length} escalation rules; only one can be applied automatically. Enter the rent schedule by hand.` })
   }
   return { abstract, flags, warnings, confirmations }
 }

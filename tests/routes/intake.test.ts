@@ -608,6 +608,35 @@ describe("mode: 'abstract' (lease abstraction v2)", () => {
     expect(json.warnings).toContain('"confirmations[0].quote" was withheld by the confidentiality guard.') // IS7: reported
   })
 
+  // Merge gate R4-03/R4-04: EVERY confirmation field except the three labels is scrubbed, so a field
+  // added later is covered without editing a list. Values here are not in the lease text (the
+  // pre-egress scan would refuse it), so each can only reach the response through the model output.
+  it('every confirmation field except path, period and charge is scrubbed, and a hit blocks the entry', async () => {
+    const terms = ['77777', '2030-02-03', '2030-11-29', '2031-07-01', '60', '9']
+    const row = { start: '2030-02-03', end: '2030-11-29', amount_as_written: '$77,777.00', amount_period: 'month',
+      page: 9, quote: 'Base rent $77,777.00 per month', confidence: 0.9 }
+    const escalation = { kind: 'fixed_pct', value_as_written: '3%', value_period: 'none', cadence_months: 60, first_adjustment_date: '2031-07-01',
+      cpi_floor: -1, cpi_cap: 0, page: 9, quote: 'Base rent increases 3% every five years', confidence: 0.9 }
+    vi.stubGlobal('fetch', abstractFetch(modelJson({ rent_schedule: [row], escalations: [escalation] })))
+    const res = await app().request('/intake/lease',
+      body({ filename: 'acme-lease.pdf', pdfBase64: toBase64(await buildTextPdf(LEASE_TEXT)), tenant_id: 't', unit_id: 'u', mode: 'abstract' }),
+      { ...env, CONFIDENTIAL_TERMS: ['zeta', ...terms].join(',') })
+    expect(res.status).toBe(200)
+    const json = await res.json() as { confirmations: Array<Record<string, unknown>>; flags: Array<{ severity: string; path: string }> }
+    const rentCf = json.confirmations.find((c) => c.path === 'rent_schedule[0]')!
+    const escCf = json.confirmations.find((c) => c.path === 'escalation')!
+    expect(rentCf).toMatchObject({ period: 'month', charge: 'rent', as_written: null, monthly: null, start: null, end: null, page: null })
+    expect(escCf).toMatchObject({ charge: 'rent', cadence_months: null, first_adjustment_date: null, page: null })
+    for (const cf of json.confirmations) {
+      for (const [k, v] of Object.entries(cf)) {
+        if (k === 'path' || k === 'period' || k === 'charge') continue
+        for (const t of terms) expect(String(v ?? ''), `${String(cf.path)}.${k}`).not.toContain(t)
+      }
+    }
+    expect(json.flags).toContainEqual(expect.objectContaining({ severity: 'block', path: 'rent_schedule[0]' }))
+    expect(json.flags).toContainEqual(expect.objectContaining({ severity: 'block', path: 'escalation' }))
+  })
+
   it('IS4: a flag message withheld by the guard is replaced by a fixed notice, never null', async () => {
     const row = { start: '2026-01-01', end: '2026-12-31', amount_as_written: '$99999', amount_period: 'month',
       page: 1, quote: 'Base rent $4,500.00 per month', confidence: 0.9 }

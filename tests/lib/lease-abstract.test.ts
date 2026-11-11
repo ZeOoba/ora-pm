@@ -9,6 +9,7 @@ import {
   currencyFiguresInQuote,
   dateInQuote,
   finalizeAbstract,
+  labelledPeriod,
   namedMonths,
   normalizeForMatch,
   parseAbstractResponse,
@@ -715,5 +716,109 @@ describe('merge gate R3-07: money guards the auditor found unpinned', () => {
     expect(periodWordingMismatch('$2,400.00', 'month', 'a fee of $2,400.00 per annum')).toMatch(/per year/)
     expect(periodWordingMismatch('$10.00', 'month', 'rent of $10.00 per rentable square foot')).toMatch(/per year/)
     expect(periodWordingMismatch('$1,000.00', 'year', 'a fee of $1,000.00 is due, payable monthly')).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------------------------------
+// Merge gate PR #69, round 4 (cap raised to 5 by Gabriel).
+// ---------------------------------------------------------------------------------------------------
+const rcd = (raw: Wire) => raw.facts.push(fact('rent_commencement_date', '2026-03-01', 4, 'Rent Commencement Date: March 1, 2026'))
+
+describe('merge gate R4-01: a charge that starts before billing starts blocks', () => {
+  it('CAM payable from commencement while base rent commences later blocks (those months would never bill)', () => {
+    const r = mutate(rcd)
+    expect(blocks(r)).toContainEqual(expect.objectContaining({ path: 'recurring_charges[0]', message: expect.stringMatching(/Starts 2026-01-01, before billing starts on 2026-03-01/) }))
+  })
+  it('a charge starting on the billing start does not', () => {
+    const r = mutate((raw) => { rcd(raw); rec(raw).effective_start = '2026-03-01' })
+    expect(blockText(r)).not.toMatch(/before billing starts/)
+    expect(blockText(run(good()))).not.toMatch(/before billing starts/)
+  })
+  it('T2: the rent commencement date is confirmed against its own quote', () => {
+    expect(mutate(rcd).confirmations).toContainEqual(expect.objectContaining({ path: 'rent_commencement_date', as_written: '2026-03-01', period: 'date', page: 4, quote: 'Rent Commencement Date: March 1, 2026' }))
+  })
+})
+
+describe('merge gate R4-02: more than one escalation rule blocks', () => {
+  it('a second rule is never silently dropped', () => {
+    const r = mutate((raw) => { raw.escalations.push({ ...esc(raw), value_as_written: '5%', first_adjustment_date: '2029-01-01' }) })
+    expect(blocks(r)).toContainEqual(expect.objectContaining({ path: 'escalation', message: expect.stringMatching(/2 escalation rules; only one can be applied/) }))
+  })
+  it('one rule does not', () => {
+    expect(blockText(run(good()))).not.toMatch(/escalation rules/)
+  })
+})
+
+describe('merge gate R4-05: ordinary phrasings that falsely blocked', () => {
+  it('labelledPeriod reads the label attached to this figure only', () => {
+    expect(labelledPeriod('$6,000.00', 'Monthly Base Rent: $6,000.00; Monthly CAM Estimate: $500.00')).toBe('month')
+    expect(labelledPeriod('$72,000.00', 'Annual Base Rent of $72,000.00')).toBe('year')
+    expect(labelledPeriod('$6,000.00', 'Base Rent: $6,000.00 per month')).toBe('month')
+    expect(labelledPeriod('$120,000.00', 'Base Rent of $120,000.00, payable in twelve equal monthly installments of $10,000.00')).toBeNull()
+    expect(labelledPeriod('$500.00', 'Annual Base Rent: $6,000.00; Monthly CAM Estimate: $500.00')).toBe('month')
+  })
+  it('a monthly-labelled rent whose quote also prints a CAM figure of exactly 1/12 is a warning, not a block', () => {
+    const q = 'Monthly Base Rent: $6,000.00; Monthly CAM Estimate: $500.00'
+    const r = mutate((raw) => { raw.rent_schedule = [row('2026-01-01', '2028-12-31', '$6,000.00', q)]; raw.escalations = [] }, addLines([q], 1))
+    expect(blockText(r)).not.toMatch(/does not fit/)
+    expect(warnsOf(r)).toContainEqual(expect.objectContaining({ path: 'rent_schedule[0]', message: expect.stringMatching(/Confirm the period "month": the quote also prints \$500/) }))
+    expect(r.abstract.rent_schedule[0].base_rent_monthly).toBe(6000)
+  })
+  it('the arithmetic contradiction still blocks when the figure is unlabelled or labelled the other way', () => {
+    for (const q of ['Base Rent of $120,000.00, payable in twelve equal monthly installments of $10,000.00', 'Annual Base Rent: $120,000.00; Monthly Installment: $10,000.00']) {
+      const r = mutate((raw) => { raw.rent_schedule = [row('2026-01-01', '2028-12-31', '$120,000.00', q)]; raw.escalations = [] }, addLines([q], 1))
+      expect(blockText(r)).toMatch(/period "month" does not fit/)
+    }
+  })
+  it('a pro-rata share percentage in a full waiver quote is not a partial waiver', () => {
+    const q = 'Base Rent and Tenant’s Share (8.5%) of Operating Expenses shall be fully abated for January 2026'
+    const r = mutate((raw) => { Object.assign(con(raw), { kind: 'full_waiver', value_as_written: '', quote: q }) }, addLines([q], 1))
+    expect(blockText(r)).not.toMatch(/partial waiver/)
+    const q2 = 'fifty percent (50%) of Base Rent shall be abated for January 2026'
+    expect(blockText(mutate((raw) => { Object.assign(con(raw), { kind: 'full_waiver', value_as_written: '', quote: q2 }) }, addLines([q2], 1)))).toMatch(/partial waiver/)
+  })
+  it('date forms: "Sept. 1", no space after the comma, "twenty first"; and both ISO boundaries (D2/D5)', () => {
+    expect(dateInQuote('2027-09-01', 'commences on Sept. 1, 2027')).toBe(true)
+    expect(dateInQuote('2027-09-01', 'commences on Sept 1, 2027')).toBe(true)
+    expect(dateInQuote('2027-01-01', 'commences on January 1,2027')).toBe(true)
+    expect(dateInQuote('2027-01-21', 'the twenty first (21st) day of January, 2027')).toBe(true)
+    expect(dateInQuote('2027-01-01', 'commences on January 1,20271')).toBe(false)
+    expect(dateInQuote('2027-01-01', 'ref 12027-01-01')).toBe(false)
+    expect(dateInQuote('2027-01-01', 'ref x-2027-01-01')).toBe(false)
+  })
+})
+
+describe('merge gate R4-06: gaps the round-4 mutation run found', () => {
+  const psf = (raw: Wire) => { raw.rent_schedule[0] = row('2026-01-01', '2026-12-31', '$10.00', 'Year 1: $8,333.33 per month ($10.00 per RSF per year)', 'psf_year') }
+  const escOn = (raw: Wire, d: string) => { esc(raw).first_adjustment_date = d }
+  it('C20: a per-square-foot fixed escalation is confirmed with the RSF behind it', () => {
+    const q = 'Base Rent shall increase by $0.25 per RSF per year on each anniversary'
+    const r = mutate((raw) => { Object.assign(esc(raw), { kind: 'fixed_amount', value_as_written: '$0.25', value_period: 'psf_year', quote: q }) }, addLines([q], 1))
+    expect(r.confirmations).toContainEqual(expect.objectContaining({ path: 'escalation', period: 'psf_year', monthly: 208.33, rsf: 10000 }))
+  })
+  it('E3: an anniversary of the RENT commencement date raises no timing warning', () => {
+    const r = mutate((raw) => { rcd(raw); escOn(raw, '2027-03-01') })
+    expect(warnsOf(r).some((f) => /neither printed/.test(f.message))).toBe(false)
+  })
+  it('E5: a first adjustment ON the commencement date is not an anniversary', () => {
+    const r = mutate((raw) => escOn(raw, '2026-01-01'))
+    expect(warnsOf(r)).toContainEqual(expect.objectContaining({ path: 'escalation', message: expect.stringMatching(/2026-01-01 is neither printed/) }))
+  })
+  it('E7: the second anniversary counts as an anniversary', () => {
+    const r = mutate((raw) => escOn(raw, '2028-01-01'))
+    expect(warnsOf(r).some((f) => /neither printed/.test(f.message))).toBe(false)
+  })
+  it('R6: small numbers in the RSF quote (a suite number) raise no second-area warning', () => {
+    const q = 'Suite 12, containing 10,000 rentable square feet'
+    const r = mutate((raw) => { psf(raw); Object.assign(factOf(raw, 'premises_rsf'), { quote: q }) }, addLines([q], 0))
+    expect(warnsOf(r).some((f) => f.path === 'premises_rsf')).toBe(false)
+  })
+  it('R10: an RSF that fails its own quote is still shown as entered in its confirmation', () => {
+    const r = mutate((raw) => { psf(raw); factOf(raw, 'premises_rsf').value = '12000' })
+    expect(r.confirmations).toContainEqual(expect.objectContaining({ path: 'premises_rsf', as_written: '12000' }))
+    expect(blockText(r)).toMatch(/rentable square footage 12000 is not printed in its own quote/)
+  })
+  it('N8: "through the month of March" is a range', () => {
+    expect([...namedMonths('abated from January through the month of March 2026')].sort((a, b) => a - b)).toEqual([1, 2, 3])
   })
 })
