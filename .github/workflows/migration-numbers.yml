@@ -1,0 +1,39 @@
+# Migration-number collision check on every branch push (not just PRs).
+#
+# ci.yml runs the same check on pull requests, but GitHub creates no pull_request run for a PR
+# that conflicts with main — which is exactly what a migration-number collision tends to cause
+# (2026-11-10: #75 and #76 both added 0024; #76 showed "no checks" until it was noticed by hand).
+# A push run happens regardless of mergeability, so the collision surfaces as a red X on the
+# branch's newest commit.
+#
+# Cheap by design: no npm ci (the script has no dependencies), read-only, no secrets.
+name: Migration numbers
+
+on:
+  push:
+    branches-ignore: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: migration-numbers-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The check compares with main's tip and with the merge base, so it needs history.
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check migration numbers against main
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          node scripts/check-migration-numbers.mjs --base=refs/remotes/origin/main
