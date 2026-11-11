@@ -278,7 +278,11 @@ async function selectIn<T extends { id: string }>(db: Db, table: string, columns
 
 /** Everything a run needs for one entity: its leases' charges and payments, postings, snapshot, roles. */
 async function loadArState(db: Db, entityId: string) {
-  const props = await db.from('properties').select('id').eq('gl_entity_id', entityId).limit(POSTGREST_MAX_ROWS)
+  const props = await fetchAllPages<{ id: string }>((after) => {
+    let q = db.from('properties').select('id').eq('gl_entity_id', entityId)
+    if (after !== null) q = q.gt('id', after)
+    return q.order('id').limit(POSTGREST_MAX_ROWS)
+  }, (r) => r.id)
   if (props.error) return { error: props.error }
   const units = await selectIn<{ id: string }>(db, 'units', 'id', 'property_id', (props.data ?? []).map((p) => p.id))
   if (units.error) return { error: units.error }
@@ -303,9 +307,16 @@ async function loadArState(db: Db, entityId: string) {
   if (items.error) return { error: items.error }
   const roles = await db.from('gl_ar_accounts').select('role, account_id').eq('entity_id', entityId)
   if (roles.error) return { error: roles.error }
+  const locks = await fetchAllPages<{ period_start: string }>((after) => {
+    let q = db.from('gl_periods').select('period_start').eq('entity_id', entityId).eq('status', 'locked')
+    if (after !== null) q = q.gt('period_start', after)
+    return q.order('period_start').limit(POSTGREST_MAX_ROWS)
+  }, (r) => r.period_start)
+  if (locks.error) return { error: locks.error }
   return {
     data: {
-      propertyIds: (props.data ?? []).map((p) => p.id as string),
+      propertyIds: props.data.map((p) => p.id),
+      lockedMonths: locks.data.map((l) => l.period_start),
       charges: charges.data, payments: payments.data, postings: postings.data, tieoutItems: items.data,
       roles: Object.fromEntries((roles.data ?? []).map((r) => [r.role, r.account_id])) as Partial<Record<ArRole, string>>,
     },

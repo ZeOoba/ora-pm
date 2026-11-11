@@ -114,4 +114,32 @@ describe('planArRun (accrual)', () => {
     expect(p.items).toEqual([])
     expect(p.skipped).toBe(1)
   })
+
+  it('REFUTE-6 H3: activity dated in a locked month posts on the first day of the next open month', () => {
+    const p = run({
+      through: '2027-03-15', lockedMonths: ['2027-01-01', '2027-02-01'],
+      charges: [ch('c1', '2027-01-15', 100), ch('c2', '2027-03-02', 100), ch('c3', '2027-01-05', 50, 'rent', '2027-03-10T15:00:00Z')],
+      payments: [pay('p1', '2027-02-27', 100)],
+      postings: [{ kind: 'charge', source_id: 'c3' }],
+    })
+    expect(kinds(p)).toEqual([['charge', 'c1', '2027-03-01', 10000], ['payment', 'p1', '2027-03-01', 10000], ['charge', 'c2', '2027-03-02', 10000], ['charge_void', 'c3', '2027-03-10', 5000]])
+    // A shifted date past the through date waits for a later run.
+    expect(kinds(run({ through: '2027-01-31', lockedMonths: ['2027-01-01'], charges: [ch('c1', '2027-01-15', 100)] }))).toEqual([])
+  })
+
+  it('REFUTE-6 L2: a posted ACH payment now disputed or back in flight is attention, not silence', () => {
+    const p = run({ payments: [pay('p1', '2027-01-06', 500, 'ach_stripe', 'disputed', '2027-01-20T15:00:00Z')], postings: [{ kind: 'payment', source_id: 'p1' }] })
+    expect(p.items).toEqual([])
+    expect(p.attention.map((a) => a.source_id)).toEqual(['p1'])
+    expect(p.attention[0].message).toMatch(/now "disputed"/)
+    // Unposted and in flight: nothing to say.
+    expect(run({ payments: [pay('p2', '2027-01-06', 500, 'ach_stripe', 'processing')] }).attention).toEqual([])
+  })
+
+  it('REFUTE-6 L4: a non-cent amount blocks only if that item would post', () => {
+    expect(run({ charges: [ch('c1', '2027-01-05', '10.005', 'rent', '2027-01-06T15:00:00Z')] }).errors).toEqual([])
+    expect(run({ charges: [ch('c1', '2027-02-05', '10.005')] }).errors).toEqual([])
+    expect(run({ charges: [ch('c1', '2027-01-05', '10.005')] }).errors[0]).toMatch(/not a whole number of cents/)
+  })
 })
+

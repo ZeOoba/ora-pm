@@ -376,7 +376,7 @@ describe('AR posting (B8 slice 3)', () => {
   const P1 = 'f0000000-0000-4000-8000-000000000001'
   const U1 = 'f1000000-0000-4000-8000-000000000001'
   const L1 = 'f2000000-0000-4000-8000-000000000001'
-  function install(opts: { basis?: string; start?: string | null; tieout?: boolean; charges?: Row[]; payments?: Row[]; postings?: Row[] } = {}) {
+  function install(opts: { basis?: string; start?: string | null; tieout?: boolean; charges?: Row[]; payments?: Row[]; postings?: Row[]; locked?: string[] } = {}) {
     const tables: Record<string, ReturnType<typeof pgTable>> = {
       gl_entities: pgTable([{ id: E, accounting_basis: opts.basis ?? 'accrual', ledger_start_date: opts.start === undefined ? '2026-10-01' : opts.start }]),
       gl_ar_tieouts: pgTable(opts.tieout === false ? [] : [{ entity_id: E }]),
@@ -387,6 +387,7 @@ describe('AR posting (B8 slice 3)', () => {
       payments: pgTable(opts.payments ?? [{ id: 'p1', lease_id: L1, payment_date: '2026-10-03', amount: '1000.00', method: 'check', stripe_status: null, status_changed_at: null }]),
       gl_ar_postings: pgTable(opts.postings ?? []),
       gl_ar_tieout_items: pgTable([]),
+      gl_periods: pgTable((opts.locked ?? []).map((m) => ({ entity_id: E, period_start: m, status: 'locked' }))),
       gl_ar_accounts: pgTable([{ entity_id: E, role: 'ar', account_id: A1 }, { entity_id: E, role: 'undeposited_funds', account_id: A2 }, { entity_id: E, role: 'rent', account_id: A2 }]),
     }
     mockFrom.mockImplementation((t: string) => tables[t])
@@ -436,6 +437,13 @@ describe('AR posting (B8 slice 3)', () => {
     expect((await post(`${base}/run`, { through: '2099-01-01' })).status).toBe(422)
     expect((await post(`${base}/run`, { through: '2026-02-30' })).status).toBe(422)
     expect(mockRpc).not.toHaveBeenCalled()
+  })
+
+  it('locked months: their activity is planned on the first day of the next open month', async () => {
+    install({ locked: ['2026-10-01'] })
+    expect((await preview('2026-10-31')).items).toEqual([])
+    const d = await preview('2026-11-10')
+    expect(d.items.map((i) => [i.kind, (i as unknown as { date: string }).date])).toEqual([['charge', '2026-11-01'], ['payment', '2026-11-01']])
   })
 
   it('an unmapped role blocks the run (422) with the role named', async () => {

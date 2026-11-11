@@ -14,6 +14,7 @@
 //                   pre-start payment the tie-out did NOT count (cleared later), dated the start date
 //   payment_return  a posted payment now failed/returned; dated by the status change (else through)
 //   payment_return_pre  a pre-start payment counted at the tie-out, now failed/returned
+// Any of these dated in a locked month posts on the first day of the next open month.
 // Anything the rules cannot place (a pre-start charge or payment created after the tie-out, a
 // counted payment now back in a pending state) is listed under `attention` and never posted.
 
@@ -32,6 +33,8 @@ export type ArPlanInput = {
   postings: { kind: ArKind; source_id: string }[]
   tieoutItems: { kind: 'charge' | 'payment'; source_id: string; counted: boolean }[]
   roles: Partial<Record<ArRole, string>>
+  /** Locked periods (first of month, YYYY-MM-01); their activity posts in the next open month. */
+  lockedMonths?: string[]
 }
 export type ArItem = { kind: ArKind; source_id: string; lease_id: string; date: string; cents: number; label: string; debit_role: ArRole; credit_role: ArRole }
 export type ArPlan = {
@@ -62,20 +65,33 @@ const failed = (p: ArPayment) => p.method === 'ach_stripe' && (p.stripe_status =
 const max = (a: string, b: string) => (a > b ? a : b)
 const RANK: Record<ArKind, number> = { charge: 0, payment: 1, charge_void: 2, charge_void_pre: 2, payment_return: 3, payment_return_pre: 3 }
 
+/** First day of the month after `d` (YYYY-MM-DD). */
+function nextMonth(d: string): string {
+  const y = Number(d.slice(0, 4)), m = Number(d.slice(5, 7))
+  return m === 12 ? `${y + 1}-01-01` : `${y}-${String(m + 1).padStart(2, '0')}-01`
+}
+
 export function planArRun(input: ArPlanInput): ArPlan {
   const { startDate: start, through } = input
   const plan: ArPlan = { items: [], attention: [], skipped: 0, errors: [], by_role: {} }
   const posted = new Set(input.postings.map((p) => `${p.kind}:${p.source_id}`))
   const snap = new Map(input.tieoutItems.map((i) => [`${i.kind}:${i.source_id}`, i.counted]))
-  const add = (item: ArItem) => {
-    plan.items.push(item)
-    plan.by_role[item.debit_role] = (plan.by_role[item.debit_role] ?? 0) + item.cents
-    plan.by_role[item.credit_role] = (plan.by_role[item.credit_role] ?? 0) - item.cents
+  const locked = new Set(input.lockedMonths ?? [])
+  // Matches 0028's gl_first_open_date: activity dated in a locked month posts on the first day of
+  // the next open month (REFUTE-6 H3).
+  const firstOpen = (d: string) => { let v = d; while (locked.has(`${v.slice(0, 7)}-01`)) v = nextMonth(v); return v }
+  const add = (item: Omit<ArItem, 'cents'> & { cents: number | null }, what: string, amount: number | string) => {
+    if (item.date > through) return
+    if (item.cents === null) { plan.errors.push(`${what}: amount ${String(amount)} is not a whole number of cents`); return }
+    const full = item as ArItem
+    plan.items.push(full)
+    plan.by_role[full.debit_role] = (plan.by_role[full.debit_role] ?? 0) + full.cents
+    plan.by_role[full.credit_role] = (plan.by_role[full.credit_role] ?? 0) - full.cents
   }
 
   for (const c of input.charges) {
     const cents = exactCents(c.amount)
-    if (cents === null) { plan.errors.push(`charge ${c.id} (${c.type}, ${c.charge_date}): amount ${String(c.amount)} is not a whole number of cents`); continue }
+    const what = `charge ${c.id} (${c.type}, ${c.charge_date})`
     const type = c.type as ArRole
     const label = `${c.type.replace(/_/g, ' ')} ${c.charge_date}${c.description ? ` — ${c.description}` : ''}`
     const voidDate = c.voided_at ? centralDate(c.voided_at) : null
@@ -85,14 +101,14 @@ export function planArRun(input: ArPlanInput): ArPlan {
       if (!isPosted) {
         if (cents === 0) { plan.skipped++; continue }
         if (voidDate && voidDate <= through) { plan.skipped++; continue } // voided before it ever posted: nothing to book
-        if (c.charge_date <= through) {
-          add({ kind: 'charge', source_id: c.id, lease_id: c.lease_id, date: c.charge_date, cents, label, debit_role: 'ar', credit_role: type })
-          postsNow = true
+        const d = firstOpen(c.charge_date)
+        if (d <= through) {
+          add({ kind: 'charge', source_id: c.id, lease_id: c.lease_id, date: d, cents, label, debit_role: 'ar', credit_role: type }, what, c.amount)
+          postsNow = cents !== null
         }
       }
       if (voidDate && (isPosted || postsNow) && !posted.has(`charge_void:${c.id}`)) {
-        const d = max(voidDate, c.charge_date)
-        if (d <= through) add({ kind: 'charge_void', source_id: c.id, lease_id: c.lease_id, date: d, cents, label: `void of ${label}`, debit_role: type, credit_role: 'ar' })
+        add({ kind: 'charge_void', source_id: c.id, lease_id: c.lease_id, date: firstOpen(max(voidDate, c.charge_date)), cents, label: `void of ${label}`, debit_role: type, credit_role: 'ar' }, what, c.amount)
       }
       continue
     }
@@ -103,14 +119,13 @@ export function planArRun(input: ArPlanInput): ArPlan {
       continue
     }
     if (counted && voidDate && !posted.has(`charge_void_pre:${c.id}`)) {
-      const d = max(voidDate, start)
-      if (d <= through) add({ kind: 'charge_void_pre', source_id: c.id, lease_id: c.lease_id, date: d, cents, label: `void of ${label} (opening AR)`, debit_role: type, credit_role: 'ar' })
+      add({ kind: 'charge_void_pre', source_id: c.id, lease_id: c.lease_id, date: firstOpen(max(voidDate, start)), cents, label: `void of ${label} (opening AR)`, debit_role: type, credit_role: 'ar' }, what, c.amount)
     }
   }
 
   for (const p of input.payments) {
     const cents = exactCents(p.amount)
-    if (cents === null) { plan.errors.push(`payment ${p.id} (${p.payment_date}): amount ${String(p.amount)} is not a whole number of cents`); continue }
+    const what = `payment ${p.id} (${p.payment_date})`
     const label = `${p.method === 'ach_stripe' ? 'ACH' : p.method} payment ${p.payment_date}`
     const statusDate = p.status_changed_at ? centralDate(p.status_changed_at) : null
     const counted = p.payment_date < start ? snap.get(`payment:${p.id}`) : undefined
@@ -122,22 +137,23 @@ export function planArRun(input: ArPlanInput): ArPlan {
     if (counts(p)) {
       if (isPosted) continue
       if (p.payment_date >= start) {
-        if (p.payment_date <= through) add({ kind: 'payment', source_id: p.id, lease_id: p.lease_id, date: p.payment_date, cents, label, debit_role: 'undeposited_funds', credit_role: 'ar' })
+        add({ kind: 'payment', source_id: p.id, lease_id: p.lease_id, date: firstOpen(p.payment_date), cents, label, debit_role: 'undeposited_funds', credit_role: 'ar' }, what, p.amount)
       } else if (counted === false) {
-        add({ kind: 'payment', source_id: p.id, lease_id: p.lease_id, date: start, cents, label: `${label} (cleared after the tie-out)`, debit_role: 'undeposited_funds', credit_role: 'ar' })
+        add({ kind: 'payment', source_id: p.id, lease_id: p.lease_id, date: firstOpen(start), cents, label: `${label} (cleared after the tie-out)`, debit_role: 'undeposited_funds', credit_role: 'ar' }, what, p.amount)
       }
       continue
     }
     if (!failed(p)) {
-      if (counted === true) plan.attention.push({ source_id: p.id, kind: 'payment', message: `${label}: counted as received at the AR tie-out but now "${p.stripe_status ?? 'unknown'}". Check it in Stripe.` })
+      // Disputed, canceled or back in flight: nothing posts until it settles (REFUTE-6 L2).
+      if ((isPosted && !posted.has(`payment_return:${p.id}`)) || counted === true) {
+        plan.attention.push({ source_id: p.id, kind: 'payment', message: `${label}: in the ledger as received but now "${p.stripe_status ?? 'unknown'}". Nothing posts until Stripe settles it (succeeded again, or failed/returned). Check it in Stripe.` })
+      }
       continue
     }
     if (isPosted && !posted.has(`payment_return:${p.id}`)) {
-      const d = max(statusDate ?? through, max(p.payment_date, start))
-      if (d <= through) add({ kind: 'payment_return', source_id: p.id, lease_id: p.lease_id, date: d, cents, label: `${label} ${p.stripe_status}`, debit_role: 'ar', credit_role: 'undeposited_funds' })
+      add({ kind: 'payment_return', source_id: p.id, lease_id: p.lease_id, date: firstOpen(max(statusDate ?? through, max(p.payment_date, start))), cents, label: `${label} ${p.stripe_status}`, debit_role: 'ar', credit_role: 'undeposited_funds' }, what, p.amount)
     } else if (counted === true && !posted.has(`payment_return_pre:${p.id}`)) {
-      const d = max(statusDate ?? start, start)
-      if (d <= through) add({ kind: 'payment_return_pre', source_id: p.id, lease_id: p.lease_id, date: d, cents, label: `${label} ${p.stripe_status} (opening AR)`, debit_role: 'ar', credit_role: 'undeposited_funds' })
+      add({ kind: 'payment_return_pre', source_id: p.id, lease_id: p.lease_id, date: firstOpen(max(statusDate ?? start, start)), cents, label: `${label} ${p.stripe_status} (opening AR)`, debit_role: 'ar', credit_role: 'undeposited_funds' }, what, p.amount)
     }
   }
 

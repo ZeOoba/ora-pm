@@ -49,6 +49,20 @@ describe('migration 0028 — posting rules (textual pins)', () => {
     has(/^CREATE TRIGGER gl_ar_accounts_guard/)
   })
 
+  it('REFUTE-6: tie-out bound to its opening balance; lines re-verified; hand reversals, unit/lease moves refused; no temp table', () => {
+    expect(sql).toMatch(/opening_entry_id UUID NOT NULL/)
+    has(/^CREATE CONSTRAINT TRIGGER gl_journal_lines_ar_verify\s+AFTER INSERT ON gl_journal_lines\s+DEFERRABLE INITIALLY DEFERRED/)
+    has(/^CREATE TRIGGER gl_journal_entries_ar_tie_guard BEFORE INSERT ON gl_journal_entries/)
+    has(/^CREATE TRIGGER gl_entities_ar_tie_guard BEFORE UPDATE ON gl_entities/)
+    has(/^CREATE TRIGGER units_gl_entity_guard BEFORE UPDATE ON units/)
+    has(/^CREATE TRIGGER leases_gl_entity_guard BEFORE UPDATE ON leases/)
+    has(/^CREATE TRIGGER payments_status_changed_at\s+BEFORE INSERT OR UPDATE ON payments/)
+    expect(sql).toMatch(/reverses an AR posting; void the charge or record the payment''s return in the app instead/)
+    expect(sql).not.toMatch(/CREATE TEMP TABLE/i)
+    // Every SET CONSTRAINTS in the batch names the new line check.
+    for (const m of sql.matchAll(/SET CONSTRAINTS ([^;]+);/g)) expect(m[1]).toMatch(/gl_journal_lines_ar_verify/)
+  })
+
   it('tie-out and posting records are insert-only', () => {
     expect(sql).toMatch(/REVOKE UPDATE, DELETE ON gl_ar_tieouts, gl_ar_tieout_items, gl_ar_postings FROM service_role;/)
   })

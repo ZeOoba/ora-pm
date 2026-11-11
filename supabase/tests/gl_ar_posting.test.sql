@@ -42,10 +42,14 @@ INSERT INTO charges (id, lease_id, charge_date, type, amount) VALUES
   ('a7c00000-0000-4000-8000-000000000000', 'a7300000-0000-4000-8000-000000000001', '2026-09-01', 'rent', 1000.00);
 INSERT INTO charges (id, lease_id, charge_date, type, amount, voided_at, void_reason) VALUES
   ('a7c00000-0000-4000-8000-0000000000ff', 'a7300000-0000-4000-8000-000000000001', '2026-09-10', 'late_fee', 50.00, '2026-09-12 15:00Z', 'waived');
-INSERT INTO payments (id, lease_id, payment_date, amount, method, stripe_status) VALUES
-  ('a7d00000-0000-4000-8000-000000000000', 'a7300000-0000-4000-8000-000000000001', '2026-09-05', 600.00, 'check', NULL),
-  ('a7d00000-0000-4000-8000-000000000004', 'a7300000-0000-4000-8000-000000000001', '2026-09-20', 200.00, 'ach_stripe', 'succeeded'),
-  ('a7d00000-0000-4000-8000-000000000001', 'a7300000-0000-4000-8000-000000000001', '2026-09-28', 100.00, 'ach_stripe', 'processing');
+-- (Fixture history: Stripe statuses set in September. The trigger stamps server time, so it is
+-- bypassed here to backdate them.)
+ALTER TABLE payments DISABLE TRIGGER payments_status_changed_at;
+INSERT INTO payments (id, lease_id, payment_date, amount, method, stripe_status, status_changed_at) VALUES
+  ('a7d00000-0000-4000-8000-000000000000', 'a7300000-0000-4000-8000-000000000001', '2026-09-05', 600.00, 'check', NULL, NULL),
+  ('a7d00000-0000-4000-8000-000000000004', 'a7300000-0000-4000-8000-000000000001', '2026-09-20', 200.00, 'ach_stripe', 'succeeded', '2026-09-23 15:00Z'),
+  ('a7d00000-0000-4000-8000-000000000001', 'a7300000-0000-4000-8000-000000000001', '2026-09-28', 100.00, 'ach_stripe', 'processing', '2026-09-28 15:00Z');
+ALTER TABLE payments ENABLE TRIGGER payments_status_changed_at;
 
 -- A1: account roles must have the right account type and be in the entity's chart.
 DO $$ BEGIN
@@ -161,9 +165,9 @@ DO $$ BEGIN
   PERFORM pg_temp.expect_error($q$DELETE FROM payments WHERE id = 'a7d00000-0000-4000-8000-000000000002'$q$, 'cannot be deleted');
   UPDATE charges SET description = 'Oct rent, Ste 3' WHERE id = 'a7c00000-0000-4000-8000-000000000001';
   UPDATE charges SET amount = 2.00 WHERE id = 'a7c00000-0000-4000-8000-000000000009';  -- never posted: still editable
-  PERFORM pg_temp.expect_error($q$UPDATE gl_ar_accounts SET account_id = 'a7a00000-0000-4000-8000-000000000008' WHERE entity_id = 'a7000000-0000-4000-8000-000000000001' AND role = 'ar'$q$, 'fixed once AR has posted');
-  PERFORM pg_temp.expect_error($q$UPDATE properties SET gl_entity_id = 'a7000000-0000-4000-8000-000000000002' WHERE id = 'a7100000-0000-4000-8000-000000000001'$q$, 'its ledger entity cannot change');
-  PERFORM pg_temp.expect_error($q$UPDATE properties SET gl_entity_id = NULL WHERE id = 'a7100000-0000-4000-8000-000000000001'$q$, 'its ledger entity cannot change');
+  PERFORM pg_temp.expect_error($q$UPDATE gl_ar_accounts SET account_id = 'a7a00000-0000-4000-8000-000000000008' WHERE entity_id = 'a7000000-0000-4000-8000-000000000001' AND role = 'ar'$q$, 'fixed once the AR tie-out is confirmed');
+  PERFORM pg_temp.expect_error($q$UPDATE properties SET gl_entity_id = 'a7000000-0000-4000-8000-000000000002' WHERE id = 'a7100000-0000-4000-8000-000000000001'$q$, 'cannot move to another LLC');
+  PERFORM pg_temp.expect_error($q$UPDATE properties SET gl_entity_id = NULL WHERE id = 'a7100000-0000-4000-8000-000000000001'$q$, 'cannot move to another LLC');
   UPDATE properties SET name = 'Raytown Flex Center' WHERE id = 'a7100000-0000-4000-8000-000000000001';
   RAISE NOTICE 'ok: A6 posted or tied-out charges/payments are fixed; others still editable; AR account and property LLC fixed once used';
 END $$;
@@ -189,6 +193,85 @@ BEGIN
   PERFORM pg_temp.expect_error($q$SELECT gl_post_ar_batch('a7000000-0000-4000-8000-000000000001', gl_today(), '[{"kind":"charge_void","source_id":"a7c00000-0000-4000-8000-000000000001"}]', 't')$q$, 'gl_ar_postings_once|duplicate key');
   PERFORM pg_temp.expect_error($q$SELECT gl_post_ar_batch('a7000000-0000-4000-8000-000000000001', gl_today(), '[{"kind":"charge_void","source_id":"a7c00000-0000-4000-8000-000000000002"}]', 't')$q$, 'is not voided|must be the reversal');
   RAISE NOTICE 'ok: voids and returns post once, as reversals (pre-start ones as their own entries), dated by the event';
+END $$;
+
+-- REFUTE-6 regressions. A second LLC's property and unit to move things into.
+INSERT INTO properties (id, name, gl_entity_id) VALUES ('a7100000-0000-4000-8000-000000000002', 'Cash LLC Bldg', 'a7000000-0000-4000-8000-000000000002');
+INSERT INTO units (id, property_id, suite) VALUES ('a7200000-0000-4000-8000-000000000002', 'a7100000-0000-4000-8000-000000000002', '1');
+INSERT INTO charges (id, lease_id, charge_date, type, amount) VALUES
+  ('a7c00000-0000-4000-8000-000000000010', 'a7300000-0000-4000-8000-000000000001', '2026-10-15', 'rent', 100.00);
+
+CREATE FUNCTION pg_temp.h2_attack() RETURNS void LANGUAGE plpgsql AS $$
+DECLARE v UUID;
+BEGIN
+  PERFORM gl_post_ar_batch('a7000000-0000-4000-8000-000000000001', gl_today(), '[{"kind":"charge","source_id":"a7c00000-0000-4000-8000-000000000010"}]', 'tester');
+  SELECT entry_id INTO v FROM gl_ar_postings WHERE kind = 'charge' AND source_id = 'a7c00000-0000-4000-8000-000000000010';
+  INSERT INTO gl_journal_lines (entry_id, entity_id, account_id, line_no, debit_cents, credit_cents) VALUES
+    (v, 'a7000000-0000-4000-8000-000000000001', 'a7a00000-0000-4000-8000-000000000002', 3, 50000, 0),
+    (v, 'a7000000-0000-4000-8000-000000000001', 'a7a00000-0000-4000-8000-000000000006', 4, 0, 50000);
+END $$;
+CREATE FUNCTION pg_temp.l1_attack() RETURNS void LANGUAGE plpgsql AS $$
+DECLARE v UUID;
+BEGIN
+  v := gl_reverse_entry((SELECT entry_id FROM gl_ar_postings WHERE kind = 'charge' AND source_id = 'a7c00000-0000-4000-8000-000000000002'), '2026-10-05', 'early void', 'tester');
+  INSERT INTO gl_ar_postings (entity_id, kind, source_id, entry_id) VALUES ('a7000000-0000-4000-8000-000000000001', 'charge_void', 'a7c00000-0000-4000-8000-000000000002', v);
+END $$;
+
+DO $$
+DECLARE pid UUID; t TIMESTAMPTZ;
+BEGIN
+  -- C1: the tied opening balance cannot be reversed; start date and basis are fixed.
+  PERFORM pg_temp.expect_error($q$SELECT gl_reverse_entry((SELECT opening_entry_id FROM gl_ar_tieouts WHERE entity_id = 'a7000000-0000-4000-8000-000000000001'), '2026-09-30', 'x', 't')$q$, 'basis of the confirmed AR tie-out');
+  PERFORM pg_temp.expect_error($q$UPDATE gl_entities SET ledger_start_date = '2026-12-01' WHERE id = 'a7000000-0000-4000-8000-000000000001'$q$, 'confirmed AR tie-out|cannot change');
+  PERFORM pg_temp.expect_error($q$UPDATE gl_entities SET accounting_basis = 'cash' WHERE id = 'a7000000-0000-4000-8000-000000000001'$q$, 'start date and accounting basis cannot change');
+  -- H1: an AR entry cannot be reversed by hand.
+  PERFORM pg_temp.expect_error($q$SELECT gl_reverse_entry((SELECT entry_id FROM gl_ar_postings WHERE kind = 'charge' AND source_id = 'a7c00000-0000-4000-8000-000000000002'), '2026-10-05', 'x', 't')$q$, 'reverses an AR posting');
+  -- H2: no extra lines on a verified AR entry, even in the posting transaction.
+  PERFORM pg_temp.expect_error('SELECT pg_temp.h2_attack()', 'must post exactly');
+  -- L1: a void's reversal must carry the void's date.
+  UPDATE charges SET voided_at = '2026-11-02 15:00Z', void_reason = 'deposit waived' WHERE id = 'a7c00000-0000-4000-8000-000000000002';
+  PERFORM pg_temp.expect_error('SELECT pg_temp.l1_attack()', 'must be dated 2026-11-02');
+  -- H4: a unit or lease holding ledger AR cannot move to another LLC.
+  PERFORM pg_temp.expect_error($q$UPDATE units SET property_id = 'a7100000-0000-4000-8000-000000000002' WHERE id = 'a7200000-0000-4000-8000-000000000001'$q$, 'unit''s AR is in the general ledger');
+  PERFORM pg_temp.expect_error($q$UPDATE leases SET unit_id = 'a7200000-0000-4000-8000-000000000002' WHERE id = 'a7300000-0000-4000-8000-000000000001'$q$, 'lease''s AR is in the general ledger');
+  -- H5: nor can the AR mapping be deleted.
+  PERFORM pg_temp.expect_error($q$DELETE FROM gl_ar_accounts WHERE entity_id = 'a7000000-0000-4000-8000-000000000001' AND role = 'undeposited_funds'$q$, 'fixed once the AR tie-out is confirmed');
+  -- M3: voids and terminal Stripe statuses are final once in the ledger.
+  PERFORM pg_temp.expect_error($q$UPDATE charges SET voided_at = NULL WHERE id = 'a7c00000-0000-4000-8000-000000000001'$q$, 'void cannot be undone');
+  PERFORM pg_temp.expect_error($q$UPDATE charges SET voided_at = NULL WHERE id = 'a7c00000-0000-4000-8000-0000000000ff'$q$, 'void cannot be undone');
+  PERFORM pg_temp.expect_error($q$UPDATE payments SET stripe_status = 'succeeded' WHERE id = 'a7d00000-0000-4000-8000-000000000003'$q$, 'that status is final');
+  -- M4: a payment's tie-out status is its status as of the day before the start date.
+  IF NOT gl_payment_counted_as_of('ach_stripe', 'succeeded', '2026-09-30 22:00Z', '2026-09-30')        -- 5 pm Central on the 30th
+     OR gl_payment_counted_as_of('ach_stripe', 'succeeded', '2026-10-01 06:00Z', '2026-09-30')        -- cleared Oct 1 Central
+     OR NOT gl_payment_counted_as_of('ach_stripe', 'returned', '2026-10-05 15:00Z', '2026-09-30')     -- had cleared, returned later
+     OR gl_payment_counted_as_of('ach_stripe', 'failed', '2026-10-05 15:00Z', '2026-09-30')
+     OR gl_payment_counted_as_of('ach_stripe', 'returned', '2026-09-29 15:00Z', '2026-09-30')
+     OR NOT gl_payment_counted_as_of('check', NULL, NULL, '2026-09-30') THEN
+    RAISE EXCEPTION 'gl_payment_counted_as_of truth table';
+  END IF;
+  -- L3: the status time is the server's, on insert too.
+  INSERT INTO payments (id, lease_id, payment_date, amount, method, stripe_status, status_changed_at) VALUES
+    ('a7d00000-0000-4000-8000-000000000010', 'a7300000-0000-4000-8000-000000000001', '2026-11-03', 10.00, 'ach_stripe', 'processing', '2020-01-01Z')
+    RETURNING status_changed_at INTO t;
+  IF t < now() - interval '1 minute' THEN RAISE EXCEPTION 'status_changed_at should be stamped on insert, got %', t; END IF;
+  RAISE NOTICE 'ok: REFUTE-6 C1 H1 H2 H4 H5 M3 M4 L1 L3 — tie-out basis fixed; no hand reversals, extra lines, LLC moves, un-voids; dates verified';
+END $$;
+
+-- REFUTE-6 H3: activity dated in a locked month posts on the first day of the next open month.
+SELECT gl_lock_period('a7000000-0000-4000-8000-000000000001', '2026-10-01', 'closer@example.test');
+SELECT gl_post_ar_batch('a7000000-0000-4000-8000-000000000001', gl_today(),
+  '[{"kind":"charge","source_id":"a7c00000-0000-4000-8000-000000000010"},{"kind":"charge_void","source_id":"a7c00000-0000-4000-8000-000000000002"}]', 'tester') AS n3 \gset
+DO $$
+DECLARE d1 DATE; d2 DATE;
+BEGIN
+  SELECT e.entry_date INTO d1 FROM gl_journal_entries e JOIN gl_ar_postings p ON p.entry_id = e.id WHERE p.kind = 'charge' AND p.source_id = 'a7c00000-0000-4000-8000-000000000010';
+  SELECT e.entry_date INTO d2 FROM gl_journal_entries e JOIN gl_ar_postings p ON p.entry_id = e.id WHERE p.kind = 'charge_void' AND p.source_id = 'a7c00000-0000-4000-8000-000000000002';
+  IF d1 <> '2026-11-01' OR d2 <> '2026-11-02' THEN RAISE EXCEPTION 'locked-month charge should post 2026-11-01 (got %), the void 2026-11-02 (got %)', d1, d2; END IF;
+  IF gl_first_open_date('a7000000-0000-4000-8000-000000000001', '2026-10-31') <> '2026-11-01'
+     OR gl_first_open_date('a7000000-0000-4000-8000-000000000001', '2026-11-15') <> '2026-11-15' THEN
+    RAISE EXCEPTION 'gl_first_open_date';
+  END IF;
+  RAISE NOTICE 'ok: REFUTE-6 H3 locked-month activity posts on the first day of the next open month';
 END $$;
 
 -- Access: write functions service_role only; tables closed to the API roles; journal-style privileges.
