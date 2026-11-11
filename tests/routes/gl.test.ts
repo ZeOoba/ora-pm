@@ -370,3 +370,97 @@ describe('opening balance (B8 slice 2)', () => {
     expect(mockRpc).not.toHaveBeenCalled()
   })
 })
+
+describe('AR posting (B8 slice 3)', () => {
+  const base = `/api/gl/entities/${E}/ar`
+  const P1 = 'f0000000-0000-4000-8000-000000000001'
+  const U1 = 'f1000000-0000-4000-8000-000000000001'
+  const L1 = 'f2000000-0000-4000-8000-000000000001'
+  function install(opts: { basis?: string; start?: string | null; tieout?: boolean; charges?: Row[]; payments?: Row[]; postings?: Row[] } = {}) {
+    const tables: Record<string, ReturnType<typeof pgTable>> = {
+      gl_entities: pgTable([{ id: E, accounting_basis: opts.basis ?? 'accrual', ledger_start_date: opts.start === undefined ? '2026-10-01' : opts.start }]),
+      gl_ar_tieouts: pgTable(opts.tieout === false ? [] : [{ entity_id: E }]),
+      properties: pgTable([{ id: P1, gl_entity_id: E }]),
+      units: pgTable([{ id: U1, property_id: P1 }]),
+      leases: pgTable([{ id: L1, unit_id: U1 }]),
+      charges: pgTable(opts.charges ?? [{ id: 'c1', lease_id: L1, charge_date: '2026-10-01', type: 'rent', amount: 1000, description: null, voided_at: null }]),
+      payments: pgTable(opts.payments ?? [{ id: 'p1', lease_id: L1, payment_date: '2026-10-03', amount: '1000.00', method: 'check', stripe_status: null, status_changed_at: null }]),
+      gl_ar_postings: pgTable(opts.postings ?? []),
+      gl_ar_tieout_items: pgTable([]),
+      gl_ar_accounts: pgTable([{ entity_id: E, role: 'ar', account_id: A1 }, { entity_id: E, role: 'undeposited_funds', account_id: A2 }, { entity_id: E, role: 'rent', account_id: A2 }]),
+    }
+    mockFrom.mockImplementation((t: string) => tables[t])
+  }
+  const preview = async (through = '2026-10-31') => (await (await post(`${base}/run`, { through })).json() as { data: { plan_hash: string; items: { kind: string; source_id: string }[] } }).data
+
+  it('preview lists exactly what would post, in order, and writes nothing', async () => {
+    install()
+    const d = await preview()
+    expect(d.items.map((i) => [i.kind, i.source_id])).toEqual([['charge', 'c1'], ['payment', 'p1']])
+    expect(d.plan_hash).toMatch(/^[0-9a-f]{64}$/)
+    expect(mockRpc).not.toHaveBeenCalled()
+  })
+
+  it('apply posts the previewed items through gl_post_ar_batch (kinds and ids only)', async () => {
+    install()
+    mockRpc.mockResolvedValue({ data: 2, error: null })
+    const { plan_hash } = await preview()
+    const res = await post(`${base}/run`, { through: '2026-10-31', apply: true, expected_plan_hash: plan_hash })
+    expect(res.status).toBe(201)
+    expect(mockRpc).toHaveBeenCalledWith('gl_post_ar_batch', {
+      p_entity_id: E, p_through: '2026-10-31', p_posted_by: 'bookkeeper@example.test',
+      p_items: [{ kind: 'charge', source_id: 'c1' }, { kind: 'payment', source_id: 'p1' }],
+    })
+  })
+
+  it('apply refuses a stale preview (409), a missing hash (422), and a concurrent post (409)', async () => {
+    install()
+    const { plan_hash } = await preview()
+    install({ postings: [{ id: 'x', entity_id: E, kind: 'charge', source_id: 'c1' }] })
+    expect((await post(`${base}/run`, { through: '2026-10-31', apply: true, expected_plan_hash: plan_hash })).status).toBe(409)
+    expect((await post(`${base}/run`, { through: '2026-10-31', apply: true })).status).toBe(422)
+    install()
+    mockRpc.mockResolvedValue({ data: null, error: { code: '23505', message: 'duplicate key value violates unique constraint "gl_ar_postings_once"' } })
+    expect((await post(`${base}/run`, { through: '2026-10-31', apply: true, expected_plan_hash: (await preview()).plan_hash })).status).toBe(409)
+  })
+
+  it('refuses cash-basis LLCs, no tie-out, no start date, and a through date outside start..today', async () => {
+    install({ basis: 'cash' })
+    expect(JSON.stringify(await (await post(`${base}/run`, { through: '2026-10-31' })).json())).toContain('cash-basis LLCs is not available yet')
+    install({ tieout: false })
+    expect((await post(`${base}/run`, { through: '2026-10-31' })).status).toBe(409)
+    install({ start: null })
+    expect((await post(`${base}/run`, { through: '2026-10-31' })).status).toBe(422)
+    install()
+    expect((await post(`${base}/run`, { through: '2026-09-30' })).status).toBe(422)
+    expect((await post(`${base}/run`, { through: '2099-01-01' })).status).toBe(422)
+    expect((await post(`${base}/run`, { through: '2026-02-30' })).status).toBe(422)
+    expect(mockRpc).not.toHaveBeenCalled()
+  })
+
+  it('an unmapped role blocks the run (422) with the role named', async () => {
+    install({ charges: [{ id: 'c9', lease_id: L1, charge_date: '2026-10-02', type: 'late_fee', amount: 50, description: null, voided_at: null }], payments: [] })
+    const res = await post(`${base}/run`, { through: '2026-10-31' })
+    expect(res.status).toBe(422)
+    expect(JSON.stringify(await res.json())).toContain('map an account to \\"late fee\\"')
+  })
+
+  it('tie-out goes through gl_confirm_ar_tieout; a mismatch is a 422 with the numbers', async () => {
+    mockRpc.mockResolvedValueOnce({ data: 20000, error: null })
+    const ok = await post(`${base}/tieout`, {})
+    expect(ok.status).toBe(201)
+    expect(mockRpc).toHaveBeenCalledWith('gl_confirm_ar_tieout', { p_entity_id: E, p_confirmed_by: 'bookkeeper@example.test' })
+    mockRpc.mockResolvedValueOnce({ data: null, error: { code: '23514', message: 'gl: AR does not tie: the app shows 20000 cents of open AR as of 2026-09-30, the ledger\'s AR account 19999 cents (difference 1 cents)' } })
+    const bad = await post(`${base}/tieout`, {})
+    expect(bad.status).toBe(422)
+    expect((await bad.json() as { error: string }).error).toContain('difference 1 cents')
+  })
+
+  it('account roles: validated before writing', async () => {
+    const upsert = vi.fn()
+    mockFrom.mockImplementation(() => ({ upsert }))
+    expect((await app.request(`${base}/accounts`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ roles: { bogus: A1 } }) }, env)).status).toBe(422)
+    expect((await app.request(`${base}/accounts`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ roles: { ar: 'not-a-uuid' } }) }, env)).status).toBe(422)
+    expect(upsert).not.toHaveBeenCalled()
+  })
+})
