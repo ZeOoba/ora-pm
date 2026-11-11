@@ -22,6 +22,7 @@ import {
   type TbAccount,
   type TbLine,
 } from '../lib/gl'
+import { MAX_TB_CHARS, planOpeningBalance, type ChartAccount } from '../lib/gl-opening-balance'
 import { MAX_IIF_CHARS, parseIifAccounts, planAccountImport, type ExistingAccount } from '../lib/qb-iif-accounts'
 
 type Env = { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string; GL_PERIOD_LOCK_EMAILS?: string }
@@ -143,6 +144,116 @@ glRouter.post('/entities/:id/accounts/qb-iif', async (c) => {
     return writeError(c, error, 'Failed to import accounts')
   }
   return c.json({ data: { ...plan, applied: true, inserted: data?.length ?? 0 } }, 201)
+})
+
+/** SHA-256 over exactly what would be posted: entity, start date and each line in order. */
+async function planHash(entityId: string, startDate: string, lines: { account_id: string; debit_cents: number; credit_cents: number }[]): Promise<string> {
+  const canonical = JSON.stringify([entityId, startDate, lines.map((l) => [l.account_id, l.debit_cents, l.credit_cents])])
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(canonical))
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+/** The entity's live opening balance (not reversed), with its lines, or null. */
+async function liveOpeningBalance(db: ReturnType<typeof getDb>, entityId: string) {
+  const obs = await db.from('gl_journal_entries').select('id, entry_date, memo, posted_by, posted_at')
+    .eq('entity_id', entityId).eq('source', 'opening_balance').order('posted_at', { ascending: false }).limit(50)
+  if (obs.error) return { error: obs.error }
+  if (!obs.data?.length) return { data: null }
+  const ids = obs.data.map((o) => o.id)
+  const revs = await db.from('gl_journal_entries').select('reverses_entry_id').in('reverses_entry_id', ids)
+  if (revs.error) return { error: revs.error }
+  const reversed = new Set((revs.data ?? []).map((r) => r.reverses_entry_id))
+  const live = obs.data.find((o) => !reversed.has(o.id))
+  if (!live) return { data: null }
+  const lines = await db.from('gl_journal_lines').select('line_no, account_id, debit_cents, credit_cents').eq('entry_id', live.id).order('line_no').limit(POSTGREST_MAX_ROWS)
+  if (lines.error) return { error: lines.error }
+  return { data: { ...live, lines: lines.data ?? [] } }
+}
+
+async function loadChart(db: ReturnType<typeof getDb>, entityId: string) {
+  return fetchAllPages<ChartAccount>((after) => {
+    let q = db.from('gl_accounts').select('id, number, qb_name, account_type, is_active').eq('entity_id', entityId)
+    if (after !== null) q = q.gt('id', after)
+    return q.order('id').limit(POSTGREST_MAX_ROWS)
+  }, (r) => r.id)
+}
+
+glRouter.get('/entities/:id/opening-balance', async (c) => {
+  const id = c.req.param('id')
+  if (!isUuid(id)) return c.json({ error: 'id must be a uuid' }, 422)
+  const db = getDb(c.env)
+  const entity = await db.from('gl_entities').select('id, ledger_start_date').eq('id', id).maybeSingle()
+  if (entity.error) return dbError(c, entity.error, 'Failed to load entity')
+  if (!entity.data) return c.json({ error: 'Entity not found' }, 404)
+  const ob = await liveOpeningBalance(db, id)
+  if (ob.error) return dbError(c, ob.error, 'Failed to load opening balance')
+  return c.json({ data: { ledger_start_date: entity.data.ledger_start_date, opening_balance: ob.data } })
+})
+
+/**
+ * B8 slice 2: an LLC's opening balance from a CSV of QuickBooks' Trial Balance report.
+ * Body: { csv, start_date (first of a month), apply?, expected_plan_hash? }. Without apply the
+ * response is the plan (lines, totals, errors, warnings, plan_hash) and nothing is written. With
+ * apply it posts through gl_post_opening_balance, dated start_date - 1, refusing on any plan
+ * error, a live opening balance (reverse it first), or a plan_hash other than the previewed one
+ * (the exact lines, not just the total, must be what the user saw).
+ */
+glRouter.post('/entities/:id/opening-balance', async (c) => {
+  const id = c.req.param('id')
+  if (!isUuid(id)) return c.json({ error: 'id must be a uuid' }, 422)
+  const declared = Number(c.req.header('content-length') ?? '0')
+  if (declared > MAX_TB_CHARS * 6 + 1024) return c.json({ error: 'The trial balance file is too large' }, 413)
+  const raw = await body(c)
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return c.json({ error: 'Body must be { csv, start_date, apply?, expected_plan_hash? }' }, 422)
+  const { csv, start_date: startDate, apply, expected_plan_hash: expected, ...extra } = raw as Record<string, unknown>
+  if (Object.keys(extra).length) return c.json({ error: `Unknown field(s): ${Object.keys(extra).join(', ')}` }, 422)
+  if (typeof csv !== 'string' || !csv.trim()) return c.json({ error: 'csv must be the text of the trial balance CSV' }, 422)
+  if (csv.length > MAX_TB_CHARS) return c.json({ error: 'The trial balance file is too large' }, 422)
+  if (typeof startDate !== 'string' || !isRealIsoDate(startDate) || !startDate.endsWith('-01')) return c.json({ error: 'start_date must be the first day of a month (YYYY-MM-01)' }, 422)
+  if (apply !== undefined && typeof apply !== 'boolean') return c.json({ error: 'apply must be true or false' }, 422)
+  if (expected !== undefined && (typeof expected !== 'string' || !/^[0-9a-f]{64}$/.test(expected))) return c.json({ error: 'expected_plan_hash must be the plan_hash from the preview' }, 422)
+  if (apply === true && expected === undefined) return c.json({ error: 'Posting requires expected_plan_hash from a preview' }, 422)
+
+  const db = getDb(c.env)
+  const entity = await db.from('gl_entities').select('id, ledger_start_date, accounting_basis').eq('id', id).maybeSingle()
+  if (entity.error) return dbError(c, entity.error, 'Failed to load entity')
+  if (!entity.data) return c.json({ error: 'Entity not found' }, 404)
+  const chart = await loadChart(db, id)
+  if (chart.error) return dbError(c, chart.error, 'Failed to load accounts')
+  const live = await liveOpeningBalance(db, id)
+  if (live.error) return dbError(c, live.error, 'Failed to load opening balance')
+
+  const asOfDate = new Date(`${startDate}T00:00:00Z`)
+  asOfDate.setUTCDate(asOfDate.getUTCDate() - 1)
+  const asOf = asOfDate.toISOString().slice(0, 10)
+  const plan = planOpeningBalance(csv, chart.data, { asOf, basis: entity.data.accounting_basis as 'accrual' | 'cash' })
+  const result = {
+    ...plan,
+    plan_hash: await planHash(id, startDate, plan.lines),
+    start_date: startDate,
+    as_of: asOf,
+    current_start_date: entity.data.ledger_start_date as string | null,
+    live_opening_balance_id: live.data?.id ?? null,
+    applied: false,
+    entry_id: null as string | null,
+  }
+  if (entity.data.ledger_start_date && entity.data.ledger_start_date !== startDate) {
+    result.warnings = [...result.warnings, `changes this LLC's ledger start date from ${entity.data.ledger_start_date as string} to ${startDate}`]
+  }
+  if (apply !== true) return c.json({ data: result }, plan.errors.length ? 422 : 200)
+  if (plan.errors.length) return c.json({ error: 'The trial balance cannot be posted', data: result }, 422)
+  if (live.data) return c.json({ error: 'This LLC already has an opening balance; reverse it before posting a new one', data: result }, 409)
+  if (expected !== result.plan_hash) return c.json({ error: 'The plan changed since the preview (accounts or amounts); preview again', data: result }, 409)
+  const postedBy = c.get('adminEmail')
+  if (!postedBy) return c.json({ error: 'Posting requires an identified admin' }, 403)
+  const { data, error } = await db.rpc('gl_post_opening_balance', {
+    p_entity_id: id,
+    p_start_date: startDate,
+    p_lines: plan.lines.map((l) => ({ account_id: l.account_id, debit_cents: l.debit_cents, credit_cents: l.credit_cents })),
+    p_posted_by: postedBy,
+  })
+  if (error) return writeError(c, error, 'Failed to post the opening balance')
+  return c.json({ data: { ...result, applied: true, entry_id: data as string } }, 201)
 })
 
 // ── Journal ───────────────────────────────────────────────────────────────────────────────────
