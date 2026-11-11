@@ -69,6 +69,12 @@ BEGIN
   SELECT ledger_start_date INTO v_start FROM gl_entities WHERE id = NEW.entity_id;
   IF NEW.source = 'reversal' THEN
     SELECT * INTO v_target FROM gl_journal_entries WHERE id = NEW.reverses_entry_id;
+    -- The target must already exist (REFUTE F1): in a multi-row INSERT a reversal listed before
+    -- its target would otherwise skip the opening-balance date rule, retire a live opening
+    -- balance on any later date, and let a second one in.
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'gl: a reversal must follow the entry it reverses' USING ERRCODE = 'check_violation';
+    END IF;
     IF v_target.source = 'opening_balance' THEN
       IF NEW.entry_date <> v_target.entry_date THEN
         RAISE EXCEPTION 'gl: an opening balance is reversed on its own date (%)', v_target.entry_date USING ERRCODE = 'check_violation';

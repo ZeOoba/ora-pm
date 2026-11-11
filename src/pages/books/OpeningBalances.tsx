@@ -26,6 +26,7 @@ export type ObPlan = {
   skipped_zero_rows: number
   errors: string[]
   warnings: string[]
+  plan_hash: string
   start_date: string
   as_of: string
   current_start_date: string | null
@@ -80,7 +81,7 @@ export function OpeningBalances() {
 
   const run = useMutation({
     mutationFn: (apply: boolean) => api.post<{ data: ObPlan }>(`/gl/entities/${entityId}/opening-balance`,
-      apply ? { csv: file?.text, start_date: `${month}-01`, apply, expected_debit_cents: plan?.debit_cents } : { csv: file?.text, start_date: `${month}-01` }),
+      apply ? { csv: file?.text, start_date: `${month}-01`, apply, expected_plan_hash: plan?.plan_hash } : { csv: file?.text, start_date: `${month}-01` }),
     onSuccess: (res, apply) => {
       setPlan(res.data)
       if (apply) {
@@ -156,7 +157,7 @@ export function OpeningBalances() {
             <h2 className="text-base font-semibold text-foreground">Import from a QuickBooks trial balance</h2>
             <p className="text-sm text-muted-foreground">
               In this LLC's QuickBooks file: Reports → Accountant &amp; Taxes → Trial Balance, dated the day before the start date. Export to Excel,
-              keep three columns headed exactly Account, Debit and Credit (keep the TOTAL row: it is checked), and save as CSV.
+              keep the report's title rows (they carry the "As of" date and basis, which are checked), rename the columns to exactly Account, Debit and Credit, keep the TOTAL row (it is required and checked), and save as CSV.
               Every account must already be in the chart (Books → Chart of accounts).
             </p>
           </div>

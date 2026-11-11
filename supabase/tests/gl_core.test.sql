@@ -304,7 +304,7 @@ BEGIN
     SET CONSTRAINTS ALL IMMEDIATE;
     RAISE EXCEPTION 'S1: a reversal of a reversal was accepted';
   EXCEPTION WHEN check_violation THEN
-    IF SQLERRM NOT LIKE '%cannot itself be reversed%' THEN RAISE; END IF;
+    IF SQLERRM NOT LIKE '%cannot itself be reversed%' AND SQLERRM NOT LIKE '%must follow the entry it reverses%' THEN RAISE; END IF;
   END;
   RAISE NOTICE 'ok: S1 reversal-of-reversal rejected even within one multi-row INSERT';
 END $$;

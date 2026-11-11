@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { parseCsv, parseTbAmount, planOpeningBalance, splitQbAccountLabel, type ChartAccount } from '../../server/lib/gl-opening-balance'
+import { parseAsOf, parseCsv, parseTbAmount, planOpeningBalance, splitQbAccountLabel, type ChartAccount } from '../../server/lib/gl-opening-balance'
 
 const CHART: ChartAccount[] = [
   { id: 'cash', number: '1000', qb_name: 'Operating Cash', account_type: 'asset', is_active: true },
@@ -35,6 +35,15 @@ describe('splitQbAccountLabel', () => {
   })
 })
 
+describe('parseAsOf', () => {
+  it.each([['As of December 31, 2026', '2026-12-31'], ['As of Dec 31, 26', '2026-12-31'], ['As of 12/31/2026', '2026-12-31'], ['As of Sept 30, 2026', '2026-09-30']])('%j → %s', (c, iso) => {
+    expect(parseAsOf(c)).toBe(iso)
+  })
+  it.each(['As of February 30, 2026', 'As of Foo 1, 2026', 'As of 13/01/2026', 'As of yesterday'])('rejects %j', (c) => {
+    expect(parseAsOf(c)).toBeNull()
+  })
+})
+
 describe('planOpeningBalance', () => {
   it('a balanced trial balance: exact lines, totals, file TOTAL checked, zero rows skipped', () => {
     const p = planOpeningBalance(['Raytown Flex Holdings LLC,,', 'Trial Balance,,', 'As of December 31 2026,,', ...csv(
@@ -58,12 +67,12 @@ describe('planOpeningBalance', () => {
   })
 
   it('an explicit Number column wins over the label', () => {
-    const p = planOpeningBalance('Number,Account,Debit,Credit\n1000,Cash (renamed in report),100.00,\n3000,"Members\' Equity",,100.00\n', CHART)
+    const p = planOpeningBalance('Number,Account,Debit,Credit\n1000,Cash (renamed in report),100.00,\n3000,"Members\' Equity",,100.00\nTOTAL,,100.00,100.00\n', CHART)
     expect(p.errors).toEqual(['row 2 (Cash (renamed in report)): number 1000 is "Operating Cash" in the ledger chart; the file and the chart disagree'])
   })
 
   it.each([
-    ['unbalanced', csv('Operating Cash,100.00,', "Members' Equity,,99.99"), /debits \$100\.00 do not equal credits \$99\.99 \(difference \$0\.01\)/],
+    ['unbalanced', csv('Operating Cash,100.00,', "Members' Equity,,99.99", 'TOTAL,100.00,99.99'), /debits \$100\.00 do not equal credits \$99\.99 \(difference \$0\.01\)/],
     ['TOTAL row disagrees (a dropped row)', csv('Operating Cash,100.00,', "Members' Equity,,100.00", 'TOTAL,150.00,150.00'), /TOTAL row .* does not match its rows/],
     ['unknown account', csv('Petty Cash,100.00,', "Members' Equity,,100.00"), /Petty Cash\): not in this LLC's chart/],
     ['case-only mismatch', csv('operating cash,100.00,', "Members' Equity,,100.00"), /no exact match; the chart spells it "Operating Cash"/],
@@ -74,18 +83,49 @@ describe('planOpeningBalance', () => {
     ['amount without account', csv(',100.00,', "Members' Equity,,100.00"), /an amount with no account/],
     ['no header', 'Name,Amount\nCash,1\n', /no header row with Account, Debit and Credit/],
     ['two Debit columns', 'Account,Debit,Credit,Debit,Credit\nOperating Cash,1,,,\n', /more than one Debit or Credit column/],
-    ['one account', csv('Operating Cash,0.00,'), /at least two accounts/],
+    ['one account', csv('Operating Cash,0.00,', 'TOTAL,0.00,0.00'), /at least two accounts/],
+    ['no TOTAL row', csv('Operating Cash,100.00,', "Members' Equity,,100.00"), /no TOTAL row; keep QuickBooks' TOTAL row/],
+    ['two TOTAL rows', csv('Operating Cash,100.00,', "Members' Equity,,100.00", 'TOTAL,100.00,100.00', 'TOTAL,100.00,100.00'), /a second TOTAL row/],
+    ['REFUTE F2: label names a different parent than the chart for that number', csv('4000 \u00B7 Other Income:4010 \u00B7 Base Rent,,100.00', 'Operating Cash,100.00,', 'TOTAL,100.00,100.00'), /number 4010 is "Rental Income:Base Rent" in the ledger chart; the file and the chart disagree/],
+    ['REFUTE F2: Number column with a contradicting full name', 'Number,Account,Debit,Credit\n4010,Other Income:Base Rent,,100.00\n1000,Operating Cash,100.00,\nTOTAL,,100.00,100.00\n', /number 4010 is "Rental Income:Base Rent"/],
   ])('rejects: %s', (_n, text, re) => {
     expect(planOpeningBalance(text, CHART).errors.join('\n')).toMatch(re)
   })
 
   it('flags balances on the unusual side without blocking', () => {
-    const p = planOpeningBalance(csv('Operating Cash,,100.00', "Members' Equity,100.00,"), CHART)
+    const p = planOpeningBalance(csv('Operating Cash,,100.00', "Members' Equity,100.00,", 'TOTAL,100.00,100.00'), CHART)
     expect(p.errors).toEqual([])
     expect(p.warnings).toEqual([
       'Operating Cash (asset) has a credit balance; check it against QuickBooks',
       "Members' Equity (equity) has a debit balance; check it against QuickBooks",
     ])
+  })
+
+  it('REFUTE F2: a bare child label may match by number, with a warning', () => {
+    const p = planOpeningBalance(csv('4010 \u00B7 Base Rent,,100.00', 'Operating Cash,100.00,', 'TOTAL,100.00,100.00'), CHART)
+    expect(p.errors).toEqual([])
+    expect(p.lines[0].account_id).toBe('base')
+    expect(p.warnings).toContain('row 2 (4010 \u00B7 Base Rent): matched to "Rental Income:Base Rent" by number 4010')
+  })
+
+  describe('report title rows (as-of date and basis)', () => {
+    const body = csv('Operating Cash,100.00,', "Members' Equity,,100.00", 'TOTAL,100.00,100.00')
+    const titled = (asOf: string, basis: string) => `Raytown Flex Holdings LLC,,\r\n${basis},,\r\nTrial Balance,,\r\n"${asOf}",,\r\n${body}`
+    const ctx = { asOf: '2026-12-31', basis: 'accrual' as const }
+    it('matching date and basis: no errors, no warnings', () => {
+      const p = planOpeningBalance(titled('As of December 31, 2026', 'Accrual Basis'), CHART, ctx)
+      expect(p.errors).toEqual([])
+      expect(p.warnings).toEqual([])
+    })
+    it('a trial balance for the wrong date or basis is refused', () => {
+      expect(planOpeningBalance(titled('As of November 30, 2026', 'Accrual Basis'), CHART, ctx).errors[0]).toMatch(/the report is "As of November 30, 2026" \(2026-11-30\) but the opening balance is as of 2026-12-31/)
+      expect(planOpeningBalance(titled('As of December 31, 2026', 'Cash Basis'), CHART, ctx).errors[0]).toMatch(/"Cash Basis" but this LLC keeps its books on the accrual basis/)
+    })
+    it('without title rows: warnings, not errors', () => {
+      const p = planOpeningBalance(body, CHART, ctx)
+      expect(p.errors).toEqual([])
+      expect(p.warnings.join('\n')).toMatch(/does not show its report date[\s\S]*does not show its basis/)
+    })
   })
 
   it('caps the error list', () => {

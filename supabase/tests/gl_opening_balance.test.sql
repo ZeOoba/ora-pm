@@ -117,6 +117,30 @@ DO $$ BEGIN
   RAISE NOTICE 'ok: a failed opening balance rolls back its start date';
 END $$;
 
+-- REFUTE F1: a reversal listed BEFORE its target in one multi-row INSERT (an opening balance that
+-- would be "reversed" on any date, letting a second live one in) is refused.
+DO $$ BEGIN
+  BEGIN
+    INSERT INTO gl_journal_entries (id, entity_id, entry_date, memo, source, reverses_entry_id, posted_by) VALUES
+      ('0be00000-0000-4000-8000-0000000000f2', '0b000000-0000-4000-8000-000000000001', '2027-06-30', 'fake reversal', 'reversal', '0be00000-0000-4000-8000-0000000000f1', 't'),
+      ('0be00000-0000-4000-8000-0000000000f1', '0b000000-0000-4000-8000-000000000001', '2026-12-31', 'second opening', 'opening_balance', NULL, 't');
+    RAISE EXCEPTION 'F1: a reversal ahead of its target was accepted';
+  EXCEPTION WHEN check_violation OR unique_violation THEN
+    IF SQLERRM NOT LIKE '%must follow the entry it reverses%' AND SQLERRM NOT LIKE '%already has an opening balance%' THEN RAISE; END IF;
+  END;
+  -- and with no live opening balance at all (entity 2), the ordering trick is still refused
+  BEGIN
+    UPDATE gl_entities SET ledger_start_date = '2027-01-01' WHERE id = '0b000000-0000-4000-8000-000000000002';
+    INSERT INTO gl_journal_entries (id, entity_id, entry_date, memo, source, reverses_entry_id, posted_by) VALUES
+      ('0be00000-0000-4000-8000-0000000000f4', '0b000000-0000-4000-8000-000000000002', '2027-06-30', 'fake reversal', 'reversal', '0be00000-0000-4000-8000-0000000000f3', 't'),
+      ('0be00000-0000-4000-8000-0000000000f3', '0b000000-0000-4000-8000-000000000002', '2026-12-31', 'opening', 'opening_balance', NULL, 't');
+    RAISE EXCEPTION 'F1: a reversal ahead of its target was accepted';
+  EXCEPTION WHEN check_violation THEN
+    IF SQLERRM NOT LIKE '%must follow the entry it reverses%' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok: REFUTE F1 a reversal cannot precede its target in one INSERT';
+END $$;
+
 -- Isolation: refused outside READ COMMITTED.
 BEGIN ISOLATION LEVEL REPEATABLE READ;
 DO $$ BEGIN

@@ -87,9 +87,35 @@ export type OpeningPlan = {
   warnings: string[]
 }
 
+const MONTHS = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december']
+
+/**
+ * The as-of date in a QuickBooks report header cell: "As of December 31, 2026", "As of Dec 31, 26",
+ * "As of 12/31/2026". Returns YYYY-MM-DD, or null when the text is not a date we can read.
+ */
+export function parseAsOf(cell: string): string | null {
+  const t = cell.trim().replace(/^as of\s+/i, '')
+  let y: number, m: number, d: number
+  const named = /^([A-Za-z]+)\.?\s+(\d{1,2}),\s*(\d{2}|\d{4})$/.exec(t)
+  const numeric = /^(\d{1,2})\/(\d{1,2})\/(\d{2}|\d{4})$/.exec(t)
+  if (named) {
+    const mi = MONTHS.findIndex((mn) => mn.startsWith(named[1].toLowerCase()) && named[1].length >= 3)
+    if (mi < 0) return null
+    ;[m, d, y] = [mi + 1, Number(named[2]), Number(named[3])]
+  } else if (numeric) {
+    ;[m, d, y] = [Number(numeric[1]), Number(numeric[2]), Number(numeric[3])]
+  } else return null
+  if (y < 100) y += 2000
+  const iso = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`
+  const dt = new Date(`${iso}T00:00:00Z`)
+  return !Number.isNaN(dt.getTime()) && dt.toISOString().startsWith(iso) ? iso : null
+}
+
+export type OpeningPlanContext = { asOf: string; basis: 'accrual' | 'cash' }
+
 const NORMAL_SIDE: Record<string, 'debit' | 'credit'> = { asset: 'debit', expense: 'debit', liability: 'credit', equity: 'credit', income: 'credit' }
 
-export function planOpeningBalance(csv: string, chart: ChartAccount[]): OpeningPlan {
+export function planOpeningBalance(csv: string, chart: ChartAccount[], ctx?: OpeningPlanContext): OpeningPlan {
   const plan: OpeningPlan = { lines: [], debit_cents: 0, credit_cents: 0, file_total: null, skipped_zero_rows: 0, errors: [], warnings: [] }
   const fail = (m: string) => { if (plan.errors.length < MAX_TB_ERRORS) plan.errors.push(m) }
   if (csv.length > MAX_TB_CHARS) { fail('file is larger than 2,000,000 characters'); return plan }
@@ -111,11 +137,28 @@ export function planOpeningBalance(csv: string, chart: ChartAccount[]): OpeningP
     fail('more than one Debit or Credit column; keep a single as-of date'); return plan
   }
 
+  // QuickBooks' report title rows (above the header) say the as-of date and the basis. When they
+  // are kept, they must match the import (REFUTE note: a wrong-date or wrong-basis TB would post).
+  if (ctx) {
+    const titleCells = rows.slice(0, hi).flat().map((c) => c.trim()).filter(Boolean)
+    const asOfCell = titleCells.find((c) => /^as of\s/i.test(c))
+    if (asOfCell) {
+      const fileAsOf = parseAsOf(asOfCell)
+      if (!fileAsOf) plan.warnings.push(`could not read the report date "${asOfCell}"; check it is ${ctx.asOf}`)
+      else if (fileAsOf !== ctx.asOf) fail(`the report is "${asOfCell}" (${fileAsOf}) but the opening balance is as of ${ctx.asOf}`)
+    } else plan.warnings.push(`the file does not show its report date; keep QuickBooks' title rows to have "As of" checked against ${ctx.asOf}`)
+    const basisCell = titleCells.find((c) => /^(accrual|cash) basis$/i.test(c))
+    if (basisCell) {
+      if (!basisCell.toLowerCase().startsWith(ctx.basis)) fail(`the report is "${basisCell}" but this LLC keeps its books on the ${ctx.basis} basis`)
+    } else plan.warnings.push(`the file does not show its basis; keep QuickBooks' title rows to have "${ctx.basis === 'accrual' ? 'Accrual' : 'Cash'} Basis" checked`)
+  }
+
   const byNumber = new Map(chart.filter((a) => a.number).map((a) => [a.number as string, a]))
   const byName = new Map(chart.map((a) => [a.qb_name, a]))
   const byLower = new Map<string, ChartAccount[]>()
   for (const a of chart) byLower.set(a.qb_name.toLowerCase(), [...(byLower.get(a.qb_name.toLowerCase()) ?? []), a])
   const used = new Map<string, number>()
+  let totals = 0
 
   for (let r = hi + 1; r < rows.length && plan.errors.length < MAX_TB_ERRORS; r++) {
     const cells = rows[r]
@@ -130,7 +173,10 @@ export function planOpeningBalance(csv: string, chart: ChartAccount[]): OpeningP
       fail(`row ${rowNo} (${label || 'no account'}): "${dr === null ? rawDr : rawCr}" is not a plain amount; a negative balance belongs in the other column`)
       continue
     }
-    if (/^total$/i.test(label)) {
+    const numberCell = ci.number >= 0 ? (cells[ci.number] ?? '').trim() : ''
+    if (/^total$/i.test(label) || (!label && /^total$/i.test(numberCell))) {
+      totals++
+      if (totals > 1) { fail(`row ${rowNo}: a second TOTAL row; export a single trial balance`); continue }
       plan.file_total = { debit_cents: dr, credit_cents: cr }
       continue
     }
@@ -145,9 +191,17 @@ export function planOpeningBalance(csv: string, chart: ChartAccount[]): OpeningP
     if (number) {
       acct = byNumber.get(number)
       if (!acct) { fail(`row ${rowNo} (${label}): no account numbered ${number} in this LLC's chart`); continue }
-      if (acct.qb_name.toLowerCase() !== name.toLowerCase() && acct.qb_name.toLowerCase().split(':').pop() !== name.toLowerCase().split(':').pop()) {
-        fail(`row ${rowNo} (${label}): number ${number} is "${acct.qb_name}" in the ledger chart; the file and the chart disagree`)
-        continue
+      // The name must agree with the chart (REFUTE F2): the full name when the file gives a
+      // Parent:Child name; only a bare child name ("4010 · Base Rent") may match by last segment.
+      const fileName = name.toLowerCase()
+      const chartName = acct.qb_name.toLowerCase()
+      if (chartName !== fileName) {
+        const lastOk = !fileName.includes(':') && chartName.split(':').pop() === fileName
+        if (!lastOk) {
+          fail(`row ${rowNo} (${label}): number ${number} is "${acct.qb_name}" in the ledger chart; the file and the chart disagree`)
+          continue
+        }
+        plan.warnings.push(`row ${rowNo} (${label}): matched to "${acct.qb_name}" by number ${number}`)
       }
     } else {
       acct = byName.get(name)
@@ -172,6 +226,7 @@ export function planOpeningBalance(csv: string, chart: ChartAccount[]): OpeningP
   plan.debit_cents = plan.lines.reduce((s, l) => s + l.debit_cents, 0)
   plan.credit_cents = plan.lines.reduce((s, l) => s + l.credit_cents, 0)
   if (!Number.isSafeInteger(plan.debit_cents) || !Number.isSafeInteger(plan.credit_cents)) fail('totals too large')
+  if (totals === 0) fail(`no TOTAL row; keep QuickBooks' TOTAL row so the import can check that no row was dropped`)
   if (!plan.errors.length) {
     if (plan.lines.length < 2) fail('an opening balance needs at least two accounts with balances')
     if (plan.debit_cents !== plan.credit_cents) {
