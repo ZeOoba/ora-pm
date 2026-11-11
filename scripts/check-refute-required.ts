@@ -94,6 +94,8 @@ export const FINANCIAL_SOURCE_PATHS: ReadonlySet<string> = new Set([
   // B8 slice 1: QuickBooks chart import — maps each QB account type to the ledger type every
   // posting to that account inherits.
   'server/lib/qb-iif-accounts.ts',
+  // B8 slice 2: opening trial balance import — decides each LLC's opening position.
+  'server/lib/gl-opening-balance.ts',
 ])
 
 // Tables whose schema/view/index changes are financial: charges (what tenants owe), payments

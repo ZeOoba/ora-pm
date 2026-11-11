@@ -263,3 +263,110 @@ describe('POST /api/gl/entities/:id/accounts/qb-iif (QuickBooks chart import)', 
     expect((await post(path, { iif: FILE, apply: true })).status).toBe(409)
   })
 })
+
+describe('opening balance (B8 slice 2)', () => {
+  const path = `/api/gl/entities/${E}/opening-balance`
+  const CHART = [
+    { id: A1, entity_id: E, number: '1000', qb_name: 'Operating Cash', account_type: 'asset', is_active: true },
+    { id: A2, entity_id: E, number: '3000', qb_name: "Members' Equity", account_type: 'equity', is_active: true },
+  ]
+  const CSV = "Account,Debit,Credit\r\n1000 · Operating Cash,\"125,000.00\",\r\nMembers' Equity,,\"125,000.00\"\r\nTOTAL,\"125,000.00\",\"125,000.00\"\r\n"
+  function install(entries: Row[] = [], startDate: string | null = null) {
+    const tables: Record<string, ReturnType<typeof pgTable>> = {
+      gl_entities: pgTable([{ id: E, ledger_start_date: startDate, accounting_basis: 'accrual' }]),
+      gl_accounts: pgTable(CHART),
+      gl_journal_entries: pgTable(entries),
+      gl_journal_lines: pgTable([{ entry_id: 'ob1', line_no: 1, account_id: A1, debit_cents: 100, credit_cents: 0 }]),
+    }
+    mockFrom.mockImplementation((t: string) => tables[t])
+  }
+  const OB = { id: 'ob1', entity_id: E, source: 'opening_balance', entry_date: '2026-12-31', memo: 'm', posted_by: 'x', posted_at: '2026-11-11T00:00:00Z', reverses_entry_id: null }
+
+  it('preview: the exact lines and totals, dated the day before the start date; nothing posted', async () => {
+    install()
+    const res = await post(path, { csv: CSV, start_date: '2027-01-01' })
+    expect(res.status).toBe(200)
+    const d = (await res.json() as { data: { as_of: string; lines: { account_id: string; debit_cents: number; credit_cents: number }[]; debit_cents: number; applied: boolean } }).data
+    expect(d.as_of).toBe('2026-12-31')
+    expect(d.lines.map((l) => [l.account_id, l.debit_cents, l.credit_cents])).toEqual([[A1, 12500000, 0], [A2, 0, 12500000]])
+    expect(d.debit_cents).toBe(12500000)
+    expect(d.applied).toBe(false)
+    expect(mockRpc).not.toHaveBeenCalled()
+  })
+
+  const previewHash = async (csv = CSV) => (await (await post(path, { csv, start_date: '2027-01-01' })).json() as { data: { plan_hash: string } }).data.plan_hash
+
+  it('apply posts through gl_post_opening_balance with the previewed lines and the admin', async () => {
+    install()
+    mockRpc.mockResolvedValue({ data: 'ob-new', error: null })
+    const hash = await previewHash()
+    expect(hash).toMatch(/^[0-9a-f]{64}$/)
+    const res = await post(path, { csv: CSV, start_date: '2027-01-01', apply: true, expected_plan_hash: hash })
+    expect(res.status).toBe(201)
+    expect(mockRpc).toHaveBeenCalledWith('gl_post_opening_balance', {
+      p_entity_id: E, p_start_date: '2027-01-01', p_posted_by: 'bookkeeper@example.test',
+      p_lines: [{ account_id: A1, debit_cents: 12500000, credit_cents: 0 }, { account_id: A2, debit_cents: 0, credit_cents: 12500000 }],
+    })
+  })
+
+  it('apply refuses: a live opening balance (409), a changed total (409), plan errors (422); none reach the database', async () => {
+    install([OB])
+    const hash = await previewHash()
+    expect((await post(path, { csv: CSV, start_date: '2027-01-01', apply: true, expected_plan_hash: hash })).status).toBe(409)
+    install()
+    expect((await post(path, { csv: CSV, start_date: '2027-01-01', apply: true, expected_plan_hash: 'a'.repeat(64) })).status).toBe(409)
+    expect((await post(path, { csv: CSV, start_date: '2027-01-01', apply: true })).status).toBe(422)
+    const unbalanced = CSV.replace('Members\' Equity,,"125,000.00"', 'Members\' Equity,,"124,999.99"').replace('TOTAL,"125,000.00","125,000.00"', 'TOTAL,"125,000.00","124,999.99"')
+    const res = await post(path, { csv: unbalanced, start_date: '2027-01-01', apply: true, expected_plan_hash: hash })
+    expect(res.status).toBe(422)
+    expect(JSON.stringify(await res.json())).toContain('difference $0.01')
+    expect(mockRpc).not.toHaveBeenCalled()
+  })
+
+  it('a reversed opening balance no longer blocks a new one', async () => {
+    install([OB, { id: 'rev1', entity_id: E, source: 'reversal', entry_date: '2026-12-31', memo: 'r', posted_by: 'x', posted_at: '2026-11-11T01:00:00Z', reverses_entry_id: 'ob1' }])
+    mockRpc.mockResolvedValue({ data: 'ob2', error: null })
+    expect((await post(path, { csv: CSV, start_date: '2027-01-01', apply: true, expected_plan_hash: await previewHash() })).status).toBe(201)
+  })
+
+  it('validates start_date, body and size; warns when the start date would change', async () => {
+    install([], '2027-02-01')
+    expect((await post(path, { csv: CSV, start_date: '2027-01-15' })).status).toBe(422)
+    expect((await post(path, { csv: CSV, start_date: '2027-02-30' })).status).toBe(422)
+    expect((await post(path, { csv: CSV, start_date: '2027-01-01', extra: 1 })).status).toBe(422)
+    expect((await post(path, { csv: '', start_date: '2027-01-01' })).status).toBe(422)
+    const res = await post(path, { csv: CSV, start_date: '2027-01-01' })
+    expect(JSON.stringify(await res.json())).toContain('changes this LLC\'s ledger start date from 2027-02-01 to 2027-01-01')
+    const big = await app.request(path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': '20000000' }, body: '{}' }, env)
+    expect(big.status).toBe(413)
+  })
+
+  it('REFUTE note: the plan hash pins the exact lines, not just the total', async () => {
+    install()
+    const swapped = "Account,Debit,Credit\r\nMembers' Equity,,\"125,000.00\"\r\n1000 \u00B7 Operating Cash,\"125,000.00\",\r\nTOTAL,\"125,000.00\",\"125,000.00\"\r\n"
+    expect(await previewHash(swapped)).not.toBe(await previewHash())
+  })
+
+  it('a ledger-rule rejection from the database is a 422 with the rule', async () => {
+    install()
+    mockRpc.mockResolvedValue({ data: null, error: { code: '23514', message: 'gl: period 2026-12-01 is locked for entity x; post in an open month' } })
+    const res = await post(path, { csv: CSV, start_date: '2027-01-01', apply: true, expected_plan_hash: await previewHash() })
+    expect(res.status).toBe(422)
+    expect((await res.json() as { error: string }).error).toContain('is locked')
+  })
+
+  it('GET returns the start date and the live opening balance with its lines', async () => {
+    install([OB], '2027-01-01')
+    const res = await get(path)
+    expect(res.status).toBe(200)
+    const d = (await res.json() as { data: { ledger_start_date: string; opening_balance: { id: string; lines: unknown[] } } }).data
+    expect(d.ledger_start_date).toBe('2027-01-01')
+    expect(d.opening_balance.id).toBe('ob1')
+    expect(d.opening_balance.lines).toHaveLength(1)
+  })
+
+  it('the ordinary journal endpoint no longer accepts opening_balance entries', async () => {
+    expect((await post('/api/gl/journal', entry({ source: 'opening_balance' }))).status).toBe(422)
+    expect(mockRpc).not.toHaveBeenCalled()
+  })
+})

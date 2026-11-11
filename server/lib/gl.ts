@@ -71,7 +71,8 @@ export const JournalPostSchema = z.object({
   entity_id: uuid,
   entry_date: isoDate,
   memo: z.string().trim().min(1).max(500),
-  source: z.enum(['manual', 'opening_balance']).default('manual'),
+  // Opening balances go through POST /entities/:id/opening-balance (gl_post_opening_balance) only.
+  source: z.enum(['manual']).default('manual'),
   lines: z.array(z.object({
     account_id: uuid,
     debit: amountString.optional(),
