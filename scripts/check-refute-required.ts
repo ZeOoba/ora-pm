@@ -96,6 +96,8 @@ export const FINANCIAL_SOURCE_PATHS: ReadonlySet<string> = new Set([
   'server/lib/qb-iif-accounts.ts',
   // B8 slice 2: opening trial balance import — decides each LLC's opening position.
   'server/lib/gl-opening-balance.ts',
+  // B8 slice 3: AR posting planner — chooses which charges, payments, voids and returns post when.
+  'server/lib/gl-ar-posting.ts',
 ])
 
 // Tables whose schema/view/index changes are financial: charges (what tenants owe), payments
