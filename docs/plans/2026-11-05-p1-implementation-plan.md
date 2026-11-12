@@ -1,7 +1,7 @@
 # Phase 1 Implementation Plan — Design System & UX Foundation
 
 Source spec: `docs/plans/2026-11-05-ora-pm-upgrade-roadmap.md` §3 and §5 (T1–T14). This plan regroups T1–T14 into 9 executable tasks.
-Branch: `feat/p1-design-foundation` (worktree `C:\Users\Owner\ora-pm-worktrees\p1-design-foundation`).
+Branch: `feat/p1-design-foundation` (a worktree on the ORA laptop).
 
 ## Global Constraints (bind every task)
 

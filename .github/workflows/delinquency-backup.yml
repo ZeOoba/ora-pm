@@ -2,7 +2,7 @@ name: Delinquency check (off-host backup trigger)
 
 # Off-host backup for the laptop-bound `ora-pm-daily-crons` fleet task (CC/MCP
 # registry, 09:40 ET; Mondays only since the at-most-weekly fleet retime, despite
-# the task id; runs C:\Users\Owner\ora-pm-cron\ping-crons.ps1).
+# the task id; runs ping-crons.ps1 on the ORA laptop).
 # That task only fires while Claude Desktop is open on the ORA laptop; during
 # the 2026-08-29 -> 09-01 host outage late-fee posting was silent for four days
 # (OI-229). This workflow re-fires ONLY the money-moving endpoint,

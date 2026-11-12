@@ -19,7 +19,7 @@ const R2 = '00000000-0000-4000-8000-000000000002'
 const R3 = '00000000-0000-4000-8000-000000000003'
 const R4 = '00000000-0000-4000-8000-000000000004'
 const R5 = '00000000-0000-4000-8000-000000000005'
-const ME = 'ggoldberg@oxfordra.net'
+const ME = 'admin@example.test'
 const D = '2026-07-01'
 
 function ins(db: MigratedDb, ref: string, tier: string | null, date: string | null = tier === null ? null : D,

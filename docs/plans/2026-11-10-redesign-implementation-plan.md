@@ -2,7 +2,7 @@
 
 **Status:** IN PROGRESS · 2026-11-10 · baseline `origin/main` @ `cb32cc8`
 **Source:** Claude Design handoff "Property management software audit". The primary file is `ORA PM.dc.html`, a single clickable prototype that combines Today, Overview, Property, Tenant, Lease, Rent roll, Renewals, Collections, Books, Tenant portal and Mobile. Everything in the prototype is sample data.
-**Owner:** Gabriel Goldberg
+**Owner:** ORA principal
 
 ## Scoping decisions (2026-11-10)
 
