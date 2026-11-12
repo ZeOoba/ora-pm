@@ -436,8 +436,49 @@ class ContextAndEncoding(unittest.TestCase):
         self.sb.commit("notes.md", "%s: /q?t=Quiet+Marsh+Park\n" % ANCHOR)
         self.assertBlocked(*self.sb.push())
 
+    # --- REFUTE round 1 on 43ba624e: blob content and paths join their commit's window --
+    @staticmethod
+    def _docx(text):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("word/document.xml", "<w:t>%s</w:t>" % text)
+        return buf.getvalue()
+
+    def test_anchor_in_message_and_term_inside_docx_is_blocked(self):
+        self.sb.commit("memo.docx", self._docx(CTX_TERM), msg="add %s IC memo" % ANCHOR)
+        self.assertBlocked(*self.sb.push())
+
+    def test_anchor_in_path_and_term_inside_docx_is_blocked(self):
+        self.sb.commit("%s_memo.docx" % ANCHOR, self._docx(CTX_TERM))
+        self.assertBlocked(*self.sb.push())
+
+    def test_anchor_in_message_and_term_inside_gzip_is_blocked(self):
+        self.sb.commit("log.txt.gz", gzip.compress(("x %s y" % CTX_TERM).encode()),
+                       msg="%s export" % ANCHOR)
+        self.assertBlocked(*self.sb.push())
+
+    def test_anchor_in_message_and_term_in_no_diff_file_is_blocked(self):
+        self.sb.commit(".gitattributes", "*.md -diff\n")
+        self.sb.commit("notes.md", "site visit at %s\n" % CTX_TERM, msg="%s notes" % ANCHOR)
+        self.assertBlocked(*self.sb.push())
+
+    def test_anchor_message_and_docx_term_in_different_commits_stay_separate(self):
+        self.sb.commit("a.md", "clean\n", msg="%s kickoff" % ANCHOR)
+        self.sb.commit("memo.docx", self._docx(CTX_TERM), msg="add memo")
+        self.assertAllowed(*self.sb.push())
+
+    def test_zero_width_anchor_still_gates_on_its_visible_spelling(self):
+        self.sb.write_roster({"deal_ctx": {"active": True, "always": [], "context": [CTX_TERM],
+                                           "context_requires_any": ["projectcode" + ZWSP + "q7"]}})
+        self.sb.commit("notes.md", "walk to %s\n" % CTX_TERM)
+        self.assertAllowed(*self.sb.push())
+        self.sb.commit("notes2.md", "%s: %s\n" % (ANCHOR, CTX_TERM))
+        self.assertBlocked(*self.sb.push())
+
 
 GZIP_TRUNCATED = gzip.compress(b"x" * 5000)[:-12]
+# sha256 of the guard's _TABLE_MN + "|" + _TABLE_FMT (~/.claude/hooks/confidentiality-guard.py).
+GUARD_TABLES_SHA256 = "74a4895cdb19be8885ff6d9338b636e6613e1ef211c3aacc6799449bc6118718"
 
 
 class Units(unittest.TestCase):
@@ -506,6 +547,45 @@ class Units(unittest.TestCase):
         self.assertEqual(scan.main(stdin_text=line, roster=self._roster(CTX_ROSTER), cwd=repo), 1)
         self.assertEqual(scan.main(stdin_text=line, roster=self._roster(
             {"d": {"active": False, "context": [CTX_TERM]}}), cwd=repo), 0)
+
+    def test_blank_anchor_mirrors_guard_deletion_set(self):
+        for a in ("", "   ", ZWSP, "\u3164", "\u2800", "\u115f\u1160", "\u0301", "\ufe0f",
+                  "\u00b2", ZWSP + "\u00a0" + "\ufeff", "\u200d\u0301 \u3164"):
+            self.assertTrue(scan._blank(a), repr(a))
+        for a in ("a", "q7", "\u3164a", "projectcode" + ZWSP + "q7"):
+            self.assertFalse(scan._blank(a), repr(a))
+        for a in ("\u3164", "\u2800", "\u0301", "\ufe0f"):
+            r = scan.load_roster(self._roster({"d": {"context": [CTX_TERM],
+                                                     "context_requires_any": [a, ANCHOR]}}))
+            self.assertEqual(r.hits("at %s" % CTX_TERM), [r.terms.index(CTX_TERM)], repr(a))
+
+    def test_anchor_forms_mirror_guard_tight_form(self):
+        r = scan.load_roster(self._roster({"d": {"context": [CTX_TERM],
+                                                 "context_requires_any": ["projectcode" + ZWSP + "q7"]}}))
+        ti = r.terms.index(CTX_TERM)
+        self.assertEqual(r.hits("%s: %s" % (ANCHOR, CTX_TERM)), [ti])
+        self.assertEqual(r.hits(CTX_TERM), [])
+        # accented anchor (invented): matches with and without the accent, as in the guard
+        r = scan.load_roster(self._roster({"d": {"context": [CTX_TERM],
+                                                 "context_requires_any": ["Br\u00fbl\u00e9 Yard"]}}))
+        ti = r.terms.index(CTX_TERM)
+        for text in ("brule yard %s", "Br\u00fbl\u00e9 Yard %s", "Bru\u0302le\u0301 yard %s"):
+            self.assertEqual(r.hits(text % CTX_TERM), [ti], text)
+
+    def test_guard_tables_are_pinned(self):
+        import hashlib
+        self.assertEqual(hashlib.sha256("|".join((scan._TABLE_MN, scan._TABLE_FMT)).encode())
+                         .hexdigest(), GUARD_TABLES_SHA256)
+
+    def test_window_overlap_covers_four_url_rounds(self):
+        term = ("quiet marsh park " * 59).strip()               # ~1000 chars, invented
+        enc = "".join("%%252525%02X" % ord(c) for c in term)   # 9 chars per char, 4 rounds
+        p = scan.WINDOW - (len(enc) + scan.MIN_OVERLAP) // 2
+        text = "a" * p + enc + "a" * scan.WINDOW
+        self.assertEqual(scan.scan_text(text, [term]), [0])
+
+    def test_url_encoded_plus_term_matches(self):
+        self.assertEqual(scan.scan_text("re: C%2BD Yard", ["c+d yard"]), [0])
 
     def test_url_encoded_forms_match(self):
         t = [CTX_TERM]

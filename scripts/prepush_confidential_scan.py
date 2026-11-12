@@ -24,10 +24,16 @@ What is scanned, per pushed ref:
     (docx / xlsx are zips);
   * the pushed ref names, and every annotated tag object in a pushed tag's chain.
 Every text is also read URL-decoded (`unquote_plus` and plain `unquote`, so `%20`, `+` and
-`%51uiet` decode), repeated to a fixpoint bounded at 4 rounds, which unwraps double- and
-triple-encoding (`%2520`, `%252520`); deeper nesting is a residual. URL-decoding runs on the
+`%51uiet` decode), repeated to a fixpoint bounded at 4 rounds, which unwraps up to four
+levels of encoding (`%20`, `%2520`, `%252520`, `%25252520`); deeper nesting is a residual. URL-decoding runs on the
 raw and the entity-decoded text (tag-stripped readings are not URL-decoded), so an encoded
-term inside an `href` attribute is read too.
+term inside an `href` attribute is read too. Plain `unquote` (which keeps a literal `+`) is
+only run when some roster string contains `+`; otherwise it can find nothing `unquote_plus`
+does not. Cost, versus the scan before URL-decoding existed (4 MB texts): dense in `+`,
+`%`, `&` and `<` (`a+b%2Bc%252Bd...&amp;amp;<i>x</i>`) about 3.3x, rising to about 10x
+when a roster string contains `+` (plain unquote then runs too; the refute pass measured
+11.6x, 0.85 s -> 9.9 s, before this gate existed); %-only text about 6x. Clean text with
+no `%` or `+` costs nothing extra.
 Matching: NFKC + casefold on both sides; any run of whitespace / `_` / `-` / `.` / NBSP
 counts as one separator, and a separator-free form of each MULTI-word term (5+ chars) is
 also matched against the normalized text, so `LOI_<TermNoSpaces>_MMDDYYYY` and line-wrapped
@@ -38,16 +44,26 @@ therefore scanned in full, deliberately.
 
 Context terms (mirrors find_hit() in ~/.claude/hooks/confidentiality-guard.py): a deal's
 `context` term blocks only when one of the same deal's `context_requires_any` anchors also
-appears in the same WINDOW. A window is one scanned unit: one commit (its raw object in every
-text view PLUS its own patch from `git log -p`), one blob (every text view and every
-decompressed archive member -- a docx is one document), one annotated tag object, or one
-pushed ref name. An anchor and a context term that only meet across two commits or two files
-of the same push do not combine (residual; the anchored-context design is about one text).
+appears in the same WINDOW. A window is one scanned unit:
+  * one commit: its raw object in every text view, its own patch from `git log -p`, AND the
+    content and path of every blob it adds or modifies (`git log --raw`, merges via --cc) --
+    binary, archive and `-diff` files show in the patch only as "Binary files differ", so
+    their decoded text is pooled in explicitly (the guard pools file_path with content);
+  * one blob: every text view, every decompressed archive member (a docx is one document)
+    and every path it is pushed under;
+  * one annotated tag object; one pushed ref name.
+An anchor and a context term that only meet across two commits of the same push do not
+combine (residual; the anchored-context design is about one text).
 A deal whose context terms have no usable anchor -- `context_requires_any` missing or empty,
-or ANY anchor that is blank once normalized (empty, whitespace, zero-width only: a blank
-anchor matches everywhere, as in the guard) -- has its context terms treated as `always`
-terms. That is stricter than the guard for a missing / empty anchor list, which the guard
-reads as "never fires"; fail-closed wins here. An anchor alone never blocks.
+or ANY anchor that is blank under the guard's tight form (NFKD, lowercase, superscript
+digits, combining marks (Mn) and the guard's invisible set _TABLE_FMT deleted, whitespace
+collapsed: U+3164, U+2800, U+115F/1160, U+0301, U+FE0F, ZWSP ... all count as blank; a
+blank anchor matches everywhere, as in the guard) -- has its context terms treated as
+`always` terms. That is stricter than the guard for a missing / empty anchor list, which the
+guard reads as "never fires"; fail-closed wins here. Each usable anchor is matched in its
+plain normalized form AND its tight form, so `projectcode<ZWSP>q7` fires on `projectcodeq7`
+and an accented anchor fires with or without the accent, as the guard does (its punctuation
+and non-ASCII digit folds are not mirrored). An anchor alone never blocks.
 
 Output never echoes a term: hits are reported as roster indices, and a path or ref name
 that itself contains ANY roster string (always, context or anchor) is withheld.
@@ -71,8 +87,9 @@ block). An active deal with context terms and no always terms is SCANNED, never 
 
 Residual (not covered): text inside images, OCR-only scans, raw zlib / lzma-alone streams,
 PNG zTXt chunks, and encodings other than those listed above (URL-encoding nested past 4
-rounds included); zero-width characters inside a term; a context term and its anchor split
-across two windows; history already on the remote is not rescanned.
+rounds included); a context term and its anchor split across two commits; zero-width
+characters or combining marks inside an always / context term (anchors are tightened, terms
+are not); history already on the remote is not rescanned.
 
 Exit 0 = allow, 1 = block (git pre-push convention). Bypass for a verified-clean push is a
 human's `git push --no-verify`; there is deliberately no environment-variable bypass.
@@ -95,6 +112,36 @@ MAX_DEPTH = 3
 MIN_SQUASHED_LEN = 5
 WITHHELD = "<withheld: contains a confidential term>"
 MAX_URL_DECODE_ROUNDS = 4
+# Window overlap factor: 4 URL rounds can turn one character into 9 (`%252525XX`), plus
+# markup / entity slack. See scan_text.
+OVERLAP_FACTOR = 16
+
+# Mirror of the guard's deletion set (~/.claude/hooks/confidentiality-guard.py _TABLE_MN and
+# _TABLE_FMT, Unicode 17 fixed tables, pinned by hash in the tests). Used for anchors only.
+_TABLE_MN = "300-36f,483-487,591-5bd,5bf,5c1-5c2,5c4-5c5,5c7,610-61a,64b-65f,670,6d6-6dc,6df-6e4,6e7-6e8,6ea-6ed,711,730-74a,7a6-7b0,7eb-7f3,7fd,816-819,81b-823,825-827,829-82d,859-85b,897-89f,8ca-8e1,8e3-902,93a,93c,941-948,94d,951-957,962-963,981,9bc,9c1-9c4,9cd,9e2-9e3,9fe,a01-a02,a3c,a41-a42,a47-a48,a4b-a4d,a51,a70-a71,a75,a81-a82,abc,ac1-ac5,ac7-ac8,acd,ae2-ae3,afa-aff,b01,b3c,b3f,b41-b44,b4d,b55-b56,b62-b63,b82,bc0,bcd,c00,c04,c3c,c3e-c40,c46-c48,c4a-c4d,c55-c56,c62-c63,c81,cbc,cbf,cc6,ccc-ccd,ce2-ce3,d00-d01,d3b-d3c,d41-d44,d4d,d62-d63,d81,dca,dd2-dd4,dd6,e31,e34-e3a,e47-e4e,eb1,eb4-ebc,ec8-ece,f18-f19,f35,f37,f39,f71-f7e,f80-f84,f86-f87,f8d-f97,f99-fbc,fc6,102d-1030,1032-1037,1039-103a,103d-103e,1058-1059,105e-1060,1071-1074,1082,1085-1086,108d,109d,135d-135f,1712-1714,1732-1733,1752-1753,1772-1773,17b4-17b5,17b7-17bd,17c6,17c9-17d3,17dd,180b-180d,180f,1885-1886,18a9,1920-1922,1927-1928,1932,1939-193b,1a17-1a18,1a1b,1a56,1a58-1a5e,1a60,1a62,1a65-1a6c,1a73-1a7c,1a7f,1ab0-1abd,1abf-1add,1ae0-1aeb,1b00-1b03,1b34,1b36-1b3a,1b3c,1b42,1b6b-1b73,1b80-1b81,1ba2-1ba5,1ba8-1ba9,1bab-1bad,1be6,1be8-1be9,1bed,1bef-1bf1,1c2c-1c33,1c36-1c37,1cd0-1cd2,1cd4-1ce0,1ce2-1ce8,1ced,1cf4,1cf8-1cf9,1dc0-1dff,20d0-20dc,20e1,20e5-20f0,2cef-2cf1,2d7f,2de0-2dff,302a-302d,3099-309a,a66f,a674-a67d,a69e-a69f,a6f0-a6f1,a802,a806,a80b,a825-a826,a82c,a8c4-a8c5,a8e0-a8f1,a8ff,a926-a92d,a947-a951,a980-a982,a9b3,a9b6-a9b9,a9bc-a9bd,a9e5,aa29-aa2e,aa31-aa32,aa35-aa36,aa43,aa4c,aa7c,aab0,aab2-aab4,aab7-aab8,aabe-aabf,aac1,aaec-aaed,aaf6,abe5,abe8,abed,fb1e,fe00-fe0f,fe20-fe2f,101fd,102e0,10376-1037a,10a01-10a03,10a05-10a06,10a0c-10a0f,10a38-10a3a,10a3f,10ae5-10ae6,10d24-10d27,10d69-10d6d,10eab-10eac,10efa-10eff,10f46-10f50,10f82-10f85,11001,11038-11046,11070,11073-11074,1107f-11081,110b3-110b6,110b9-110ba,110c2,11100-11102,11127-1112b,1112d-11134,11173,11180-11181,111b6-111be,111c9-111cc,111cf,1122f-11231,11234,11236-11237,1123e,11241,112df,112e3-112ea,11300-11301,1133b-1133c,11340,11366-1136c,11370-11374,113bb-113c0,113ce,113d0,113d2,113e1-113e2,11438-1143f,11442-11444,11446,1145e,114b3-114b8,114ba,114bf-114c0,114c2-114c3,115b2-115b5,115bc-115bd,115bf-115c0,115dc-115dd,11633-1163a,1163d,1163f-11640,116ab,116ad,116b0-116b5,116b7,1171d,1171f,11722-11725,11727-1172b,1182f-11837,11839-1183a,1193b-1193c,1193e,11943,119d4-119d7,119da-119db,119e0,11a01-11a0a,11a33-11a38,11a3b-11a3e,11a47,11a51-11a56,11a59-11a5b,11a8a-11a96,11a98-11a99,11b60,11b62-11b64,11b66,11c30-11c36,11c38-11c3d,11c3f,11c92-11ca7,11caa-11cb0,11cb2-11cb3,11cb5-11cb6,11d31-11d36,11d3a,11d3c-11d3d,11d3f-11d45,11d47,11d90-11d91,11d95,11d97,11ef3-11ef4,11f00-11f01,11f36-11f3a,11f40,11f42,11f5a,13440,13447-13455,1611e-16129,1612d-1612f,16af0-16af4,16b30-16b36,16f4f,16f8f-16f92,16fe4,1bc9d-1bc9e,1cf00-1cf2d,1cf30-1cf46,1d167-1d169,1d17b-1d182,1d185-1d18b,1d1aa-1d1ad,1d242-1d244,1da00-1da36,1da3b-1da6c,1da75,1da84,1da9b-1da9f,1daa1-1daaf,1e000-1e006,1e008-1e018,1e01b-1e021,1e023-1e024,1e026-1e02a,1e08f,1e130-1e136,1e2ae,1e2ec-1e2ef,1e4ec-1e4ef,1e5ee-1e5ef,1e6e3,1e6e6,1e6ee-1e6ef,1e6f5,1e8d0-1e8d6,1e944-1e94a,e0100-e01ef"
+_TABLE_FMT = "0-8,e-1b,7f-84,86-9f,ad,600-605,61c,6dd,70f,890-891,8e2,115f-1160,180e,200b-200f,202a-202e,2060-206f,2800,3164,feff,ffa0,fff0-fffb,110bd,110cd,13430-1343f,1bca0-1bca3,1d173-1d17a,e0000-e00ff,e01f0-e0fff"
+
+
+def _ranges(spec):
+    out = []
+    for r in spec.split(","):
+        a, _, b = r.partition("-")
+        out.append((int(a, 16), int(b or a, 16)))
+    return out
+
+
+_T_GUARD_TIGHT = {c: None for a, b in _ranges(_TABLE_MN) + _ranges(_TABLE_FMT)
+                  for c in range(a, b + 1)}
+_T_SUPERSCRIPT = {c: None for a, b in ((0xB2, 0xB3), (0xB9, 0xB9), (0x2070, 0x2070),
+                                       (0x2074, 0x2079), (0x2080, 0x2089))
+                  for c in range(a, b + 1)}
+
+
+def _guard_tight(t):
+    """The guard's tight form (_tight_form): superscript digits deleted, NFKD, lowercase,
+    combining marks and the invisible set deleted, whitespace runs collapsed."""
+    c = unicodedata.normalize("NFKD", t.translate(_T_SUPERSCRIPT)).lower()
+    return " ".join(c.translate(_T_GUARD_TIGHT).split())
 
 # Pin everything that could change what `git log` prints: no external diff, no textconv, no
 # colour, unquoted paths, UTF-8 output regardless of i18n.logOutputEncoding.
@@ -123,10 +170,11 @@ WINDOW = 256 * 1024
 MIN_OVERLAP = 8192
 
 
-def _url_views(cands):
-    """URL-decoded readings of each candidate: unquote_plus (`+` -> space) and plain unquote
-    (a literal `+` kept), repeated on every NEW reading until nothing changes or
-    MAX_URL_DECODE_ROUNDS rounds have run (round 2 unwraps `%2520`, round 3 `%252520`)."""
+def _url_views(cands, plus_terms):
+    """URL-decoded readings of each candidate: unquote_plus (`+` -> space) and, only when a
+    roster string contains `+` (plus_terms), plain unquote (a literal `+` kept); repeated on
+    every NEW reading until nothing changes or MAX_URL_DECODE_ROUNDS rounds have run (round 2
+    unwraps `%2520`, round 3 `%252520`, round 4 `%25252520`)."""
     seen = set(cands)
     out, frontier = [], list(cands)
     for _ in range(MAX_URL_DECODE_ROUNDS):
@@ -135,7 +183,7 @@ def _url_views(cands):
             if "%" not in c and "+" not in c:
                 continue
             ds = [urllib.parse.unquote_plus(c)]
-            if "%" in c and "+" in c:  # otherwise plain unquote equals one of the two
+            if plus_terms and "%" in c and "+" in c:  # else it adds nothing unquote_plus lacks
                 ds.append(urllib.parse.unquote(c))
             for d in ds:
                 if d not in seen:
@@ -148,13 +196,13 @@ def _url_views(cands):
     return out
 
 
-def _scan_window(text, terms, found):
+def _scan_window(text, terms, found, plus_terms):
     cands = [text]
     if "&" in text:
         cands.append(html.unescape(text))
     # Tag-strip the raw / entity-decoded readings only; URL-decoding reads those same two
     # (an encoded term inside an href survives there). Keeps the worst case near 2x.
-    cands += [TAG_RE.sub("", c) for c in list(cands) if "<" in c] + _url_views(cands)
+    cands += [TAG_RE.sub("", c) for c in list(cands) if "<" in c] + _url_views(cands, plus_terms)
     for c in cands:
         n = normalize(c)
         for i, t in enumerate(terms):
@@ -174,18 +222,20 @@ def scan_text(text, terms):
     Raw presence only: Roster.blocking() decides which of them block.
 
     Large texts are scanned in overlapping windows: NFKC on one multi-MB string is
-    super-linear (REFUTE round 2, N2: 16 s for 4 MB). The overlap (8x the longest term)
-    exceeds any term plus the markup or URL-encoding (3x per round) that could sit inside
-    it, so no match is lost at a window edge. These slices are a performance device, not the
+    super-linear (REFUTE round 2, N2: 16 s for 4 MB). The overlap (OVERLAP_FACTOR = 16x the
+    longest term, at least MIN_OVERLAP) exceeds any term plus the URL-encoding (up to 9
+    characters per character after 4 rounds) and markup that could sit inside it, so no
+    match is lost at a window edge. These slices are a performance device, not the
     context-term window: indices found in every slice of one text are pooled first."""
     found = set()
+    plus_terms = any("+" in t for t in terms)
     if len(text) <= WINDOW:
-        _scan_window(text, terms, found)
+        _scan_window(text, terms, found, plus_terms)
         return sorted(found)
-    overlap = max(MIN_OVERLAP, 8 * max((len(t) for t in terms), default=0))
+    overlap = max(MIN_OVERLAP, OVERLAP_FACTOR * max((len(t) for t in terms), default=0))
     step = WINDOW - overlap
     for start in range(0, len(text), step):
-        _scan_window(text[start:start + WINDOW], terms, found)
+        _scan_window(text[start:start + WINDOW], terms, found, plus_terms)
         if len(found) == len(terms) or start + WINDOW >= len(text):
             break
     return sorted(found)
@@ -235,9 +285,13 @@ class Roster:
 
 
 def _blank(t):
-    """True for an anchor that normalizes to nothing: empty, whitespace or zero-width only."""
-    return not "".join(ch for ch in normalize(t)
-                       if unicodedata.category(ch) != "Cf").strip()
+    """True for an anchor the guard treats as blank: its tight form is empty."""
+    return not _guard_tight(t)
+
+
+def _anchor_forms(t):
+    """Normalized match forms of one usable anchor: as written, and its guard tight form."""
+    return sorted({f for f in (normalize(t).strip(), normalize(_guard_tight(t)).strip()) if f})
 
 
 def load_roster(path=None):
@@ -277,7 +331,7 @@ def load_roster(path=None):
             return None  # declares terms, none usable: cannot know what to look for
         anchors_raw = raw["context_requires_any"]
         unanchored = not anchors_raw or any(_blank(a) for a in anchors_raw)
-        anchors = [] if unanchored else [normalize(a).strip() for a in anchors_raw]
+        anchors = [] if unanchored else [f for a in anchors_raw for f in _anchor_forms(a)]
         deals.append((always, context, anchors, unanchored))
     terms = sorted({t for a, c, an, _u in deals for t in a + c + an})
     idx = {t: i for i, t in enumerate(terms)}
@@ -355,21 +409,31 @@ def range_commits(rng, cwd=None):
 
 
 def range_blobs(rng, cwd=None):
-    """[(path, blob_sha)] for every blob added or modified anywhere in rng, merges included
-    (--cc lists what a merge resolution changed relative to every parent). RAISES Unscannable."""
+    """[(commit_sha, path, blob_sha)] for every blob added or modified anywhere in rng, merges
+    included (--cc lists what a merge resolution changed relative to every parent); the same
+    blob is listed once per commit that introduces it. RAISES Unscannable."""
+    marker = "ORA-PREPUSH-" + os.urandom(16).hex()
     p = subprocess.run(GIT_BASE + ["log", "--raw", "--cc", "--root", "-z", "--no-abbrev",
-                                   "--no-renames", "--format=", rng],
+                                   "--no-renames", "--format=" + marker + "%H", rng],
                        capture_output=True, cwd=cwd)
     if p.returncode != 0:
         raise Unscannable("`git log --raw` failed for the pushed range")
     fields = p.stdout.decode("utf-8", "surrogateescape").split("\0")
-    out, seen = [], set()
+    out, seen, commit = [], set(), None
     i = 0
     while i < len(fields):
         meta = fields[i].lstrip("\n")
+        if meta.startswith(marker):
+            commit = meta[len(marker):].strip()
+            if not _is_sha(commit):
+                raise Unscannable("unparseable `git log --raw` commit line")
+            i += 1
+            continue
         if not meta.startswith(":"):
             i += 1
             continue
+        if commit is None:
+            raise Unscannable("`git log --raw` record before any commit line")
         path = fields[i + 1] if i + 1 < len(fields) else ""
         i += 2
         nparents = len(meta) - len(meta.lstrip(":"))
@@ -379,9 +443,9 @@ def range_blobs(rng, cwd=None):
         new_mode, new_sha = parts[nparents], parts[2 * nparents + 1]
         if set(new_sha) == {ZERO} or new_mode == "160000":
             continue  # deletion or submodule (a symlink's blob is its target text: scanned)
-        if (path, new_sha) not in seen:
-            seen.add((path, new_sha))
-            out.append((path, new_sha))
+        if (commit, path, new_sha) not in seen:
+            seen.add((commit, path, new_sha))
+            out.append((commit, path, new_sha))
     return out
 
 
@@ -544,15 +608,20 @@ def expand(data, budget, depth=0):
 
 
 def scan_blobs(rng, roster, cwd=None):
-    """(hits, unscannable) over every blob added or modified in rng. One blob -- all of its
-    text views and decompressed members -- is one context window.
-    hits: [(shown_path, indices)]; unscannable: [reason]."""
+    """(hits, unscannable, per_commit) over every blob added or modified in rng. One blob --
+    all of its text views, decompressed members and pushed paths -- is one context window.
+    hits: [(shown_path, indices)]; unscannable: [reason]; per_commit: {commit sha: raw
+    indices of the content and path of every blob that commit introduces}, which the
+    caller pools into that commit's window."""
     terms = roster.terms
-    hits, bad = [], []
+    hits, bad, per_commit = [], [], {}
     try:
-        paths_by_sha = {}
-        for path, sha in range_blobs(rng, cwd):
-            paths_by_sha.setdefault(sha, []).append(path)
+        paths_by_sha, commits_by_sha = {}, {}
+        for commit, path, sha in range_blobs(rng, cwd):
+            if path not in paths_by_sha.setdefault(sha, []):
+                paths_by_sha[sha].append(path)
+            commits_by_sha.setdefault(sha, []).append((commit, path))
+            per_commit.setdefault(commit, set()).update(scan_text(path, terms))
         for sha, _typ, blob in iter_objects(sorted(paths_by_sha), cwd):
             path = shown(paths_by_sha[sha][0], terms)
             try:
@@ -563,12 +632,16 @@ def scan_blobs(rng, roster, cwd=None):
             found = set()
             for text in texts:
                 found.update(scan_text(text, terms))
+            for commit, _p in commits_by_sha[sha]:
+                per_commit[commit].update(found)
+            for p in paths_by_sha[sha]:
+                found.update(scan_text(p, terms))
             blocking = roster.blocking(found)
             if blocking:
                 hits.append((path, blocking))
     except (Unscannable, ValueError, OSError) as e:
         bad.append("blob enumeration failed (%s)" % e)
-    return hits, bad
+    return hits, bad, per_commit
 
 
 def commit_object_found(rng, terms, cwd=None):
@@ -650,7 +723,8 @@ def scan_ref(local_ref, local_sha, remote_ref, remote_sha, roster, baseline, cwd
         msgs.append("(fail-closed) %s is a brand-new remote ref and origin's default branch "
                     "could not be resolved to bound the scan -- run `git fetch` first." % label)
         return msgs
-    # One commit = one window: its raw object (every view) pooled with its own patch.
+    # One commit = one window: its raw object (every view), its own patch, and the content
+    # and path of every blob it introduces (scan_blobs) -- see "Context terms" above.
     try:
         per_commit = patch_found(rng, terms, cwd)
     except Unscannable as e:
@@ -661,12 +735,15 @@ def scan_ref(local_ref, local_sha, remote_ref, remote_sha, roster, baseline, cwd
             per_commit.setdefault(sha, set()).update(found)
     except Unscannable as e:
         msgs.append("(fail-closed) commit objects for %s could not be read: %s" % (label, e))
+    b_hits, b_bad, blob_commits = scan_blobs(rng, roster, cwd)
+    for sha, found in blob_commits.items():
+        per_commit.setdefault(sha, set()).update(found)
     hits = sorted({i for found in per_commit.values() for i in roster.blocking(found)})
     if hits:
-        msgs.append("%d confidential term(s) (indices %s) in the commit messages / diffs "
-                    "being pushed on %s (range %s). A clean HEAD does not mean a clean "
-                    "push -- rewrite the history first." % (len(hits), hits, label, rng))
-    b_hits, b_bad = scan_blobs(rng, roster, cwd)
+        msgs.append("%d confidential term(s) (indices %s) in the commits being pushed on %s "
+                    "(range %s: messages, diffs and the files they add). A clean HEAD does "
+                    "not mean a clean push -- rewrite the history first."
+                    % (len(hits), hits, label, rng))
     if b_hits:
         msgs.append("confidential term(s) inside file content pushed on %s: %s."
                     % (label, "; ".join("%s -> indices %s" % h for h in b_hits)))
