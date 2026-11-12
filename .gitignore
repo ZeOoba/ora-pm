@@ -8,6 +8,10 @@ dist/
 .env.*.local
 .dev.vars
 .dev.vars.*
+# Private property roster for scripts/import-from-pipeline.mjs (public repo; shape in the .example.json)
+scripts/pipeline-properties.local.json
+# Private identifier list for the tracked-file leak scan (tests/scripts/import-from-pipeline-roster.test.ts)
+scripts/banned-identifiers.local.json
 # Claude Code tooling (local only)
 docs/superpowers/
 .worktrees/

@@ -65,12 +65,15 @@ esac
 # Strict shape check: both counters present AND numeric. A 2xx that is not the
 # documented shape (login page, `{}`, renamed field) is a FAILURE -- this job
 # posts late fees and must never report success on a response it cannot read.
+# The final grep admits only "<digits> <digits>", so nothing but the two counts
+# can reach the log (tests/unit/workflow-log-egress.test.ts enforces this).
 counters=$(printf '%s' "$body" | node -e '
   let s = ""; process.stdin.on("data", d => s += d).on("end", () => {
     let j; try { j = JSON.parse(s) } catch { process.exit(1) }
     if (j === null || typeof j !== "object" ||
         !Number.isFinite(j.late_fees_posted) || !Number.isFinite(j.delinquent_count)) process.exit(1)
-    process.stdout.write(`late_fees_posted=${j.late_fees_posted} delinquent_count=${j.delinquent_count}`)
-  })') || { echo "::error::delinquency-check -> HTTP $code but body is not the response shape (need numeric late_fees_posted/delinquent_count)"; exit 1; }
+    process.stdout.write(`${j.late_fees_posted} ${j.delinquent_count}`)
+  })' | grep -oE '^[0-9]+ [0-9]+$') || { echo "::error::delinquency-check -> HTTP $code but body is not the response shape (need non-negative integer late_fees_posted/delinquent_count)"; exit 1; }
+read -r fees count <<< "$counters"
 
-echo "delinquency-check: HTTP $code $counters"
+echo "delinquency-check: HTTP $code late_fees_posted=$fees delinquent_count=$count"

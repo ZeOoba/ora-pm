@@ -8,6 +8,7 @@
 // Usage:
 //   node scripts/import-from-pipeline.mjs --file <TENANTS.json> --property "<label>" [--dry-run] [--no-balances]
 //   node scripts/import-from-pipeline.mjs --file <TENANTS.json> --all [--dry-run] [--no-balances]
+//   [--properties <roster.json>]  (default scripts/pipeline-properties.local.json, gitignored)
 //
 // Reads SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY from .env (service role bypasses RLS).
 
@@ -15,6 +16,7 @@ import { createClient } from '@supabase/supabase-js'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+import { DEFAULT_PROPERTIES_PATH, PropertyConfigError, loadPropertyConfig } from './pipeline-properties.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(__dirname, '..')
@@ -34,41 +36,25 @@ const DRY_RUN = args.includes('--dry-run')
 const WITH_BALANCES = !args.includes('--no-balances')
 
 if (!FILE || (!ALL && (!PROPERTY_LABEL || PROPERTY_LABEL === true))) {
-  console.error('Usage: import-from-pipeline.mjs --file <TENANTS.json> (--property "<label>" | --all) [--dry-run] [--no-balances]')
+  console.error('Usage: import-from-pipeline.mjs --file <TENANTS.json> (--property "<label>" | --all) [--dry-run] [--no-balances] [--properties <roster.json>]')
   process.exit(2)
 }
 
-// ── property metadata ─────────────────────────────────────────────────────────
-// Keyed by the pipeline `p` label. Street from pipeline config/property_map.json;
-// city/state from the firm's Master workbook (Command Center snapshot, authoritative).
-// ZIP intentionally null unless independently confirmed (firm SoR does not track ZIP).
-// entity_llc null pending confirmation (real ownership entities are messy in source).
-const PROPERTY_META = {
-  'REDACTED-032':   { name: 'REDACTED-022',          address: 'REDACTED-022',          city: 'Columbus',     state: 'OH', zip: null,    property_type: 'industrial', entity_llc: null },
-  'REDACTED-034':   { name: 'REDACTED-024',          address: 'REDACTED-024',          city: 'Columbus',     state: 'OH', zip: null,    property_type: 'industrial', entity_llc: null },
-  'REDACTED-040':     { name: 'REDACTED-027',           address: 'REDACTED-027',           city: 'Columbus',     state: 'OH', zip: null,    property_type: 'industrial', entity_llc: null },
-  'REDACTED-030':   { name: 'REDACTED-016',         address: 'REDACTED-016',         city: 'Cambridge',    state: 'MD', zip: null,    property_type: 'industrial', entity_llc: null },
-  'REDACTED-033':   { name: 'REDACTED-019',          address: 'REDACTED-019',          city: 'Owings Mills', state: 'MD', zip: null,    property_type: 'industrial', entity_llc: null },
-  'REDACTED-044':        { name: 'REDACTED-023',          address: 'REDACTED-023',          city: 'Columbus',     state: 'OH', zip: null,    property_type: 'industrial', entity_llc: null },
-  'REDACTED-042':       { name: 'REDACTED-021',          address: 'REDACTED-021',          city: 'Baltimore',    state: 'MD', zip: null,    property_type: 'industrial', entity_llc: null },
-  'E 5th Ave':      { name: 'REDACTED-028',           address: 'REDACTED-028',           city: 'Columbus',     state: 'OH', zip: null,    property_type: 'industrial', entity_llc: null },
-  'E REDACTED-038':   { name: 'REDACTED-005',    address: 'REDACTED-005',    city: 'Columbus',     state: 'OH', zip: null,    property_type: 'industrial', entity_llc: null },
-  'REDACTED-046 Dr':      { name: 'REDACTED-015',         address: 'REDACTED-015',         city: 'Dublin',       state: 'OH', zip: null,    property_type: 'industrial', entity_llc: null },
-  'Hwy 350':        { name: 'REDACTED-004',   address: 'REDACTED-004',   city: 'Raytown',      state: 'MO', zip: null,    property_type: 'industrial', entity_llc: null },
-  'Info Lane':      { name: 'REDACTED-002',    address: 'REDACTED-002',    city: 'Easton',       state: 'MD', zip: null,    property_type: 'industrial', entity_llc: null },
-  'Morrison':       { name: 'REDACTED-008',      address: 'REDACTED-008',      city: 'Columbus',     state: 'OH', zip: null,    property_type: 'industrial', entity_llc: null },
-  'REDACTED-041':      { name: 'REDACTED-003',   address: 'REDACTED-003',   city: 'Salisbury',    state: 'MD', zip: null,    property_type: 'industrial', entity_llc: null },
-  'REDACTED-047':          { name: 'REDACTED-029',           address: 'REDACTED-029',           city: 'Columbus',     state: 'OH', zip: null,    property_type: 'industrial', entity_llc: null },
-  'Red Branch':     { name: 'REDACTED-006',     address: 'REDACTED-010',       city: 'Columbia',     state: 'MD', zip: '21045', property_type: 'industrial', entity_llc: null },
-  'REDACTED-035':    { name: 'REDACTED-009',      address: 'REDACTED-009',      city: 'Columbus',     state: 'OH', zip: null,    property_type: 'industrial', entity_llc: null },
+// ── property roster ───────────────────────────────────────────────────────────
+// The roster (pipeline label -> properties-table columns) and the pipeline labels that must
+// never be imported live in a gitignored local file, never in this public repo: see
+// scripts/pipeline-properties.mjs and the synthetic scripts/pipeline-properties.example.json.
+// Missing, malformed or example roster => exit 2 before anything else is read.
+let PROPERTY_META, EXCLUDE
+try {
+  const propsPath = arg('--properties', DEFAULT_PROPERTIES_PATH)
+  if (typeof propsPath !== 'string') throw new PropertyConfigError('--properties needs a path')
+  ;({ PROPERTY_META, EXCLUDE } = loadPropertyConfig(propsPath))
+} catch (e) {
+  if (!(e instanceof PropertyConfigError)) throw e
+  console.error(e.message)
+  process.exit(2)
 }
-
-// Pipeline labels that appear in the rent roll but are NOT owned/managed properties
-// and must never be imported as such:
-//   - "REDACTED-026": SOLD via seller financing; it is a LOAN (note receivable) to
-//     REDACTED-001. The "$REDACTED-045/mo" is a loan payment, not rent. Belongs
-//     in a debt/notes module, not the rent roll.
-const EXCLUDE = new Set(['REDACTED-026'])
 
 // ── load .env ─────────────────────────────────────────────────────────────────
 function loadEnv() {
@@ -172,7 +158,7 @@ function labelsToRun() {
     return known.sort()
   }
   if (EXCLUDE.has(PROPERTY_LABEL)) {
-    console.error(`"${PROPERTY_LABEL}" is excluded (not a managed property — see EXCLUDE in this script).`)
+    console.error(`"${PROPERTY_LABEL}" is excluded (not a managed property): ${EXCLUDE.get(PROPERTY_LABEL)}`)
     process.exit(1)
   }
   return [PROPERTY_LABEL]

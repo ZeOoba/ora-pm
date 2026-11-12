@@ -1,10 +1,10 @@
 // tests/lib/cam-categories.test.ts
 //
 // Lease-level recoverable categories, the annual CAM cap and the not-reconciled flag (Gabriel
-// rulings 2026-11-10; migration 0026). Cases are the leases the 2026-11-10 extraction found:
-// REDACTED-033 (taxes only), REDACTED-012 and REDACTED-037 (CAM + water/sewer, no taxes or
-// insurance), REDACTED-002 507 ($15,000/yr cap on taxes + insurance + CAM for the initial
-// term), REDACTED-030 / REDACTED-036 (direct pay, never reconciled).
+// rulings 2026-11-10; migration 0026). Cases mirror the leases the 2026-11-10 extraction found (synthetic addresses):
+// 200 Sample Ave (taxes only), 400 Example Ct (CAM + water/sewer, no taxes or
+// insurance), 300 Example Ln 507 ($15,000/yr cap on taxes + insurance + CAM for the initial
+// term), 600 Sample Way (direct pay, never reconciled).
 import { describe, it, expect } from 'vitest'
 import {
   assertBaseYearCategoriesMatch, assertCamReconciled, calculateCAMTrueUp, CAMTermsError, computeCamPool, EXPENSE_CATEGORIES,
@@ -27,11 +27,11 @@ describe('poolForCategories', () => {
     expect(poolForCategories(totals(), null)).toBe(86_000)
   })
 
-  it('taxes only (REDACTED-019)', () => {
+  it('taxes only (200 Sample Ave)', () => {
     expect(poolForCategories(totals(), ['taxes'])).toBe(40_000)
   })
 
-  it('CAM without taxes or insurance (REDACTED-043 s.36 + water/sewer)', () => {
+  it('CAM without taxes or insurance (400 Example Ct s.36 + water/sewer)', () => {
     expect(poolForCategories(totals(), ['maintenance', 'utilities', 'other'])).toBe(26_000)
   })
 
@@ -62,7 +62,7 @@ describe('assertCamReconciled', () => {
     expect(() => assertCamReconciled('L1', true, null)).not.toThrow()
   })
 
-  it('refuses a not-reconciled lease with its recorded reason (REDACTED-030 direct pay)', () => {
+  it('refuses a not-reconciled lease with its recorded reason (600 Sample Way direct pay)', () => {
     expect(() => assertCamReconciled('L1', false, 'Direct pay: tenant pays taxes to the county'))
       .toThrow(/not CAM-reconciled.*Direct pay: tenant pays taxes to the county/)
   })
@@ -72,7 +72,7 @@ describe('assertCamReconciled', () => {
   })
 })
 
-describe('calculateCAMTrueUp: annual cap (REDACTED-002 507)', () => {
+describe('calculateCAMTrueUp: annual cap (300 Example Ln 507)', () => {
   const base = {
     totalRecoverableExpenses: 160_000, // taxes + insurance + CAM pool
     tenantSF: 6000,
