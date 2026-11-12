@@ -71,15 +71,15 @@ describe('migration 0018 — admin_users (runtime, real migration SQL on pg-mem)
     expect(() => insertAdmin(db, 'b@example.test', '')).toThrow(/check constraint "admin_users_role_check"/)
   })
 
-  it("rejects a mixed-case email ('Gabriel@X.com') — emails are stored lower-cased", () => {
-    expect(() => insertAdmin(db, 'Gabriel@X.com', 'viewer')).toThrow(/check constraint "admin_users_email_lowercase"/)
+  it("rejects a mixed-case email ('Admin@X.com') — emails are stored lower-cased", () => {
+    expect(() => insertAdmin(db, 'Admin@X.com', 'viewer')).toThrow(/check constraint "admin_users_email_lowercase"/)
     insertAdmin(db, 'gabriel@x.com', 'viewer')
     expect(db.many(`SELECT email FROM admin_users`).map((r) => r.email)).toEqual(['gabriel@x.com'])
   })
 
   it('rejects an UPDATE that would store a mixed-case email', () => {
     insertAdmin(db, 'gabriel@x.com', 'viewer')
-    expect(() => db.none(`UPDATE admin_users SET email = 'Gabriel@x.com'`)).toThrow(/check constraint "admin_users_email_lowercase"/)
+    expect(() => db.none(`UPDATE admin_users SET email = 'Admin@x.com'`)).toThrow(/check constraint "admin_users_email_lowercase"/)
   })
 
   // The middleware looks rows up by the exact lower-cased auth email, so a padded or empty email

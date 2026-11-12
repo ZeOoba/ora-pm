@@ -12,6 +12,7 @@ type Env = {
   SUPABASE_SERVICE_ROLE_KEY: string
   CRON_SECRET: string
   STRIPE_SECRET_KEY: string
+  CRIT_ALERT_RECIPIENTS?: string
   RATE_LIMIT_KV?: KVNamespace
 }
 
@@ -27,7 +28,7 @@ cronRouter.use('/*', cronAuthMiddleware)
 //   - ora-pm-monthly-billing (cron 10 11 1-3 * *) -> scripts/trigger-billing.ps1,
 //     which re-invokes monthly-billing until `remaining` is 0 (cap 8 calls);
 //   - ora-pm-daily-crons (cron 40 9 * * 1, WEEKLY despite the id) ->
-//     C:\Users\Owner\ora-pm-cron\ping-crons.ps1 (critical-dates-alerts,
+//     ping-crons.ps1 on the ORA laptop (critical-dates-alerts,
 //     delinquency-check);
 //   - GitHub Actions backups monthly-billing-backup.yml (40 17 1 * * UTC) and
 //     delinquency-backup.yml (10 16 * * * UTC), scheduled in a later hour
@@ -494,11 +495,18 @@ cronRouter.post('/monthly-billing', async (c) => {
   return c.json({ posted, skipped, errors, chargeErrors, autopayErrors, errorMessages, remaining, year, month, voidedSkipped, notStarted, expiredUnbilled, leaseExceptions }, status)
 })
 
-// OI-047: CRIT_RECIPIENTS only scopes the sent_notifications dedup-key set — it does not control
-// who receives mail. The actual send recipient is $script:EmailTo in
-// C:\Users\Owner\ora-pm-cron\ping-crons-lib.ps1 (separately maintained). Changing one without
-// the other either has no effect on delivery, or records alerts for an address that never gets mail.
-const CRIT_RECIPIENTS = ['ggoldberg@oxfordra.net']
+// OI-047: the recipients only scope the sent_notifications dedup-key set — they do not control
+// who receives mail. The actual send recipient is $script:EmailTo in ping-crons-lib.ps1 on the
+// ORA laptop (separately maintained). Changing one without the other either has no effect on
+// delivery, or records alerts for an address that never gets mail.
+// The address lives in the CRIT_ALERT_RECIPIENTS environment variable (comma-separated), not in
+// this public repo. It must equal the recipient already stored on sent_notifications rows, or
+// every open alert reports once more. Unset fails closed (503); check-deploy-env.mjs requires it.
+function critRecipients(env: Env): string[] | null {
+  const list = (env.CRIT_ALERT_RECIPIENTS ?? '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean)
+  return list.length ? list : null
+}
+const NO_CRIT_RECIPIENTS = 'CRIT_ALERT_RECIPIENTS is not configured'
 // OI-321: dedup is keyed on (reference_id, urgency tier, critical date) —
 // sent_notifications.alert_tier + alert_date (0019) — so a date alerts again as it escalates
 // notice -> warning -> urgent -> overdue, and again after it is edited in place (a lease extended
@@ -534,6 +542,8 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // every run. Never add this endpoint to scripts/delinquency-backup.sh: that job has no send path,
 // so it must neither call this nor ack.
 cronRouter.post('/critical-dates-alerts', async (c) => {
+  const CRIT_RECIPIENTS = critRecipients(c.env)
+  if (!CRIT_RECIPIENTS) return c.json({ error: NO_CRIT_RECIPIENTS }, 503)
   const db = getDb(c.env)
   const HORIZON_DAYS = 90
   // Per `.in('reference_id', chunk)` call on the dedup read. The read is filtered to this
@@ -640,6 +650,8 @@ cronRouter.post('/critical-dates-alerts', async (c) => {
 // (ON CONFLICT DO NOTHING), so a retried ack is harmless. Validates the whole token before
 // writing anything; a token it cannot fully parse is a 400 and records nothing.
 cronRouter.post('/critical-dates-alerts/ack', async (c) => {
+  const CRIT_RECIPIENTS = critRecipients(c.env)
+  if (!CRIT_RECIPIENTS) return c.json({ error: NO_CRIT_RECIPIENTS }, 503)
   let raw: unknown
   try { raw = await c.req.json() } catch { return c.json({ error: 'body is not JSON' }, 400) }
   const tokenStr = (raw as { ack_token?: unknown } | null)?.ack_token

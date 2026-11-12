@@ -34,7 +34,7 @@ const env = {
   CRON_SECRET: 'test',
   STRIPE_SECRET_KEY: 'sk_test_dummy',
   STRIPE_WEBHOOK_SECRET: 'whsec_dummy',
-  ADMIN_EMAILS: 'ggoldberg@oxfordra.net',
+  ADMIN_EMAILS: 'admin@example.test',
 }
 
 // /api/admin is gated by adminAuthMiddleware: requests must carry a Bearer token
@@ -73,7 +73,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   // Default to a valid ORA admin; auth-gate tests override this.
   mockGetUser.mockResolvedValue({
-    data: { user: { id: 'admin_1', email: 'ggoldberg@oxfordra.net', email_confirmed_at: '2026-01-01T00:00:00Z' } },
+    data: { user: { id: 'admin_1', email: 'admin@example.test', email_confirmed_at: '2026-01-01T00:00:00Z' } },
     error: null,
   })
 })

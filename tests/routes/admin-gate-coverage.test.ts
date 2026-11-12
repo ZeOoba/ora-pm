@@ -13,7 +13,7 @@ import { createApp, isAdminExempt } from '../../server/index'
 const env = {
   SUPABASE_URL: 'http://localhost',
   SUPABASE_SERVICE_ROLE_KEY: 'test-service-role',
-  ADMIN_EMAILS: 'ggoldberg@oxfordra.net',
+  ADMIN_EMAILS: 'admin@example.test',
   CRON_SECRET: 'test',
 }
 

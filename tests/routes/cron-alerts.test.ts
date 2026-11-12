@@ -19,6 +19,7 @@ const env = {
   CRON_SECRET: 'test',
   STRIPE_SECRET_KEY: 'sk_test_dummy',
   STRIPE_WEBHOOK_SECRET: 'whsec_dummy',
+  CRIT_ALERT_RECIPIENTS: 'admin@example.test',
 }
 const app = createApp()
 beforeEach(() => {
@@ -27,7 +28,7 @@ beforeEach(() => {
 })
 
 describe('POST /api/cron/critical-dates-alerts', () => {
-  const RECIPIENT = 'ggoldberg@oxfordra.net'
+  const RECIPIENT = 'admin@example.test'
   const critRow = (reference_id: string, over: Row = {}): Row => ({
     date_type: 'lease_expiration', reference_id, tenant_name: 'Acme', property_name: '9050 Red Branch', suite: '101',
     critical_date: '2026-07-01', days_until: 26, urgency: 'urgent', ...over,
@@ -197,7 +198,7 @@ describe('POST /api/cron/critical-dates-alerts', () => {
       // not read as unsent.
       const ids = Array.from({ length: 300 }, (_, i) => refId(i))
       const sentRows = [
-        ...ids.map(id => sentRow(id, 'retired@oxfordra.net')),
+        ...ids.map(id => sentRow(id, 'retired@example.test')),
         ...ids.map(id => sentRow(id, RECIPIENT, 'critical_date_alert', 'notice')),
         ...ids.map(id => sentRow(id, RECIPIENT, 'critical_date_alert', 'warning')),
         ...ids.map(id => sentRow(id)),
@@ -228,8 +229,19 @@ describe('POST /api/cron/critical-dates-alerts', () => {
   })
 })
 
+describe('critical-date alert recipients come from the environment, never from source', () => {
+  it('both endpoints fail closed (503) without CRIT_ALERT_RECIPIENTS', async () => {
+    const bare = { ...env, CRIT_ALERT_RECIPIENTS: ' , ' }
+    const alerts = await app.request('/api/cron/critical-dates-alerts', { method: 'POST', headers: { Authorization: 'Bearer test' } }, bare)
+    expect(alerts.status).toBe(503)
+    const ack = await app.request('/api/cron/critical-dates-alerts/ack', { method: 'POST', headers: { Authorization: 'Bearer test', 'Content-Type': 'application/json' }, body: '{}' }, bare)
+    expect(ack.status).toBe(503)
+    expect(mockFrom).not.toHaveBeenCalled()
+  })
+})
+
 describe('POST /api/cron/critical-dates-alerts/ack (OI-321)', () => {
-  const RECIPIENT = 'ggoldberg@oxfordra.net'
+  const RECIPIENT = 'admin@example.test'
   const U1 = '11111111-1111-4111-8111-111111111111'
   const U2 = '22222222-2222-4222-8222-222222222222'
   const token = (alerts: unknown, v: unknown = 1) => JSON.stringify({ v, alerts })

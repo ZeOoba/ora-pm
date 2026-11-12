@@ -1,261 +1,302 @@
-# ORA Property Manager
+# ORA PM
 
-Internal property-management platform for Oxford Realty Advisors' industrial/flex portfolio. A single Vite/React SPA serves two front ends from one build — an **admin console** (properties, units, tenants, leases, billing, AR, CAM, renewals, insurance, QuickBooks export) gated to `@oxfordra.net` staff, and a **tenant portal** (pay rent, view lease/documents, upload insurance certs) gated by each tenant's own Supabase login. Both talk to one Hono API deployed as Cloudflare Pages Functions, backed by Postgres on Supabase. Monthly rent/CAM billing, ACH autopay via Stripe, critical-date alerting, and delinquency late fees run as HTTP-triggered cron jobs called by the ORA scheduler (Cloudflare Pages has no native cron).
+**Property-management platform for a shallow-bay industrial/flex portfolio — an admin console and a tenant portal on one Hono API.**
+
+[![CI](https://github.com/ZeOoba/ora-pm/actions/workflows/ci.yml/badge.svg)](https://github.com/ZeOoba/ora-pm/actions/workflows/ci.yml)
+[![Migration numbers](https://github.com/ZeOoba/ora-pm/actions/workflows/migration-numbers.yml/badge.svg)](https://github.com/ZeOoba/ora-pm/actions/workflows/migration-numbers.yml)
+
+One Vite/React build serves two front ends. The **admin console** covers properties, units, tenants, leases (with AI-assisted lease intake), billing, AR and collections, payments, CAM reconciliation, expenses, budgets, renewals, insurance certificates, critical dates, tenant statements, reports, a native general ledger (chart of accounts, opening balances, and AR posting for accrual- and cash-basis LLCs), and QuickBooks Desktop IIF export. The **tenant portal** (`/portal/*`) lets tenants view their lease, charges, payments and documents, pay by ACH and upload insurance certificates. Both call one Hono API running as Cloudflare Pages Functions over Supabase Postgres. Monthly billing, autopay, critical-date alerts and late fees run as HTTP cron endpoints, because Cloudflare Pages has no native cron.
+
+## Contents
+
+- [Architecture](#architecture)
+- [Tech stack](#tech-stack)
+- [Repository layout](#repository-layout)
+- [Getting started](#getting-started)
+- [Scripts](#scripts)
+- [Testing and CI](#testing-and-ci)
+- [Deployment](#deployment)
+- [Database and migrations](#database-and-migrations)
+- [Scheduled jobs](#scheduled-jobs)
+- [Security and operational notes](#security-and-operational-notes)
+- [Contributing](#contributing)
+- [Further reading](#further-reading)
 
 ## Architecture
 
-### System architecture
-
-```mermaid
-flowchart TB
-    subgraph Browser["Browser (single Vite build, two route trees)"]
-        AdminUI["Admin SPA - src/router.tsx\nDashboard · Properties · Units · Tenants · Leases (+ Lease Intake)\nBilling · AR · Payments · CAM · Expenses · Budgets\nRenewals · Insurance · Critical Dates · QB Export · Rent Roll\n(staff on the ADMIN_EMAILS allowlist)"]
-        PortalUI["Tenant Portal - src/portal/*\nPortalRouter.tsx: /portal/*\nDashboard · Pay Now · Payment History\nMy Lease · Documents · Insurance · Account"]
-    end
-
-    AdminAuth["AdminAuthGuard + src/lib/supabase.ts\n(Supabase Auth, admin session)"]
-    PortalAuth["PortalApp + src/portal/lib/supabase-portal.ts\n(Supabase Auth, tenant session, AAL2 MFA step-up)"]
-
-    AdminUI --> AdminAuth
-    PortalUI --> PortalAuth
-
-    AdminAuth -- "Bearer JWT via src/lib/api.ts" --> API
-    PortalAuth -- "Bearer JWT via portal/lib/portal-api.ts" --> API
-    PortalAuth -- "direct upload, anon key + tenant JWT\n(bypasses the API)" --> Storage
-
-    subgraph CF["Cloudflare Pages Functions"]
-        FN["functions/api/[[route]].ts\n(hono/cloudflare-pages handler)"]
-        API["server/index.ts - Hono app\nerrorHandler, then /api/webhooks (before CORS), then CORS allowlist\nadminAuthMiddleware on /api/* except:\n/api/webhooks · /cron · /portal · /health · /stripe\n120/min admin-mutation rate limit"]
-        FN --> API
-    end
-
-    API --> Core["/api/properties · /units · /tenants\n(+ /tenants/:id/correspondence)"]
-    API --> Leases["/api/leases (+ /amendments, /notices)"]
-    API --> Financial["/api/charges (POST, DELETE = void) · /payments\n/cam · /expenses · /budgets"]
-    API --> Reports["/api/reports: ar-aging, rent-roll,\ncritical-dates, actuals\n/api/exports/qb-iif -> QuickBooks IIF file"]
-    API --> Renewals["/api/renewals · /api/insurance"]
-    API --> Intake["/api/intake/lease\nfilename + extracted-PDF-text confidentiality scan,\n10/day per admin"]
-    API --> Cron["/api/cron/*\ncronAuthMiddleware (Bearer CRON_SECRET), 10/hour per path\nmonthly-billing · critical-dates-alerts · delinquency-check"]
-    API --> StripeR["/api/stripe (tenant JWT: customer, setup-intent,\npayment-intent) and /api/webhooks/stripe"]
-    API --> PortalR["/api/portal and /api/portal/insurance\n(tenantAuthMiddleware; PATCH /autopay needs AAL2)\n/api/admin: tenant invite / revoke access (adminAuthMiddleware)"]
-
-    Core --> DB
-    Leases --> DB
-    Financial --> DB
-    Reports --> DB
-    Renewals --> DB
-    Cron --> DB
-    PortalR --> DB
-    StripeR --> DB
-
-    DB[("Supabase Postgres\nmigrations 0001-0017: 23 tables,\nviews ar_ledger / rent_roll / critical_dates,\nfunction reserve_payment_intent()\nservice-role client; RLS = defense in depth")]
-    Storage[("Supabase Storage\nbuckets lease-documents, insurance-certs\n(RLS from 0008)")]
-
-    Intake -- "scanned page text only (never PDF bytes), after the scan clears" --> Anthropic["Anthropic API\nINTAKE_MODEL: default ANTHROPIC_MODEL (server/lib/models.ts = claude-opus-5) or claude-sonnet-5"]
-    StripeR <-- "PaymentIntents, SetupIntents, signed webhooks" --> Stripe["Stripe (ACH / us_bank_account)"]
-    Cron -- "autopay PaymentIntents" --> Stripe
-    Cron -- "digest returned in the HTTP response (the Worker sends no email)" --> Scheduler
-
-    Scheduler["ORA CC/MCP fleet (create_scheduled_task registry)\nora-pm-monthly-billing -> scripts/trigger-billing.ps1\nora-pm-daily-crons (WEEKLY, Mon 09:40 ET) -> ping-crons.ps1 (outside this repo),\nwhich also emails the digest via Outlook COM"] -- "POST + Bearer CRON_SECRET" --> Cron
-
-    Backup["GitHub Actions off-host backups\nmonthly-billing-backup.yml: 17:40 UTC on the 1st\ndelinquency-backup.yml: daily 16:10 UTC\nmoney-moving endpoints only"] -- "POST + Bearer (repo secret ORA_PM_CRON_SECRET)\nidempotent: a double fire posts 0" --> Cron
-
-    Pipeline["ORA Lease Intelligence Pipeline\nTENANTS.json export"] -- "scripts/import-from-pipeline.mjs\n(service role, bypasses RLS)" --> DB
-```
-<!-- diagram-verified: 2026-10-28 -->
-
-**Reading the diagram:** the admin app and tenant portal are two independent route trees and two independent Supabase sessions sharing one API. Every `/api/*` request is admin-gated except five exempted prefixes (`ADMIN_EXEMPT` in `server/index.ts`): webhooks need the raw body for Stripe signature verification, cron uses its own Bearer-secret check, and portal, health and stripe have their own gates (`/api/admin` is deliberately not exempt). The only outbound third-party calls are Anthropic (lease extraction from the scanned PDF text) and Stripe (ACH payments, autopay, webhooks), all made server-side. The one browser path that skips the API is the tenant portal's insurance-certificate upload straight to Supabase Storage. The Worker sends no email: `critical-dates-alerts` and `delinquency-check` return the digest in the response (`email` field) and the scheduler task sends it (OI-047).
-
-### Data flows
-
-Tenant ACH payment (Pay Now):
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant T as Tenant (portal)
-    participant API as Hono API (Pages Functions)
-    participant DB as Supabase Postgres
-    participant S as Stripe
-    T->>API: POST /api/stripe/payment-intent (tenant JWT at AAL2, client_request_id)
-    API->>DB: rpc reserve_payment_intent() - advisory lock, balance check, insert pending payment row
-    API->>S: create and confirm ACH PaymentIntent
-    API->>DB: complete the reserved row with the PaymentIntent id
-    S-->>API: POST /api/webhooks/stripe (signature verified)
-    API->>DB: insert stripe_webhook_events row (dedupe), update payment status
-    DB-->>T: ar_ledger balance reflects the settled payment
-```
-
-Scheduled cron jobs:
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant Sch as Scheduler (fleet task or GitHub Actions)
-    participant API as /api/cron/*
-    participant DB as Supabase Postgres
-    participant S as Stripe
-    Sch->>API: POST with Authorization Bearer CRON_SECRET
-    API->>API: cronAuthMiddleware, then 10/hour per-path rate limit
-    API->>DB: monthly-billing - bulk upsert charges (idempotency_key)
-    API->>S: autopay PaymentIntent per eligible lease, bounded batch
-    API->>DB: delinquency-check - one late fee per lease per month after a 30-day grace
-    API->>DB: critical-dates-alerts - dedupe rows in sent_notifications
-    API-->>Sch: monthly-billing counters (posted, skipped, chargeErrors, autopayErrors, remaining) or a digest in the email field
-    Note over Sch: monthly-billing is re-called until remaining reaches 0
-```
-
-CI/CD and migrations:
-
 ```mermaid
 flowchart LR
-    Dev["PR or push to main"] --> A
-    subgraph CI["ci.yml - job ci (ubuntu, Node 22)"]
-        direction TB
-        A["npm ci, typecheck, lint (ESLint, 0 warnings), npm test"] --> B["check-deploy-env build (strict on push to main, warn-only otherwise)"]
-        B --> B2["PR only: check-deploy-env pages --warn-only"] --> C["npm run build"]
-        C --> D["PR only: REFUTE gate (npm run check:refute -- --strict)"]
-        D --> E["main push only: tip-of-main check"]
-        E --> F["supabase link, then check-migrations-applied.mjs (fails closed if a migration is pending)"]
-        F --> G["check-deploy-env pages (Cloudflare production env)"]
-        G --> H["wrangler pages deploy ./dist --project-name ora-pm --commit-dirty=true"]
+    subgraph Browser["Browser: one Vite build"]
+        Admin["Admin console<br/>src/router.tsx"]
+        Portal["Tenant portal<br/>src/portal/ at /portal/*"]
     end
-    Man["Manual: DB Migrate workflow (dry_run defaults to true, main only)"] -- "supabase db push" --> PG[("Supabase production")]
-    H --> Pages["Cloudflare Pages: ora-pm"]
-    Cronwf["delinquency-backup.yml (daily)\nmonthly-billing-backup.yml (1st of month)"] -- "POST /api/cron/*" --> Pages
+
+    subgraph Pages["Cloudflare Pages Functions"]
+        Entry["functions/api/[[route]].ts"]
+        API["Hono app: server/index.ts"]
+        Entry --> API
+    end
+
+    Admin -- "admin JWT" --> Entry
+    Portal -- "tenant JWT" --> Entry
+    Portal -- "COI upload, anon key + tenant JWT" --> Storage
+
+    API -- "service-role client" --> DB[("Supabase Postgres")]
+    Storage[("Supabase Storage")]
+    API -- "PaymentIntents, SetupIntents" --> Stripe["Stripe ACH"]
+    Stripe -- "signed webhooks" --> API
+    API -- "extracted PDF text only" --> Anthropic["Anthropic Messages API"]
+
+    Sched["Scheduler and GitHub Actions backups"] -- "POST /api/cron/*, Bearer CRON_SECRET" --> API
+    API -- "IIF file download" --> QB["QuickBooks Desktop"]
 ```
 
-## Directory Structure
+**Request path.** Every `/api/*` request passes through, in order: the error handler, the Stripe webhook router (mounted before CORS so the raw body survives signature verification), an explicit CORS allowlist, then `adminAuthMiddleware` and a 120 req/min admin-mutation rate limit. Five roots are exempt from admin auth because they authenticate themselves (`ADMIN_EXEMPT` in [`server/index.ts`](server/index.ts)):
 
+| Root | Gate |
+|---|---|
+| `/api/webhooks` | Stripe signature |
+| `/api/cron` | `cronAuthMiddleware` (Bearer `CRON_SECRET`), 10 calls/hour per path |
+| `/api/portal`, `/api/stripe` | `tenantAuthMiddleware` (tenant JWT); money-movement routes also require MFA (AAL2) |
+| `/api/health` | public |
+
+`/api/admin` (tenant portal invite and revoke) is deliberately **not** exempt.
+
+<details>
+<summary><strong>API route map</strong> (24 routers in <code>server/routes/</code>)</summary>
+
+| Mount | File | Notes |
+|---|---|---|
+| `/api/properties`, `/api/units`, `/api/tenants` | `properties.ts`, `units.ts`, `tenants.ts` | CRUD; tenants also has `/:id/correspondence` and `/:id/portal-preview` |
+| `/api/leases` | `leases.ts` | CRUD, `/:id/amendments`, `/:id/notices` |
+| `/api/charges`, `/api/payments` | `charges.ts`, `payments.ts` | Ledger posting. `DELETE /api/charges/:id` hard-deletes a manual charge; auto-generated and voided charges are refused |
+| `/api/cam` | `cam.ts` | CAM pool, recoverable expenses, calculate, atomic approve |
+| `/api/expenses`, `/api/budgets` | `expenses.ts`, `budgets.ts` | Operating expenses and budgets |
+| `/api/renewals`, `/api/insurance` | `renewals.ts`, `insurance.ts` | Renewal pipeline, certificate tracking |
+| `/api/collections` | `collections.ts` | Payment promises and disputes |
+| `/api/reports` | `reports.ts` | `ar-aging`, `cash-activity`, `financials`, `income-statement-12mo`, `rent-roll`, `critical-dates`, `actuals` |
+| `/api/statements` | `statements.ts` | Per-lease statement, batch, Outlook draft packet |
+| `/api/gl` | `gl.ts` | GL entities, chart of accounts (incl. QuickBooks IIF account import), opening balances, AR posting (account roles, tie-out, preview + post run), journal + reversal, trial balance, period lock |
+| `/api/exports` | `exports.ts` | `GET /qb-iif`: QuickBooks Desktop IIF export |
+| `/api/intake` | `intake.ts` | `POST /lease`: AI lease extraction (see [Security](#security-and-operational-notes)) |
+| `/api/search` | `search.ts` | Global search |
+| `/api/cron` | `cron.ts` | `monthly-billing`, `critical-dates-alerts` (+ `/ack`), `delinquency-check` |
+| `/api/stripe`, `/api/webhooks` | `stripe.ts`, `webhook.ts` | Tenant customer / setup-intent / payment-intent; `POST /webhooks/stripe` deduped in `stripe_webhook_events` |
+| `/api/portal`, `/api/portal/insurance` | `portal.ts`, `portal-insurance.ts` | `/me`, `/charges`, `/payments`, `/lease`, `/aging`, `/documents`, `PATCH /autopay` (AAL2); COI metadata |
+| `/api/admin` | `portal-auth.ts` | Tenant portal invite / revoke access (admin-gated) |
+
+</details>
+
+## Tech stack
+
+| Layer | Technology |
+|---|---|
+| Front end | React 19, React Router 8, TanStack Query 5 and Table, Tailwind CSS 4, shadcn/ui on Radix primitives, Recharts, cmdk, sonner |
+| Build | Vite 6, TypeScript 5 (`tsc --noEmit` before every build) |
+| API | Hono 4 on Cloudflare Pages Functions (`hono/cloudflare-pages`), Zod validation |
+| Data | Supabase Postgres (service-role client server-side), Supabase Auth (admin and tenant sessions, TOTP MFA), Supabase Storage |
+| Payments | Stripe ACH (`us_bank_account`) via `stripe` and Stripe Elements |
+| AI | Anthropic Messages API for lease extraction (default model in [`server/lib/models.ts`](server/lib/models.ts)); PDF text via `unpdf` |
+| Accounting | QuickBooks Desktop IIF export and chart-of-accounts import |
+| Tests | Vitest 4, pg-mem and PGlite (migration tests), real Postgres 17 for the GL SQL suite |
+| CI/CD | GitHub Actions, Wrangler 4, Supabase CLI (pinned) |
+
+## Repository layout
+
+```text
+.
+├── functions/api/[[route]].ts   Pages Functions entry: hands every /api/* request to the Hono app
+├── server/
+│   ├── index.ts                 App assembly: middleware order, CORS allowlist, ADMIN_EXEMPT, route mounts
+│   ├── routes/                  One Hono router per resource (24 files)
+│   ├── middleware/              admin-auth, tenant-auth, aal-guard (MFA), cron auth, error handler
+│   ├── lib/                     Business logic: billing, rent schedule, CAM, AR aging, GL, statements,
+│   │                            IIF export/import, lease extraction, confidentiality guard, Stripe, rate limit
+│   └── db/client.ts             Supabase service-role client (server-only)
+├── src/
+│   ├── router.tsx               Admin route table (lazy-loaded pages behind AdminAuthGuard + AppShell)
+│   ├── pages/                   Admin pages, one folder per area (today, portfolio, leases, money, books, …)
+│   ├── portal/                  Tenant portal: PortalApp (session + MFA guard), PortalRouter, pages, lib
+│   ├── components/              App shell, data table, charts, forms, shadcn ui/ primitives
+│   └── lib/                     Admin Supabase client, API wrapper, formatting, validation
+├── supabase/
+│   ├── migrations/              0001–0029 SQL migrations: the schema source of truth (read its README)
+│   ├── tests/                   GL SQL suites (core, opening balance, accrual and cash AR posting) on real Postgres
+│   └── config.toml              Supabase CLI local config
+├── tests/                       Vitest suites: components, config, db, evals, lib, middleware, pages,
+│                                portal, routes, scripts, unit (+ fixtures/, setup.ts)
+├── scripts/                     CI gates, cron triggers, backfills, import, pre-push confidentiality scan
+├── evals/lease-intake-model-eval/  Opt-in model accuracy eval for lease intake (real API cost)
+├── docs/                        Design system and dated implementation plans
+├── public/_headers              Cloudflare Pages security headers
+├── .github/workflows/           ci, db-migrate, migration-numbers, delinquency-backup, monthly-billing-backup,
+│                                branch-cleanup
+└── wrangler.toml                Pages project config (build output ./dist)
 ```
-functions/api/[[route]].ts   Cloudflare Pages Functions entrypoint — hands every /api/* request to the Hono app
-server/                      API layer (Hono), deployed inside the Functions runtime
-  index.ts                     App assembly: middleware order, route mounting, admin-exempt path list
-  routes/                      One router per resource (properties, units, tenants, leases, charges, payments,
-                                cam, expenses, budgets, renewals, insurance, exports, intake, stripe, webhook,
-                                cron, portal, portal-auth, portal-insurance, reports)
-  middleware/                  admin-auth (staff JWT + ADMIN_EMAILS allowlist + tenant-exclusion check), tenant-auth (portal JWT),
-                                aal-guard (requireAal2: completed MFA challenge required on money-movement routes),
-                                error-handler, and the Bearer-secret cron gate (cronAuthMiddleware, in auth.ts)
-  lib/                          Business logic: billing.ts (monthly charge generation), ar-aging.ts (AR buckets),
-                                cam.ts (CAM true-up math), iif-export.ts (QuickBooks IIF file), lease-extract.ts
-                                (Anthropic PDF extraction), pdf-extract.ts (unpdf text extraction for the intake
-                                content scan), confidentiality.ts (denylist guard), stripe.ts / stripe-events.ts
-                                (Stripe client + webhook event handling), schemas.ts (Zod validation),
-                                rate-limit.ts (throttle: per-isolate memory until RATE_LIMIT_KV is provisioned), postgrest-paging.ts (keyset / chunked reads
-                                under PostgREST's row cap), api-error.ts (sanitized DB error responses),
-                                models.ts (single ANTHROPIC_MODEL constant, OI-256)
-  db/client.ts                  Supabase client factory (service role — used only server-side)
-src/                          Admin SPA
-  router.tsx                    Route table for the staff console (wrapped in AdminAuthGuard + AppShell)
-  App.tsx                       Root: QueryClientProvider (TanStack Query) + RouterProvider
-  pages/                        Dashboard.tsx, StyleGuide.tsx, plus one folder per resource (properties, tenants,
-                                leases incl. LeaseIntake, billing, ar, payments, cam, expenses, budgets, renewals,
-                                insurance, critical-dates, exports, reports/RentRoll, units, auth, admin/
-                                TenantPortalAdmin - the portal invite/revoke panel on the tenant page)
-  components/                   AppShell, AdminAuthGuard, PageHeader, StatusBadge, form/ and ui/ primitives
-  lib/                           supabase.ts (admin auth client), api.ts (fetch wrapper incl. file download),
-                                api-error.ts, mutations.ts, format.ts, validation.ts
-  portal/                       Tenant-facing SPA, mounted at /portal/* inside the same build
-    PortalApp.tsx / PortalRouter.tsx   Session bootstrap (incl. AAL2 MFA guard) + nested route table
-    pages/                        Dashboard, PayNow, PaymentHistory, MyLease, Documents, Insurance, Account, Login
-    components/                   PortalShell, PortalMfaChallenge (AAL2 step-up screen)
-    lib/                          supabase-portal.ts (separate anon-key client), portal-api.ts, charges.ts, pay-attempt.ts, mfa-guard.ts (pure AAL2 decision fn)
-supabase/migrations/           Ordered SQL migrations 0001-0017 (0001 core entities -> 0017 void of pre-guard late fees);
-                                source of schema truth. Read supabase/migrations/README.md first: it explains why the
-                                RLS policies do not protect API traffic and how migrations reach production
-scripts/
-  import-from-pipeline.mjs      One-time/rerunnable import from the ORA Lease Intelligence Pipeline's TENANTS.json
-  trigger-billing.ps1           Entrypoint for the ora-pm-monthly-billing fleet task: drains POST /api/cron/monthly-billing
-  delinquency-backup.sh         Off-host POST of /api/cron/delinquency-check (used by delinquency-backup.yml);
-                                self-test: delinquency-backup.test.sh
-  check-deploy-env.mjs          CI gate: required/deferred env vars on the build and on Cloudflare Pages production
-  check-migrations-applied.mjs  CI deploy gate: fails closed if a local migration is not applied remotely
-  check-refute-required.ts      CI gate (npm run check:refute): financial-decision files need a Refute-Reviewed / Refute-Skip commit trailer
-  prepare-migration-for-dashboard.mjs   Wraps a migration + tracking INSERT for the Dashboard-paste fallback
-  prepush_confidential_scan.py  Fail-closed git pre-push gate (Invariant 3; this repo is public): blocks a push carrying
-                                any active term from ~/.claude/hooks/confidential-terms.json; never prints terms.
-                                Install once per clone: python scripts/install_prepush_hook.py (shim: git-hooks/pre-push);
-                                tests: test_prepush_confidential_scan.py (CI). Same file as in ora-skills / website-canonical
-  verify-rls.sql                Manual, read-only check that the claimed RLS policies exist on the live database
-evals/lease-intake-model-eval/  Opt-in accuracy eval for INTAKE_MODEL candidates (synthetic fixtures; real API cost) -
-                                npm run eval:lease-intake-model; see its README
-.github/workflows/              ci.yml, db-migrate.yml, delinquency-backup.yml, monthly-billing-backup.yml
-public/_headers                 Cloudflare Pages security headers (CSP currently Report-Only)
-tests/                         Vitest suites (npm test): components, config, db (pg-mem migration tests), evals, lib,
-                                middleware, portal, routes, scripts, unit; shared helpers in fixtures/ and setup.ts
-dist/, .wrangler/              Build output and local Wrangler state — not source
-```
 
-## Setup & Run
+## Getting started
 
-Scripts are taken verbatim from `package.json`.
+### Prerequisites
+
+- Node.js 22 (the version CI uses) and npm
+- A Supabase project (or the Supabase CLI for a local stack)
+- Python 3 for the pre-push confidentiality hook
+- Optional: `psql` and an empty Postgres 16+ database for `npm run verify:gl-sql`
+
+### Install
 
 ```bash
 npm install
-cp .env.example .env        # VITE_SUPABASE_URL/ANON_KEY, SUPABASE_URL/SERVICE_ROLE_KEY, CRON_SECRET,
-                             # ANTHROPIC_API_KEY, CONFIDENTIAL_TERMS, INTAKE_MODEL, STRIPE_SECRET_KEY,
-                             # STRIPE_WEBHOOK_SECRET, VITE_STRIPE_PUBLISHABLE_KEY
-                             # (ADMIN_EMAILS is read by the API but is not in .env.example - add it for local admin access)
-
-npm run dev                 # vite — dev server on :5173
-npm run build                # tsc --noEmit && vite build — typecheck, then production build to dist/
-npm run preview              # vite preview
-npm test                     # vitest run — one-shot Vitest suite
-npm run test:watch           # vitest — watch mode
-npm run typecheck            # tsc --noEmit
-npm run lint                 # eslint . --max-warnings 0 (flat config: eslint.config.js)
-npm run check:refute         # tsx scripts/check-refute-required.ts - REFUTE-trailer gate (CI runs it with --strict on PRs)
-npm run eval:lease-intake-model   # tsx evals/lease-intake-model-eval/run-eval.ts - needs a real ANTHROPIC_API_KEY, incurs API cost
+python scripts/install_prepush_hook.py   # once per clone: installs the pre-push confidentiality gate
+cp .env.example .env                      # fill in values locally; never commit them
 ```
 
-Deployment is Cloudflare Pages, driven by `wrangler.toml` (`name = "ora-pm"`, build output `./dist`):
+### Environment variables
 
-1. Create a Supabase project and apply `supabase/migrations/` through the manual **DB Migrate** workflow (`.github/workflows/db-migrate.yml`: `workflow_dispatch` only, `dry_run` defaults to true, runs only off `main`; repo secrets `SUPABASE_ACCESS_TOKEN` and `SUPABASE_DB_PASSWORD`). The Dashboard-paste fallback (`scripts/prepare-migration-for-dashboard.mjs`) and the tracking rules are in `supabase/migrations/README.md`. Apply a migration BEFORE deploying the app code that depends on it.
-2. Deploy is `.github/workflows/ci.yml` (Node 22). On every PR and push to `main`: `npm ci` -> typecheck -> lint -> test -> `check-deploy-env.mjs build` -> build. On PRs it also runs the REFUTE gate (`npm run check:refute -- --strict`). On a push to `main`, and only if the commit is still the tip of `main`: link the production Supabase project, `check-migrations-applied.mjs` (fails closed when a local migration is not yet applied remotely), `check-deploy-env.mjs pages` (fails when a required runtime var is missing from Pages production), then `npx wrangler pages deploy ./dist --project-name ora-pm`. Runs are serialized per ref with a `concurrency` group: `main` runs are never cancelled mid-deploy, PR runs are cancelled when superseded. Repo secrets used by CI: `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `VITE_STRIPE_PUBLISHABLE_KEY`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, `SUPABASE_ACCESS_TOKEN`, `SUPABASE_DB_PASSWORD`. Whether the Cloudflare Pages Git integration is disconnected (so CI is the sole deploy path) cannot be verified from the repo; check `wrangler pages project list`.
-   Build-time vars (GitHub secrets, inlined by Vite): `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` (required) and `VITE_STRIPE_PUBLISHABLE_KEY` (deferred). Runtime secrets on Pages (`wrangler pages secret put <NAME>`), as classified in `scripts/check-deploy-env.mjs`: required - `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `CRON_SECRET`, `ADMIN_EMAILS`, `CONFIDENTIAL_TERMS`, `ANTHROPIC_API_KEY`; deferred until tenant payments launch - `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`; optional - `INTAKE_MODEL` (`claude-opus-5` default, `claude-sonnet-5` also allowed; any other value falls back to the default). The optional `RATE_LIMIT_KV` KV binding is not provisioned (the `[[kv_namespaces]]` block in `wrangler.toml` is commented out), so rate limiting is per-isolate memory only until it is.
-3. Configure Cloudflare Access (Zero Trust) on the Pages deployment — allow `ggoldberg@oxfordra.net`, `egoldberg@oxfordra.net`.
-4. Custom domains (live since 2026-11-11): `https://pm.oxfordra.net` (admin console) and `https://tenant.oxfordra.net` (tenant portal, `/portal`). Both serve the same build at every path; neither host restricts which front end loads. Three pieces must agree, and changing any of them **requires Gabriel's explicit go-ahead**:
-   - **DNS** — the `oxfordra.net` zone is Netlify DNS (same zone as the public website). Two `CNAME` records, `pm` and `tenant`, point to `ora-pm.pages.dev`. On this machine a `netlify api` write is gated by the website-deploy override hook even though it does not touch the site.
-   - **Cloudflare Pages** — both hostnames are attached as custom domains on the `ora-pm` project (Pages → ora-pm → Custom domains); Cloudflare validates over HTTP and issues the TLS certificates. A CNAME without this attachment returns a Cloudflare error, not the app.
-   - **Supabase Auth** (project `ora-pm`, Authentication → URL Configuration) — Site URL `https://pm.oxfordra.net`; Redirect URLs `https://pm.oxfordra.net/**`, `https://tenant.oxfordra.net/**`, `https://ora-pm.pages.dev/**`, `https://ora-pm.pages.dev`, `http://localhost:5173`. Magic links redirect to `window.location.origin` (`AdminLogin.tsx`, `PortalLogin.tsx`), so a host missing from this list falls back to the Site URL.
-   - The API CORS allow-list in `server/index.ts` already names both hosts and `ora-pm.pages.dev`. `ora-pm.pages.dev` stays live; auth sessions are per origin, so moving between hosts means signing in again.
-   - Rollback: delete the two DNS records and the two Pages custom domains, and set the Site URL back to `https://ora-pm.pages.dev`.
+Names only. `scripts/check-deploy-env.mjs` is the authoritative classification, and `tests/scripts/check-deploy-env.test.ts` fails if the code reads a variable that is not classified there.
 
-**Adding a new admin (OI-036):** admin accounts do not self-provision. In the Supabase dashboard, create the auth user for the new admin's `@oxfordra.net` address (Authentication → Users → Add user; no password needed, they'll sign in via magic link). Then add that exact email to the `ADMIN_EMAILS` secret — a comma-separated exact-match allowlist, case-insensitive — via `wrangler pages secret put ADMIN_EMAILS` (re-enter the full list; this overwrites, it does not append). `adminAuthMiddleware` (`server/middleware/admin-auth.ts`) fails closed with a 503 if `ADMIN_EMAILS` is unset or empty, and separately rejects with 403 any allowlisted email that also resolves to a `tenants` row — an admin cannot also be a tenant contact.
+| Variable | Where | Class | Purpose |
+|---|---|---|---|
+| `VITE_SUPABASE_URL` | build | required | Supabase URL inlined into the SPA |
+| `VITE_SUPABASE_ANON_KEY` | build | required | Supabase anon key for browser auth |
+| `VITE_STRIPE_PUBLISHABLE_KEY` | build | deferred | Stripe Elements for portal Pay Now |
+| `SUPABASE_URL` | runtime | required | API database connection |
+| `SUPABASE_SERVICE_ROLE_KEY` | runtime | required | Service-role key (server only; bypasses RLS) |
+| `CRON_SECRET` | runtime | required | Bearer token for `/api/cron/*` |
+| `ADMIN_EMAILS` | runtime | required | Comma-separated exact-match admin allowlist; admin routes return 503 when unset |
+| `CONFIDENTIAL_TERMS` | runtime | required | Lease-intake denylist; intake returns 503 when unset |
+| `ANTHROPIC_API_KEY` | runtime | required | Lease extraction |
+| `STRIPE_SECRET_KEY` | runtime | deferred | Stripe API (tenant payments, autopay) |
+| `STRIPE_WEBHOOK_SECRET` | runtime | deferred | Webhook signature verification |
+| `CRIT_ALERT_RECIPIENTS` | runtime | required | Critical-date alert dedup recipient(s); must match the address on existing `sent_notifications` rows. Both alert endpoints return 503 when unset |
+| `GL_PERIOD_LOCK_EMAILS` | runtime | deferred | Who may lock a GL period; unset means nobody (fails closed) |
+| `INTAKE_MODEL` | runtime | optional | Intake model override; allowlisted values only, else the default |
+| `RATE_LIMIT_KV` | binding | optional | KV namespace for durable rate limits; memory-only when unbound |
 
-**Tenant MFA lockout recovery (OI-045):** the tenant portal's Account page (`src/portal/pages/PortalAccount.tsx`) lets a tenant enroll a TOTP authenticator; `PortalApp.tsx`'s AAL2 guard (`src/portal/lib/mfa-guard.ts`) then requires a challenge/verify step on every subsequent login once a factor is verified. If a tenant loses their authenticator device (phone lost/reset, app uninstalled) they cannot self-service — there is no backup-code flow. Recovery: in the Supabase dashboard, Authentication → Users → select the tenant → remove their MFA factor(s) (equivalent to calling the admin `mfa.listFactors`/`deleteFactor` API for that user). This drops them back to `aal1`, clearing the guard, and they can log in and re-enroll from the Account page. There is no in-app tenant self-recovery path by design — an admin action is required.
+> [!NOTE]
+> `.env.example` does not list `ADMIN_EMAILS` or `CRIT_ALERT_RECIPIENTS`; add them locally or every admin route returns 503. For `wrangler pages dev`, runtime variables go in `.dev.vars` (git-ignored).
 
-Cron jobs have no native Cloudflare Pages trigger — two ORA CC/MCP fleet tasks (`create_scheduled_task` registry, `~/.claude/scheduled-tasks/`) POST to them with `Authorization: Bearer <CRON_SECRET>`, both reading the same `CRON_SECRET` from different local sources. `ora-pm-monthly-billing` (registered 2026-08-21, cron `10 11 1-3 * *`, days 1-3 of the month) runs `scripts/trigger-billing.ps1`, which POSTs to `/api/cron/monthly-billing`, authenticated via `$env:ORA_PM_CRON_SECRET`. An off-host backup, `.github/workflows/monthly-billing-backup.yml` (GitHub Actions, `40 17 1 * *` UTC = 90-150 min after the laptop slot and always in a later fixed-hour bucket of the 10/hour cron rate limit, repo secret `ORA_PM_CRON_SECRET`), re-drains the same endpoint so a laptop outage on the 1st (as on 2026-09-01) no longer defers charge posting to the next app open; the upsert is idempotent, so a double fire posts 0. `ora-pm-daily-crons` (registered 2026-08-16, superseding the standalone "ORA PM Crons" Windows Task Scheduler task, since disabled) runs `C:\Users\Owner\ora-pm-cron\ping-crons.ps1`, which POSTs to `/api/cron/critical-dates-alerts` and `/api/cron/delinquency-check` — **weekly since the 2026-09-17 fleet-wide cadence change (live cron `40 9 * * 1`, Mondays 09:40 ET; the task id still says "daily"), not daily** — authenticated via `C:\Users\Owner\ora-pm-cron\cron-secret.txt`, and, since OI-047, also sends the resulting digest via Outlook COM (the Worker no longer emails directly — see the `email` field on each endpoint's response, and `RECIPIENTS` note in `server/routes/cron.ts`). An off-host backup for the money-moving half of that task, `.github/workflows/delinquency-backup.yml` (GitHub Actions, `10 16 * * *` UTC, same repo secret `ORA_PM_CRON_SECRET`, logic in `scripts/delinquency-backup.sh`), re-fires `/api/cron/delinquency-check` only; late fees are one per lease per month, so a double fire posts 0. It deliberately never calls `critical-dates-alerts`, whose dedup rows are written before its digest is returned — only the laptop run can deliver that digest (OI-229). What the weekly cadence costs: late fees are unaffected (the GitHub Actions backup still fires daily), and a critical-date alert fires once per lease/certificate when it first enters the 90-day horizon, so weekly delivery means it arrives at 83–90 days out instead of 90. It also leaves that daily backup as the only daily database traffic, and the Supabase free plan pauses a project after 7 days without activity: while GitHub billing blocked every Actions job (2026-10-06 to 10-31), the project paused on 2026-10-12, and from then on every database-backed route failed, admin console and tenant portal included; the cron routes returned HTTP 500 with Cloudflare `error code: 1016` (origin DNS error, because a paused project's host stops resolving). Restoring the project from the Supabase dashboard is the fix. `scripts/delinquency-backup.sh` now names that cause in its job log, and the billing backup prints the raw body. The live scheduled-task registry is the authority for these crons, not this file; the task names, cadences and the `ping-crons.ps1` / Outlook COM behavior above are recorded from that registry and cannot be verified from this repo. The cron comments in `wrangler.toml` and `server/routes/cron.ts` match this paragraph. The endpoints behave as follows: `monthly-billing` is rate limited to 10 calls/hour per path, processes at most 8 autopay debits per call (`AUTOPAY_BATCH_LIMIT`) and returns `posted`, `skipped`, `chargeErrors`, `autopayErrors` and `remaining`; callers re-invoke it until `remaining` is 0 (`trigger-billing.ps1` caps at 8 invocations).
+### Run locally
 
-## Key Modules & Routes
+```bash
+npm run dev        # Vite dev server on :5173 (SPA only; there is no /api proxy)
+```
 
-| Module | Purpose |
+`npm run dev` does not run the API. To exercise the SPA and the Pages Functions together, build and serve with Wrangler (not a package script):
+
+```bash
+npm run build
+npx wrangler pages dev ./dist
+```
+
+## Scripts
+
+| Script | Command | Purpose |
+|---|---|---|
+| `dev` | `vite` | Dev server |
+| `build` | `tsc --noEmit && vite build` | Typecheck, then production build to `dist/` |
+| `preview` | `vite preview` | Serve the built SPA |
+| `test` | `vitest run` | Full Vitest suite, once |
+| `test:watch` | `vitest` | Watch mode |
+| `typecheck` | `tsc --noEmit` | Type check only |
+| `lint` | `eslint . --max-warnings 0` | ESLint flat config (`eslint.config.js`, palette rules in `eslint.palette.js`) |
+| `check:refute` | `tsx scripts/check-refute-required.ts` | REFUTE-trailer gate for financial-decision files (warns locally; CI runs `--strict`) |
+| `check:migrations` | `node scripts/check-migration-numbers.mjs` | Migration naming and number-collision gate |
+| `eval:lease-intake-model` | `tsx evals/lease-intake-model-eval/run-eval.ts` | Intake model eval; needs a real `ANTHROPIC_API_KEY` and incurs API cost |
+| `verify:gl-sql` | `bash scripts/verify-gl-sql.sh` | GL money rules on real Postgres; needs `GL_TEST_DATABASE_URL` pointing at an **empty, throwaway** database |
+
+## Testing and CI
+
+- **Unit and integration:** `npm test` runs 180 Vitest files under `tests/`. The run pins `TZ=America/New_York` so date math crosses real DST days. Locally it uses the `vmThreads` pool; under `CI` it uses `forks`.
+- **Migrations:** pg-mem and PGlite tests in `tests/db/` replay the SQL migrations.
+- **GL ledger:** `supabase/tests/*.test.sql` run against a real Postgres 17 service container, because pg-mem cannot execute the plpgsql triggers that enforce balance, immutability, period locks, the opening-balance and AR tie-out gates, and AR posting verification.
+
+[`ci.yml`](.github/workflows/ci.yml) runs on every pull request and push to `main` (Node 22, one job, runs serialized per ref):
+
+| Step | Runs on |
 |---|---|
-| `server/routes/properties.ts`, `units.ts`, `tenants.ts` | CRUD for the core portfolio entities; `tenants.ts` also serves the `/correspondence` sub-route (tenant contact log) |
-| `server/routes/leases.ts` | Lease list/get/create/update, `POST /:id/amendments`, and `/:id/notices` (GET/POST) for lease-related notice tracking |
-| `server/routes/charges.ts`, `payments.ts` | Charge ledger and payment recording (manual + Stripe-sourced). `DELETE /api/charges/:id` voids a charge (sets `voided_at`, migration 0016) rather than deleting the row; an already-voided charge is refused. Balances and listings exclude voided charges |
-| `server/routes/cam.ts` | CAM reconciliation: `GET /`, `GET /recoverable-expenses`, `POST /calculate`, `POST /:id/approve`, backed by `server/lib/cam.ts`'s pro-rata true-up math |
-| `server/routes/expenses.ts`, `budgets.ts` | Operating expense entry and budget tracking |
-| `server/routes/renewals.ts` | Renewal pipeline endpoints |
-| `server/routes/insurance.ts`, `portal-insurance.ts` | Certificate-of-insurance tracking, staff side and tenant-upload side |
-| `server/routes/reports.ts` | Read-model reports: `/ar-aging`, `/rent-roll`, `/critical-dates`, `/actuals` |
-| `server/routes/exports.ts` | `/api/exports/qb-iif` — generates a QuickBooks Desktop IIF file via `server/lib/iif-export.ts` |
-| `server/routes/intake.ts` | `POST /api/intake/lease` — uploads a lease PDF (max 10 MB, must be a real PDF) to Claude (`server/lib/lease-extract.ts`) for field extraction. Pre-egress gates: tenant and unit must exist, `CONFIDENTIAL_TERMS` must be configured (503 otherwise), the filename and the extracted PDF text (`pdf-extract.ts`, unpdf) are scanned against the denylist (422 on a hit or when no text layer exists), 10 requests/day per admin. Extracted fields are re-scanned before being returned |
-| `server/routes/cron.ts` | The three scheduled jobs: `monthly-billing` (idempotent charge generation + Stripe ACH autopay), `critical-dates-alerts` (90-day-horizon digest, deduped via `sent_notifications`), `delinquency-check` (30-day-grace late fee posting + digest) |
-| `server/routes/stripe.ts`, `webhook.ts` | `stripe.ts` (tenant JWT): `POST /customer`, `POST /setup-intent`, `POST /payment-intent` — the last two require AAL2 (`aal-guard.ts`), and payment-intent reserves a pending ledger row via `reserve_payment_intent()` before calling Stripe. `webhook.ts`: `POST /api/webhooks/stripe` (mounted before CORS so the raw body survives signature verification), deduped in `stripe_webhook_events`, events handled in `stripe-events.ts` |
-| `server/routes/portal.ts`, `portal-auth.ts` | Tenant-portal data endpoints (`tenantAuthMiddleware`: `/me`, `/charges`, `/payments`, `/lease`, `/documents`, `PATCH /autopay` behind AAL2) and admin-only tenant invite/revoke (`/api/admin/tenants/:id/invite`, `DELETE /api/admin/tenants/:id/revoke-access`; `adminAuthMiddleware`-gated despite the `/api/portal` prefix nearby) |
-| `src/pages/*` | React pages for the admin console, routed in `src/router.tsx` and wrapped in `AdminAuthGuard` + `AppShell` (also `/styleguide`, `/rent-roll`, `/units`, `/leases/intake`) |
-| `src/portal/*` | Tenant portal SPA mounted at `/portal/*`, with its own Supabase client (`supabase-portal.ts`) and session-gated route tree (`PortalRouter.tsx`) |
-| `.github/workflows/*`, `scripts/check-*.{mjs,ts}` | CI deploy pipeline, manual DB Migrate, and the off-host cron backups (see Architecture diagrams); the env, migration-applied and REFUTE gates |
-| `scripts/import-from-pipeline.mjs` | Idempotent bulk import of rent-roll data from the ORA Lease Intelligence Pipeline's `TENANTS.json`, using the service-role key to bypass RLS |
+| `npm ci`, pre-push gate tests, typecheck, lint, `npm test` | all |
+| GL SQL suite on Postgres 17, backup-trigger self-test | all |
+| Build-env check (`check-deploy-env.mjs build`) | strict on `main`, warn-only on PRs |
+| Pages env preview (warn-only) | PRs |
+| `npm run build` | all |
+| REFUTE gate (`check:refute --strict`) | PRs |
+| Migration-number gate | all (`--base` on PRs) |
+| Tip-of-main check, migrations-applied gate, Pages env check, `wrangler pages deploy` | push to `main`, only if the commit is still the tip |
 
-## Notes & Gotchas
+[`migration-numbers.yml`](.github/workflows/migration-numbers.yml) repeats the migration-number check on every non-`main` branch push, because GitHub creates no `pull_request` run for a PR that conflicts with `main`.
 
-- **Admin gating is prefix-based, not path-exact.** `/api/admin` (tenant invite/revoke, in `portal-auth.ts`) is *intentionally excluded* from `server/index.ts`'s `ADMIN_EXEMPT` list — a code comment flags this deliberately, since those are privileged actions even though the route lives conceptually next to the exempt `/api/portal` prefix. Read `ADMIN_EXEMPT` in `server/index.ts` before adding a new route under `/api/portal*` or `/api/admin*`.
-- **Lease-intake confidentiality guard scans both the filename and the extracted PDF text**, server-side, before anything is sent to Anthropic (`unpdf` in `server/lib/pdf-extract.ts`). It fails closed: no `CONFIDENTIAL_TERMS` configured returns 503, and any page without a usable text layer (fewer than 25 non-whitespace characters, i.e. a scanned page) returns 422 because the content scan cannot run. Annotation and form-field text is scanned too. Only the scanned per-page text is sent to Anthropic, never the PDF bytes, so content pdf.js cannot extract (images, form-field appearances, outlined glyphs) never leaves. Extracted field text is re-scanned after extraction as defense in depth. See `server/routes/intake.ts`.
-- **Two separate Supabase Auth contexts by design**: the admin console's client (`src/lib/supabase.ts`) and the tenant portal's client (`src/portal/lib/supabase-portal.ts`) both use the anon key from the browser — the service-role key never leaves `server/db/client.ts`. Admin access additionally requires the authenticated email to be on the `ADMIN_EMAILS` exact-match allowlist and to not resolve to any `tenants` row (`admin-auth.ts`, OI-036) — not merely an `@oxfordra.net` domain suffix, since one Supabase auth project serves both admin and tenant audiences.
-- **RLS does not protect API traffic.** `server/db/client.ts` uses the service-role key, which bypasses RLS; tenant isolation on the API is the per-route pattern of resolving the caller's tenant by `auth_user_id` first (pinned by `tests/routes/portal-scoping.test.ts`). The RLS policies are defense in depth for direct client access, and the `insurance-certs` storage upload is the one live direct-client path. Read `supabase/migrations/README.md` before relying on or changing any policy.
-- **Financial-decision files need a REFUTE trailer.** A PR touching the money-moving paths enumerated in `scripts/check-refute-required.ts` must carry a `Refute-Reviewed:` or `Refute-Skip:` commit trailer or CI fails.
-- **CSP is Report-Only.** `public/_headers` ships `Content-Security-Policy-Report-Only`; it is not yet enforcing.
-- **Webhook route must be mounted before the CORS middleware** — Stripe signature verification needs the untouched raw request body.
+[`branch-cleanup.yml`](.github/workflows/branch-cleanup.yml) deletes stale branches every Monday at 15:00 UTC with the repository token: a branch goes only when its tip is the head commit of a merged PR, or of a PR closed unmerged more than 14 days ago (rules and tests: `scripts/branch-cleanup.mjs`, `tests/unit/branch-cleanup.test.ts`). A manual run defaults to a dry run.
+
+## Deployment
+
+Production deploys only from CI on a push to `main`: `npx wrangler pages deploy ./dist --project-name ora-pm`. Before deploying, CI fails closed if a local migration is not yet applied to the production database (`scripts/check-migrations-applied.mjs`) or if a required runtime variable is missing from Pages production (`scripts/check-deploy-env.mjs pages`).
+
+- Build-time `VITE_*` values come from GitHub Actions secrets.
+- Runtime secrets are set on the Pages project: `wrangler pages secret put <NAME>`.
+- Other repo secrets used by workflows: `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, `SUPABASE_ACCESS_TOKEN`, `SUPABASE_DB_PASSWORD`, `ORA_PM_CRON_SECRET`.
+
+> [!IMPORTANT]
+> Apply a migration **before** the app code that depends on it deploys. The migrations-applied gate blocks the deploy until it is applied, so merging first and then running **DB Migrate** is safe: the deploy waits.
+
+### Custom domains
+
+Live since 2026-11-11: `https://pm.oxfordra.net` (admin console) and `https://tenant.oxfordra.net` (tenant portal, `/portal`). Both serve the same build at every path. Three settings must agree, and changing any of them needs the owner's explicit go-ahead:
+
+- **DNS:** the `oxfordra.net` zone is on Netlify DNS (shared with the public website). `CNAME` records `pm` and `tenant` point to `ora-pm.pages.dev`.
+- **Cloudflare Pages:** both hostnames are attached as custom domains on the `ora-pm` project, which issues the TLS certificates. A CNAME without the attachment returns a Cloudflare error, not the app.
+- **Supabase Auth** (URL Configuration): Site URL `https://pm.oxfordra.net`; redirect URLs for both hosts, `ora-pm.pages.dev` and `http://localhost:5173`. Magic links redirect to `window.location.origin`, so a host missing from the list falls back to the Site URL.
+
+The API CORS allowlist in `server/index.ts` names both hosts and `ora-pm.pages.dev`, which stays live; sessions are per origin. Rollback: remove the two DNS records and Pages custom domains, and set the Site URL back to `https://ora-pm.pages.dev`. Admin sign-in can additionally sit behind Cloudflare Access (Zero Trust), allowing the addresses on `ADMIN_EMAILS`.
+
+## Database and migrations
+
+`supabase/migrations/` (0001–0029) is the schema source of truth; each migration has a row in its README. Read [`supabase/migrations/README.md`](supabase/migrations/README.md) before changing a migration or relying on an RLS policy.
+
+- Migrations reach production through the manual **DB Migrate** workflow ([`db-migrate.yml`](.github/workflows/db-migrate.yml)): `workflow_dispatch` only, runs only from `main`, and `dry_run` defaults to true. The Supabase CLI is pinned to the same version in `ci.yml` and `db-migrate.yml`; bump both together.
+- A Dashboard-paste fallback is scripted in `scripts/prepare-migration-for-dashboard.mjs`.
+- `scripts/verify-rls.sql` is a manual, read-only check that the expected RLS policies exist on the live database.
+- Migration files are named `NNNN_lower_snake.sql`; numbers must be unique and a new one must sort above everything on `main`.
+
+## Scheduled jobs
+
+| Endpoint | Behavior | Off-host backup |
+|---|---|---|
+| `POST /api/cron/monthly-billing` | Idempotent charge generation plus Stripe ACH autopay, at most 8 debits per call. Returns `posted`, `skipped`, `chargeErrors`, `autopayErrors`, `remaining`; callers repeat until `remaining` is 0 | [`monthly-billing-backup.yml`](.github/workflows/monthly-billing-backup.yml), 17:40 UTC on the 1st |
+| `POST /api/cron/delinquency-check` | One late fee per lease per month after a 30-day grace; returns a digest | [`delinquency-backup.yml`](.github/workflows/delinquency-backup.yml), daily 16:10 UTC |
+| `POST /api/cron/critical-dates-alerts` | 90-day-horizon digest plus an `ack_token`; read-only. The caller POSTs the token to `/critical-dates-alerts/ack` only after a confirmed send, which records the dedup rows in `sent_notifications` (OI-321), so a failed send repeats instead of being lost | none by design: the backup job has no send path, so it must neither call nor ack |
+
+The Worker sends no email; digest endpoints return an `email` field for the caller to deliver. The primary triggers are scheduled tasks on the ORA laptop, outside this repo: monthly billing on days 1–3 of the month (`scripts/trigger-billing.ps1`), and the alerts plus delinquency check weekly on Mondays (`ping-crons.ps1`, which also delivers the digests). The comments in `wrangler.toml` and `server/routes/cron.ts` match this. The backups POST to the same endpoints and are safe to double-fire.
+
+> [!WARNING]
+> The daily delinquency backup is the only daily database traffic. Supabase pauses a free-plan project after 7 days without activity; a paused project makes every database-backed route fail, and the cron routes return HTTP 500 with Cloudflare `error code: 1016`. Restore the project from the Supabase dashboard. To catch up a missed month, run `monthly-billing-backup.yml` manually **with explicit `year` and `month` inputs**: a plain re-run bills the current month.
+
+## Security and operational notes
+
+- **RLS does not protect API traffic.** The API uses the service-role key, which bypasses RLS. Tenant isolation on `/api/portal` and `/api/stripe` is the per-route pattern of resolving the caller's tenant by `auth_user_id` first. RLS is defense in depth for direct client access; the portal's insurance-certificate upload to Storage is the one live direct path.
+- **Admin access** requires an authenticated email on the `ADMIN_EMAILS` exact-match allowlist (not a domain suffix) that does not also resolve to a tenant record. Admin roles (`owner`, `manager`, `bookkeeper`, `viewer`, migration 0018) are recorded on each request but **not yet enforced**.
+- **Adding an admin:** create the Supabase Auth user, then re-set the full `ADMIN_EMAILS` list with `wrangler pages secret put ADMIN_EMAILS` (it overwrites, it does not append).
+- **Tenant MFA:** tenants can enroll TOTP on the portal Account page; once enrolled, every login requires the challenge. There are no backup codes. Recovery is an admin removing the factor in the Supabase dashboard.
+- **Lease intake fails closed.** `POST /api/intake/lease` accepts PDFs up to 10 MB, 10 per admin per day. It scans the filename and extracted page text (including annotations and form fields) against `CONFIDENTIAL_TERMS` before any egress, rejects pages with no text layer, sends only extracted text (never PDF bytes) to Anthropic, and re-scans the extracted fields.
+- **Money-moving code needs a REFUTE trailer.** A PR touching a path in `FINANCIAL_SOURCE_PATHS` (`scripts/check-refute-required.ts`) must carry a `Refute-Reviewed:` or `Refute-Skip:` commit trailer, or CI fails.
+- **Public repository.** `scripts/prepush_confidential_scan.py` blocks a push that contains any active confidential term from the operator's local denylist and never prints the terms. Never commit real deal terms, tenant data or secrets; `.env`, `.dev.vars` and `.wrangler/` are git-ignored.
+- **CSP is Report-Only.** [`public/_headers`](public/_headers) ships `Content-Security-Policy-Report-Only` alongside enforcing `X-Frame-Options`, `HSTS`, `nosniff`, `Referrer-Policy` and `Permissions-Policy`. Enforcing CSP needs a `style-src` decision first (runtime-injected `<style>` elements).
+- **Rate limits** are per-isolate memory until a `RATE_LIMIT_KV` namespace is provisioned and the commented `[[kv_namespaces]]` block in `wrangler.toml` is enabled.
+
+## Contributing
+
+1. Branch from `main` and open a pull request; `main` deploys to production on merge.
+2. Run `npm run typecheck && npm run lint && npm test` before pushing. Lint allows zero warnings.
+3. Use design tokens from [`docs/design-system.md`](docs/design-system.md) (live reference at `/styleguide`); arbitrary hex colors and raw Tailwind gray/blue/green/red utilities fail lint.
+4. Schema changes go in a new numbered migration; never edit or renumber one that may already be applied.
+5. Changes to financial-decision files need an adversarial review and a `Refute-Reviewed:` trailer.
+6. Keep `scripts/check-deploy-env.mjs` in sync when the code reads a new environment variable.
+
+## Further reading
+
+| Document | Topic |
+|---|---|
+| [`supabase/migrations/README.md`](supabase/migrations/README.md) | RLS reality, migration process, Dashboard fallback |
+| [`docs/design-system.md`](docs/design-system.md) | Tokens, typography, component conventions |
+| [`evals/lease-intake-model-eval/README.md`](evals/lease-intake-model-eval/README.md) | Intake model accuracy eval |
+| [`docs/plans/`](docs/plans/) | Dated roadmap and implementation plans |
