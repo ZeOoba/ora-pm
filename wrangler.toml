@@ -28,7 +28,7 @@ pages_build_output_dir = "./dist"
 #       backup:  .github/workflows/monthly-billing-backup.yml, `40 17 1 * *` UTC
 #   POST /api/cron/critical-dates-alerts
 #       laptop:  ora-pm-daily-crons, cron `40 9 * * 1` (WEEKLY, Mondays 09:40
-#                ET, despite the id), runs C:\Users\Owner\ora-pm-cron\ping-crons.ps1
+#                ET, despite the id), runs ping-crons.ps1 on the ORA laptop
 #       backup:  none by design — dedup rows are written before the digest is
 #                returned, so only the laptop run can deliver it (OI-229)
 #   POST /api/cron/delinquency-check

@@ -104,7 +104,7 @@ describe('migration 0020 — runtime (real migration SQL on pg-mem)', () => {
       expect(() => abstractRow(db, leaseId, `status='approved'`)).toThrow(/lease_abstracts_approval_pair/)
       expect(() => abstractRow(db, leaseId, `approved_by='g@x'`)).toThrow(/lease_abstracts_approval_pair/)
       const id = abstractRow(db, leaseId)
-      db.none(`UPDATE lease_abstracts SET status = 'approved', approved_by = 'ggoldberg@oxfordra.net', approved_at = NOW() WHERE id = '${id}'`)
+      db.none(`UPDATE lease_abstracts SET status = 'approved', approved_by = 'admin@example.test', approved_at = NOW() WHERE id = '${id}'`)
       expect(db.many(`SELECT status FROM lease_abstracts WHERE id = '${id}'`)).toEqual([{ status: 'approved' }])
     })
     it('allows only one approved original-lease abstract per lease', () => {

@@ -57,6 +57,7 @@ export interface Env {
   INTAKE_MODEL?: string        // optional override for the lease-intake extraction model
   ADMIN_EMAILS?: string        // comma-separated exact-match admin allowlist (OI-036); see admin-auth.ts
   GL_PERIOD_LOCK_EMAILS?: string // comma-separated: who may lock a GL period (B8). Unset = nobody (fail-closed)
+  CRIT_ALERT_RECIPIENTS?: string // comma-separated: critical-date alert dedup recipients (cron.ts). Unset = 503
   // OI-038 remainder: durable, cross-isolate rate-limit counter storage. See
   // server/lib/rate-limit.ts for the KV-backed limiter and wrangler.toml for
   // the binding (and the manual provisioning step still needed before this

@@ -1,7 +1,7 @@
 # ora-pm Upgrade Roadmap — Yardi/AppFolio gap analysis → phased plan
 
 **Status:** PROPOSED · 2026-11-05 · baseline `origin/main` @ `0a2401d`
-**Owner:** Gabriel Goldberg · **Lane:** L5 research → plan (no code in this change)
+**Owner:** ORA principal · **Lane:** L5 research → plan (no code in this change)
 
 ## 0. Ratified decisions (2026-11-05)
 
@@ -43,7 +43,7 @@ Guardrails that bind every phase: GL, billing, payment-application, CAM, distrib
 | G13 | `properties.entity_llc` is free text; IIF account names hardcoded | `0001:12`, `exports.ts:100–104` | No entity model for multi-LLC GL |
 | G14 | 5 `alert()`/`confirm()` calls; bare "Loading…" text; no search/sort/bulk/CSV | pages | Basic usability |
 
-Operational note: the main checkout `C:\Users\Owner\ora-pm` is 38 commits behind with an uncommitted `package.json`/lockfile diff that only re-adds eslint deps already on `origin/main` — stale, safe to discard by its owner; not touched here.
+Operational note: the laptop's main checkout is 38 commits behind with an uncommitted `package.json`/lockfile diff that only re-adds eslint deps already on `origin/main` — stale, safe to discard by its owner; not touched here.
 
 ---
 
@@ -118,7 +118,7 @@ Sizing is relative (S ≈ ≤1 wk, M ≈ 2–3 wk, L ≈ 4–6 wk of focused Cla
 | Phase | Theme | Key epics | Depends on | Size | Exit criteria |
 |---|---|---|---|---|---|
 | **P1** | Design system & UX foundation | shadcn+ORA theme, responsive shell + new IA, DataTable w/ server pagination (fix G1), ⌘K search, toasts/dialogs, loading/empty/error states, migrate all pages, quick wins G3–G6, G9, G14, roles data model (G10, not yet enforced beyond admin) | — | L | Every list paginates; no raw gray/blue classes; Lighthouse a11y ≥ 95; works at 375 px |
-| **P2** | Reporting & dashboards | Chart kit; Home v2; property/tenant visual pages; report library (rent roll, AR aging, expiry, occupancy, budget variance, delinquency) with CSV/PDF export; saved views; **scheduled reports** via existing cron → Outlook COM path (routing: ggoldberg@ only) | P1 | M | 6 standard reports exportable; Home renders from live data with error states |
+| **P2** | Reporting & dashboards | Chart kit; Home v2; property/tenant visual pages; report library (rent roll, AR aging, expiry, occupancy, budget variance, delinquency) with CSV/PDF export; saved views; **scheduled reports** via existing cron → Outlook COM path (routing: the owner's address only) | P1 | M | 6 standard reports exportable; Home renders from live data with error states |
 | **P3** | Native GL foundation | `entities` (LLC) + `bank_accounts`; chart of accounts (template per LLC); `journal_entries`/`journal_lines` (balanced-entry constraint, immutable posted entries, reversal not edit); **payment application** to charges (fix G2) and AR subledger posting; AP: `vendors`, `bills`, approval limits, check/ACH payment records (no money movement from app); bank-statement import (CSV/OFX) + reconciliation; period close/lock; audit log; security-deposit liability ledger; roles enforced (bookkeeper/approver); Claude invoice capture reusing intake pattern | P1 | L+ | Trial balance per LLC ties to QB for a closed month; REFUTE pass on posting engine |
 | **P4** | Maintenance, vendors & vendor portal | Work orders (status machine, priority, SLA targets), tenant request intake w/ photos (portal + mobile), vendor directory w/ COIs/W-9, vendor portal (assigned WOs, status/photos, invoice upload → P3 bill), PM schedules (recurring WO generator in cron), chargeback WO→charge, maintenance dashboard | P1, P3 (bills) | L | Tenant can submit a request with photo; vendor can close it and submit invoice that lands as a draft bill |
 | **P5** | Owner/LLC financials + **QB parallel run** | Financial statements from GL (BS, IS, CF, T12) per LLC + consolidated; owner packet PDF; budgets on GL accounts (migrate P2 budgets); CAM recon sourced from GL; intercompany/distributions ("cash follows owner"); 1099 data; read-only owner view for Eric; **parallel-run harness**: QB CSV import → monthly variance report per LLC | P3 | L | Two consecutive closes per LLC reconcile to QB within $0 on BS, documented exceptions only; Gabriel ratifies cutover per LLC |

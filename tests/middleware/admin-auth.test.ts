@@ -21,7 +21,7 @@ const CONFIRMED = '2026-01-01T00:00:00Z'
 const env = {
   SUPABASE_URL: 'http://localhost',
   SUPABASE_SERVICE_ROLE_KEY: 'test-service-role',
-  ADMIN_EMAILS: 'ggoldberg@oxfordra.net, egoldberg@oxfordra.net',
+  ADMIN_EMAILS: 'admin@example.test, admin2@example.test',
 }
 
 function makeApp() {
@@ -82,10 +82,10 @@ describe('adminAuthMiddleware', () => {
   })
 
   it('returns 403 when authenticated user email is not in ADMIN_EMAILS (RED 1)', async () => {
-    // random@oxfordra.net is a valid domain but not on the allowlist — the old
+    // random@example.test is a valid domain but not on the allowlist — the old
     // suffix check would have passed this; the allowlist must reject it.
     mockGetUser.mockResolvedValue({
-      data: { user: { id: 'u1', email: 'random@oxfordra.net', email_confirmed_at: CONFIRMED } },
+      data: { user: { id: 'u1', email: 'random@example.test', email_confirmed_at: CONFIRMED } },
       error: null,
     })
     const app = makeApp()
@@ -99,7 +99,7 @@ describe('adminAuthMiddleware', () => {
 
   it('returns 403 when the email is allowlisted but a tenants row shares the auth_user_id (RED 2)', async () => {
     mockGetUser.mockResolvedValue({
-      data: { user: { id: 'u1', email: 'ggoldberg@oxfordra.net', email_confirmed_at: CONFIRMED } },
+      data: { user: { id: 'u1', email: 'admin@example.test', email_confirmed_at: CONFIRMED } },
       error: null,
     })
     mockMaybeSingle.mockResolvedValue({ data: { id: 'tenant_1' }, error: null })
@@ -115,7 +115,7 @@ describe('adminAuthMiddleware', () => {
 
   it('returns 503 when ADMIN_EMAILS is unset (RED 3)', async () => {
     mockGetUser.mockResolvedValue({
-      data: { user: { id: 'u1', email: 'ggoldberg@oxfordra.net', email_confirmed_at: CONFIRMED } },
+      data: { user: { id: 'u1', email: 'admin@example.test', email_confirmed_at: CONFIRMED } },
       error: null,
     })
     const app = makeApp()
@@ -128,7 +128,7 @@ describe('adminAuthMiddleware', () => {
 
   it('returns 503 when ADMIN_EMAILS is an empty string (RED 3)', async () => {
     mockGetUser.mockResolvedValue({
-      data: { user: { id: 'u1', email: 'ggoldberg@oxfordra.net', email_confirmed_at: CONFIRMED } },
+      data: { user: { id: 'u1', email: 'admin@example.test', email_confirmed_at: CONFIRMED } },
       error: null,
     })
     const app = makeApp()
@@ -148,7 +148,7 @@ describe('adminAuthMiddleware', () => {
     ['empty string', ''],
     ['not a date', 'not-a-date'],
   ])('returns 403 for an allowlisted email whose email_confirmed_at is %s (M2)', async (_label, confirmedAt) => {
-    const user: Record<string, unknown> = { id: 'u1', email: 'ggoldberg@oxfordra.net' }
+    const user: Record<string, unknown> = { id: 'u1', email: 'admin@example.test' }
     if (confirmedAt !== undefined) user.email_confirmed_at = confirmedAt
     mockGetUser.mockResolvedValue({ data: { user }, error: null })
     const app = makeApp()
@@ -164,7 +164,7 @@ describe('adminAuthMiddleware', () => {
 
   it('allows through an allowlisted admin who is not a tenant (RED 4)', async () => {
     mockGetUser.mockResolvedValue({
-      data: { user: { id: 'u1', email: 'ggoldberg@oxfordra.net', email_confirmed_at: CONFIRMED } },
+      data: { user: { id: 'u1', email: 'admin@example.test', email_confirmed_at: CONFIRMED } },
       error: null,
     })
     const app = makeApp()
@@ -176,7 +176,7 @@ describe('adminAuthMiddleware', () => {
 
   it('allowlist match is case-insensitive', async () => {
     mockGetUser.mockResolvedValue({
-      data: { user: { id: 'u1', email: 'GGoldberg@OxfordRA.net', email_confirmed_at: CONFIRMED } },
+      data: { user: { id: 'u1', email: 'Admin@Example.TEST', email_confirmed_at: CONFIRMED } },
       error: null,
     })
     const app = makeApp()
@@ -191,7 +191,7 @@ describe('adminAuthMiddleware', () => {
     // lookup must never silently degrade to "not a tenant, let them through" —
     // the request must be rejected, not passed to next().
     mockGetUser.mockResolvedValue({
-      data: { user: { id: 'u1', email: 'ggoldberg@oxfordra.net', email_confirmed_at: CONFIRMED } },
+      data: { user: { id: 'u1', email: 'admin@example.test', email_confirmed_at: CONFIRMED } },
       error: null,
     })
     mockMaybeSingle.mockResolvedValue({
@@ -223,7 +223,7 @@ describe('adminAuthMiddleware — admin_users role lookup (T12, recorded not enf
   type DbResult = { data: unknown; error: unknown }
   const SCOPE_A = '00000000-0000-0000-0000-00000000000a'
   const SCOPE_B = '00000000-0000-0000-0000-00000000000b'
-  const ADMIN = 'ggoldberg@oxfordra.net'
+  const ADMIN = 'admin@example.test'
   const USER_ID = 'auth-user-7f3a91c4'
   const TOKEN = 'bearer-token-5c2e08'
 
@@ -312,7 +312,7 @@ describe('adminAuthMiddleware — admin_users role lookup (T12, recorded not enf
   // no row, query error, rejection, synchronous throw, unprintable throw, timeout, unrecognized
   // role, malformed scope, malformed result), not only where a test remembers to check.
   const FORBIDDEN_IN_LOGS: Array<[string, RegExp]> = [
-    ['admin email (local part or domain, any case)', /ggoldberg|oxfordra/i],
+    ['admin email (local part or domain, any case)', /admin@|example\.test/i],
     ['auth user id', new RegExp(USER_ID)],
     ['bearer token', new RegExp(TOKEN)],
     ['service-role key', new RegExp(env.SUPABASE_SERVICE_ROLE_KEY)],
@@ -406,7 +406,7 @@ describe('adminAuthMiddleware — admin_users role lookup (T12, recorded not enf
   // --- the allowlist stays authoritative: rejected requests never read admin_users -----------
 
   it('non-allowlisted email WITH an admin_users row -> still 403, and admin_users is never queried', async () => {
-    asUser('random@oxfordra.net')
+    asUser('random@example.test')
     armTables({ adminUser: { data: { role: 'owner', entity_scope: null }, error: null } })
     const res = await request()
     expect(res.status).toBe(403)
@@ -457,7 +457,7 @@ describe('adminAuthMiddleware — admin_users role lookup (T12, recorded not enf
   // --- query shape ------------------------------------------------------------
 
   it('looks the row up by the LOWER-CASED auth email, selecting only role and entity_scope, with an abort signal, in one query after the tenant check', async () => {
-    asUser('GGoldberg@OxfordRA.net')
+    asUser('Admin@Example.TEST')
     armTables({ adminUser: { data: { role: 'viewer', entity_scope: null }, error: null } })
     const res = await request()
     expect(res.status).toBe(200)
@@ -465,7 +465,7 @@ describe('adminAuthMiddleware — admin_users role lookup (T12, recorded not enf
     expect(adminSelect).toHaveBeenCalledTimes(1)
     expect(adminSelect).toHaveBeenCalledWith('role, entity_scope')
     expect(adminEq).toHaveBeenCalledTimes(1)
-    expect(adminEq).toHaveBeenCalledWith('email', 'ggoldberg@oxfordra.net')
+    expect(adminEq).toHaveBeenCalledWith('email', 'admin@example.test')
     expect(adminAbortSignal).toHaveBeenCalledTimes(1)
     expect(adminAbortSignal.mock.calls[0][0]).toBeInstanceOf(AbortSignal)
     expect(adminMaybeSingle).toHaveBeenCalledTimes(1)
