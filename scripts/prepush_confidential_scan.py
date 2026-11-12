@@ -22,7 +22,15 @@ What is scanned, per pushed ref:
     stripped and HTML entities decoded (a Word run split across `<w:t>` elements still
     matches); gzip / bz2 / xz / zip / tar decompressed in memory, nested to a small depth
     (docx / xlsx are zips);
-  * the pushed ref names, and every annotated tag object in a pushed tag's chain.
+  * the pushed ref names, and every annotated tag object in a pushed tag's chain; when a
+    pushed ref or tag chain ends at a BLOB it is scanned like a pushed file, and at a TREE
+    every blob in it (`ls-tree -r`, all of them -- blobs already on the remote included);
+    any other non-commit type blocks;
+  * every path, ref name and file name as raw bytes through the same text views, so a
+    cp1252 / UTF-16 path is read too.
+Every git call runs with `--no-replace-objects` and GIT_NO_REPLACE_OBJECTS=1 (and without
+GIT_REPLACE_REF_BASE): `git replace` must not show the scan a different object from the one
+pack-objects sends.
 Every text is also read URL-decoded (`unquote_plus` and plain `unquote`, so `%20`, `+` and
 `%51uiet` decode), repeated to a fixpoint bounded at 4 rounds, which unwraps up to four
 levels of encoding (`%20`, `%2520`, `%252520`, `%25252520`); deeper nesting is a residual.
@@ -40,8 +48,11 @@ counts as one separator, and a separator-free form of each MULTI-word term (5+ c
 also matched against the normalized text, so `LOI_<TermNoSpaces>_MMDDYYYY` and line-wrapped
 or `&nbsp;`-joined names are caught without "east on" matching a one-word "easton".
 Range: an existing remote ref scans remote_sha..local_sha. A brand-new remote ref scans
-origin/<default>..local_sha (commits not already on the trunk); an orphan branch is
-therefore scanned in full, deliberately.
+`local_sha --not --remotes=<remote>`, where <remote> is the name git passes the hook as
+argv[1] (commits not already known on THAT remote). When argv[1] is a bare URL or path, not a
+configured remote, or that remote has no tracking refs (never fetched), the pushed ref's FULL
+history is scanned instead -- fail-closed, and slower; an orphan branch is likewise scanned
+in full, deliberately.
 
 Context terms (mirrors find_hit() in ~/.claude/hooks/confidentiality-guard.py): a deal's
 `context` term blocks only when one of the same deal's `context_requires_any` anchors also
@@ -56,7 +67,9 @@ appears in the same WINDOW. A window is one scanned unit:
 An anchor and a context term that only meet across two commits of the same push do not
 combine (residual; the anchored-context design is about one text).
 A deal whose context terms have no usable anchor -- `context_requires_any` missing or empty,
-or ANY anchor that is blank under the guard's tight form (NFKD, lowercase, superscript
+or ANY anchor with no match form once tightened and normalized (`normalize(_guard_tight(a))`
+is empty: separators and invisibles only, e.g. `<WORD JOINER>-`), or blank under the guard's
+tight form (NFKD, lowercase, superscript
 digits, combining marks (Mn) and the guard's invisible set _TABLE_FMT deleted, whitespace
 collapsed: U+3164, U+2800, U+115F/1160, U+0301, U+FE0F, ZWSP ... all count as blank; a
 blank anchor matches everywhere, as in the guard) -- has its context terms treated as
@@ -79,7 +92,7 @@ FAIL-CLOSED -- each of these BLOCKS the push:
     normalization -- we cannot know what to look for);
   * `git log` / `git rev-list` / `git cat-file` fails (e.g. remote sha unknown locally --
     run `git fetch`);
-  * a brand-new ref whose default-branch baseline cannot be resolved;
+  * a pushed ref or tag chain that ends at an object that is not a commit, tree or blob;
   * content that cannot be decoded reliably while a deal is active: a corrupt or encrypted
     archive, one over the size / member / depth caps, 7z / rar / zstd archives, and PDFs
     (PDF text is often compressed AND glyph-encoded, so no byte scan can prove it clean) --
@@ -89,14 +102,20 @@ A roster with no active deal (all closed) allows every push without scanning, as
 whose active deals carry no `always` and no `context` term at all (anchors alone cannot
 block). An active deal with context terms and no always terms is SCANNED, never fast-pathed.
 
-Residual (not covered): text inside images, OCR-only scans, raw zlib / lzma-alone streams,
-PNG zTXt chunks, and encodings other than those listed above (URL-encoding nested past 4
-rounds included); a context term and its anchor split across two commits; zero-width
-characters or combining marks inside an always / context term (anchors are tightened, terms
-are not); URL-encoded or tag-split anchors with invisible characters inside (the tight
-reading covers the raw and entity-decoded text only); a term interleaved with markup whose
-total span exceeds the slice overlap AND straddles a 256 KB slice edge; history already on
-the remote is not rescanned.
+Residual (not covered):
+  * text inside images, OCR-only scans, raw zlib / lzma-alone streams, PNG zTXt chunks, and
+    encodings other than those listed above (URL-encoding nested past 4 rounds included);
+  * a context term and its anchor split across two commits, or across two blobs of a tree
+    pushed through a tag;
+  * zero-width characters or combining marks inside an always / context term (anchors are
+    tightened, terms are not);
+  * URL-encoded or tag-split anchors with invisible characters inside (the tight reading
+    covers the raw and entity-decoded text only);
+  * a term interleaved with markup whose total span exceeds the slice overlap AND straddles a
+    256 KB slice edge;
+  * history already on the remote is not rescanned: for a new ref, anything reachable from
+    the push remote's tracking refs counts as already there, so stale tracking refs (the
+    remote rewound or deleted a branch since the last fetch) can hide commits.
 
 Exit 0 = allow, 1 = block (git pre-push convention). Bypass for a verified-clean push is a
 human's `git push --no-verify`; there is deliberately no environment-variable bypass.
@@ -154,15 +173,19 @@ def _guard_tight(t):
     c = unicodedata.normalize("NFKD", t.translate(_T_SUPERSCRIPT)).lower()
     return " ".join(c.translate(_T_GUARD_TIGHT).split())
 
-# Pin everything that could change what `git log` prints: no external diff, no textconv, no
-# colour, unquoted paths, UTF-8 output regardless of i18n.logOutputEncoding, no signature
-# lines before a commit (log.showSignature), no diff limited to the cwd (diff.relative).
-# format.pretty / log.decorate / log.abbrevCommit do not reach an explicit --format without
-# %d, and --no-ext-diff / --no-textconv / --no-renames / --no-abbrev are passed per call.
-# Parsers still fail closed on any line they do not recognise.
-GIT_BASE = ["git", "-c", "core.quotepath=off", "-c", "diff.noprefix=false",
-            "-c", "i18n.logOutputEncoding=UTF-8", "-c", "log.showSignature=false",
-            "-c", "color.ui=false", "-c", "diff.relative=false"]
+
+# The ONLY spelling of the git command in this module (a test enforces it); every call goes
+# through _git() or the cat-file Popen, both with _git_env(). No replace objects: the scan
+# must read exactly what pack-objects sends. Pin everything that could change what `git log`
+# prints: no external diff, no textconv, no colour, unquoted paths, UTF-8 output regardless
+# of i18n.logOutputEncoding, no signature lines before a commit (log.showSignature), no diff
+# limited to the cwd (diff.relative). format.pretty / log.decorate / log.abbrevCommit do not
+# reach an explicit --format without %d, and --no-ext-diff / --no-textconv / --no-renames /
+# --no-abbrev are passed per call. Parsers still fail closed on any line they do not know.
+GIT_BASE = ["git", "--no-replace-objects", "-c", "core.quotepath=off",
+            "-c", "diff.noprefix=false", "-c", "i18n.logOutputEncoding=UTF-8",
+            "-c", "log.showSignature=false", "-c", "color.ui=false",
+            "-c", "diff.relative=false"]
 
 SEP_RE = re.compile(r"[\s_.\- ­‐-―]+")
 TAG_RE = re.compile(r"<[^<>]{0,4000}>")
@@ -170,6 +193,21 @@ TAG_RE = re.compile(r"<[^<>]{0,4000}>")
 
 class Unscannable(Exception):
     pass
+
+
+def _git_env():
+    """The hook's environment with replace refs disabled: GIT_NO_REPLACE_OBJECTS=1, and
+    GIT_REPLACE_REF_BASE removed so it cannot point the lookup anywhere else."""
+    env = dict(os.environ)
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    env.pop("GIT_REPLACE_REF_BASE", None)
+    return env
+
+
+def _git(args, cwd=None, text=False):
+    """The ONE way this module runs git (a test enforces it): GIT_BASE + args."""
+    return subprocess.run(GIT_BASE + list(args), capture_output=True, cwd=cwd, text=text,
+                          env=_git_env())
 
 
 # --------------------------------------------------------------------------- matching
@@ -272,8 +310,17 @@ def scan_text(text, terms, tight=()):
     return sorted(found)
 
 
+def name_found(name, roster):
+    """Raw indices in a path / ref name, read as text and as its raw bytes through every
+    text view (a cp1252 or UTF-16 path)."""
+    found = set(roster.scan(name))
+    for view in text_views(name.encode("utf-8", "surrogateescape")):
+        found.update(roster.scan(view))
+    return found
+
+
 def shown(name, roster):
-    return WITHHELD if roster.scan(name) else name
+    return WITHHELD if name_found(name, roster) else name
 
 
 # --------------------------------------------------------------------------- roster
@@ -326,6 +373,11 @@ def _blank(t):
     return not _guard_tight(t)
 
 
+def _unusable_anchor(t):
+    """No match form once tightened and normalized: blank, separators and invisibles only."""
+    return _blank(t) or not normalize(_guard_tight(t)).strip() or not _anchor_forms(t)
+
+
 def _anchor_forms(t):
     """Normalized match forms of one usable anchor: as written, and its guard tight form."""
     return sorted({f for f in (normalize(t).strip(), normalize(_guard_tight(t)).strip()) if f})
@@ -369,8 +421,7 @@ def load_roster(path=None):
         anchors_raw = raw["context_requires_any"]
         # An anchor with no match form (blank, or separators only: `-`, `_`, `.`) would
         # leave a group that can never fire: treat the group as unanchored instead.
-        unanchored = not anchors_raw or any(_blank(a) or not _anchor_forms(a)
-                                            for a in anchors_raw)
+        unanchored = not anchors_raw or any(_unusable_anchor(a) for a in anchors_raw)
         anchors = [] if unanchored else [f for a in anchors_raw for f in _anchor_forms(a)]
         deals.append((always, context, anchors, unanchored))
     terms = sorted({t for a, c, an, _u in deals for t in a + c + an})
@@ -410,39 +461,34 @@ def parse_pushrefs(text):
     return refs
 
 
-_DEFAULT_CANDIDATES = ("refs/remotes/origin/main", "refs/remotes/origin/master")
-
-
-def resolve_default_baseline(cwd=None):
-    """Fully-qualified remote-tracking ref of the trunk (never a short name, which a local
-    branch literally called 'origin/main' could shadow), or None if nothing resolves."""
-    candidates = []
-    p = subprocess.run(["git", "symbolic-ref", "-q", "refs/remotes/origin/HEAD"],
-                       capture_output=True, text=True, cwd=cwd)
-    target = p.stdout.strip()
-    if p.returncode == 0 and target.startswith("refs/remotes/"):
-        candidates.append(target)
-    candidates += [c for c in _DEFAULT_CANDIDATES if c not in candidates]
-    for ref in candidates:
-        v = subprocess.run(["git", "rev-parse", "-q", "--verify", ref + "^{commit}"],
-                           capture_output=True, text=True, cwd=cwd)
-        if v.returncode == 0 and v.stdout.strip():
-            return ref
-    return None
-
-
-def rev_range(local_sha, remote_sha, baseline):
-    """Commit range to scan for one ref; None = cannot bound it (caller blocks)."""
-    if set(remote_sha) != {ZERO}:
-        return "%s..%s" % (remote_sha, local_sha)
-    if baseline is None:
+def push_remote(remote, cwd=None):
+    """The remote name git passed as argv[1] when it is a configured remote with at least one
+    tracking ref, else None (a bare URL / path, an unknown name, never fetched): the caller
+    then scans full history. RAISES nothing; a git failure also yields None."""
+    if not remote or remote.startswith("-") or any(c in remote for c in "*?[\\:"):
         return None
-    return "%s..%s" % (baseline, local_sha)
+    p = _git(["config", "--get", "remote.%s.url" % remote], cwd, text=True)
+    if p.returncode != 0 or not p.stdout.strip():
+        return None
+    p = _git(["for-each-ref", "--count=1", "--format=%(refname)", "refs/remotes/%s/" % remote],
+             cwd, text=True)
+    if p.returncode != 0 or not p.stdout.strip():
+        return None
+    return remote
+
+
+def rev_range(local_sha, remote_sha, remote):
+    """Revision arguments for what one pushed ref makes new on the remote."""
+    if set(remote_sha) != {ZERO}:
+        return [local_sha, "^" + remote_sha]
+    if remote:
+        return [local_sha, "--not", "--remotes=" + remote]
+    return [local_sha]  # no bound: full history, fail-closed
 
 
 # --------------------------------------------------------------------------- objects
 def range_commits(rng, cwd=None):
-    p = subprocess.run(["git", "rev-list", rng], capture_output=True, text=True, cwd=cwd)
+    p = _git(["rev-list"] + rng, cwd, text=True)
     if p.returncode != 0:
         raise Unscannable("`git rev-list` failed for the pushed range")
     return [s for s in p.stdout.split() if s]
@@ -453,10 +499,8 @@ def range_blobs(rng, cwd=None):
     included (--cc lists what a merge resolution changed relative to every parent); the same
     blob is listed once per commit that introduces it. RAISES Unscannable."""
     marker = "ORA-PREPUSH-" + os.urandom(16).hex()
-    p = subprocess.run(GIT_BASE + ["log", "--raw", "--cc", "--root", "-z", "--no-abbrev",
-                                   "--no-renames", "--no-color", "--format=" + marker + "%H",
-                                   rng],
-                       capture_output=True, cwd=cwd)
+    p = _git(["log", "--raw", "--cc", "--root", "-z", "--no-abbrev", "--no-renames",
+              "--no-color", "--format=" + marker + "%H"] + rng, cwd)
     if p.returncode != 0:
         raise Unscannable("`git log --raw` failed for the pushed range")
     return parse_raw_log(p.stdout, marker)
@@ -505,8 +549,9 @@ def iter_objects(shas, cwd=None):
     RAISES Unscannable on a git failure or a missing object."""
     if not shas:
         return
-    proc = subprocess.Popen(["git", "cat-file", "--batch"], stdin=subprocess.PIPE,
-                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, cwd=cwd)
+    proc = subprocess.Popen(GIT_BASE + ["cat-file", "--batch"], stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, cwd=cwd,
+                            env=_git_env())
     try:
         for sha in shas:
             proc.stdin.write((sha + "\n").encode())
@@ -664,14 +709,44 @@ def scan_blobs(rng, roster, cwd=None):
     hits: [(shown_path, indices)]; unscannable: [reason]; per_commit: {commit sha: raw
     indices of the content and path of every blob that commit introduces}, which the
     caller pools into that commit's window."""
+    try:
+        entries = range_blobs(rng, cwd)
+    except (Unscannable, ValueError, OSError) as e:
+        return [], ["blob enumeration failed (%s)" % e], {}
+    return scan_blob_entries(entries, roster, cwd)
+
+
+def tree_blobs(tree_sha, cwd=None):
+    """[(None, path, blob_sha)] for every blob in a tree, recursively. RAISES Unscannable."""
+    p = _git(["ls-tree", "-r", "-z", "--full-tree", tree_sha], cwd)
+    if p.returncode != 0:
+        raise Unscannable("`git ls-tree` failed for a pushed tree")
+    out = []
+    for rec in p.stdout.decode("utf-8", "surrogateescape").split("\0"):
+        if not rec.strip():
+            continue
+        meta, sep, path = rec.partition("\t")
+        parts = meta.split()
+        if not sep or len(parts) != 3:
+            raise Unscannable("unparseable `git ls-tree` record")
+        if parts[1] == "blob":
+            out.append((None, path, parts[2]))
+        elif parts[1] != "commit":  # a gitlink names another repo's commit: nothing sent
+            raise Unscannable("unexpected `git ls-tree` entry type")
+    return out
+
+
+def scan_blob_entries(entries, roster, cwd=None):
+    """scan_blobs over [(commit or None, path, blob_sha)]."""
     hits, bad, per_commit = [], [], {}
     try:
         paths_by_sha, commits_by_sha = {}, {}
-        for commit, path, sha in range_blobs(rng, cwd):
+        for commit, path, sha in entries:
             if path not in paths_by_sha.setdefault(sha, []):
                 paths_by_sha[sha].append(path)
-            commits_by_sha.setdefault(sha, []).append((commit, path))
-            per_commit.setdefault(commit, set()).update(roster.scan(path))
+            if commit is not None:
+                commits_by_sha.setdefault(sha, []).append((commit, path))
+                per_commit.setdefault(commit, set()).update(name_found(path, roster))
         for sha, _typ, blob in iter_objects(sorted(paths_by_sha), cwd):
             path = shown(paths_by_sha[sha][0], roster)
             try:
@@ -682,10 +757,10 @@ def scan_blobs(rng, roster, cwd=None):
             found = set()
             for text in texts:
                 found.update(roster.scan(text))
-            for commit, _p in commits_by_sha[sha]:
+            for commit, _p in commits_by_sha.get(sha, ()):
                 per_commit[commit].update(found)
             for p in paths_by_sha[sha]:
-                found.update(roster.scan(p))
+                found.update(name_found(p, roster))
             blocking = roster.blocking(found)
             if blocking:
                 hits.append((path, blocking))
@@ -711,13 +786,11 @@ def patch_found(rng, roster, cwd=None):
     re-encoded message and its patch). Commits are split on a per-run random marker that no
     pushed content can forge. RAISES Unscannable."""
     marker = "ORA-PREPUSH-" + os.urandom(16).hex()
-    p = subprocess.run(GIT_BASE + ["log", "-p", "--cc", "--root", "--no-color",
-                                   "--no-ext-diff", "--no-textconv",
-                                   "--format=" + marker + "%H%n%an <%ae>%n%cn <%ce>%n%B", rng],
-                       capture_output=True, cwd=cwd)
+    p = _git(["log", "-p", "--cc", "--root", "--no-color", "--no-ext-diff", "--no-textconv",
+              "--format=" + marker + "%H%n%an <%ae>%n%cn <%ce>%n%B"] + rng, cwd)
     if p.returncode != 0:
         raise Unscannable("`git log -p %s` failed (remote sha unknown locally? run "
-                          "`git fetch` first)" % rng)
+                          "`git fetch` first)" % " ".join(rng))
     out = {}
     chunks = p.stdout.decode("utf-8", "ignore").split(marker)
     if chunks[0].strip():
@@ -731,15 +804,15 @@ def patch_found(rng, roster, cwd=None):
 
 
 def tag_chain_hits(local_sha, roster, cwd=None):
-    """Blocking indices in every annotated tag object reachable by peeling local_sha (a tag
-    of a tag transfers both objects); each tag object is one window. Empty for anything that
-    is not a tag. RAISES Unscannable."""
+    """(blocking indices, final sha, final type) after peeling local_sha through every
+    annotated tag object (a tag of a tag transfers both objects); each tag object is one
+    window. RAISES Unscannable."""
     found, sha = set(), local_sha
     for _ in range(16):
         objs = list(iter_objects([sha], cwd))
         _s, typ, data = objs[0]
         if typ != "tag":
-            return sorted(found)
+            return sorted(found), sha, typ
         one = set()
         for text in text_views(data):
             one.update(roster.scan(text))
@@ -752,26 +825,46 @@ def tag_chain_hits(local_sha, roster, cwd=None):
 
 
 # --------------------------------------------------------------------------- main
-def scan_ref(local_ref, local_sha, remote_ref, remote_sha, roster, baseline, cwd=None):
+def scan_ref(local_ref, local_sha, remote_ref, remote_sha, roster, remote, cwd=None):
     """List of block messages for one pushed ref (empty = clean)."""
     msgs = []
     label = shown(local_ref, roster)
-    name_hits = sorted(set(roster.hits(local_ref) + roster.hits(remote_ref)))
+    name_hits = sorted(set(roster.blocking(name_found(local_ref, roster))
+                           + roster.blocking(name_found(remote_ref, roster))))
     if name_hits:
         msgs.append("a pushed ref NAME contains confidential term(s) (indices %s)." % name_hits)
     try:
-        t_hits = tag_chain_hits(local_sha, roster, cwd)
+        t_hits, final_sha, final_type = tag_chain_hits(local_sha, roster, cwd)
     except Unscannable as e:
         msgs.append("(fail-closed) could not read the pushed object for %s: %s" % (label, e))
-        t_hits = []
+        return msgs
     if t_hits:
         msgs.append("confidential term(s) (indices %s) in an annotated tag message of %s."
                     % (t_hits, label))
-    rng = rev_range(local_sha, remote_sha, baseline)
-    if rng is None:
-        msgs.append("(fail-closed) %s is a brand-new remote ref and origin's default branch "
-                    "could not be resolved to bound the scan -- run `git fetch` first." % label)
+    if final_type in ("blob", "tree"):
+        # A ref or tag pointing straight at a blob / tree: no commit range to walk. A blob is
+        # one window with the pushed ref name; a tree is every blob in it.
+        try:
+            entries = ([(None, local_ref, final_sha)] if final_type == "blob"
+                       else tree_blobs(final_sha, cwd))
+        except Unscannable as e:
+            msgs.append("(fail-closed) the %s pushed on %s could not be read: %s"
+                        % (final_type, label, e))
+            return msgs
+        b_hits, b_bad, _ = scan_blob_entries(entries, roster, cwd)
+        if b_hits:
+            msgs.append("confidential term(s) inside the %s pushed on %s: %s."
+                        % (final_type, label, "; ".join("%s -> indices %s" % h for h in b_hits)))
+        if b_bad:
+            msgs.append("(fail-closed) the %s pushed on %s cannot be proven clean by this "
+                        "scan (verify by hand, then --no-verify): %s"
+                        % (final_type, label, "; ".join(b_bad)))
         return msgs
+    if final_type != "commit":
+        msgs.append("(fail-closed) %s points at an object of unexpected type %r."
+                    % (label, final_type))
+        return msgs
+    rng = rev_range(local_sha, remote_sha, remote)
     # One commit = one window: its raw object (every view), its own patch, and the content
     # and path of every blob it introduces (scan_blobs) -- see "Context terms" above.
     try:
@@ -792,7 +885,7 @@ def scan_ref(local_ref, local_sha, remote_ref, remote_sha, roster, baseline, cwd
         msgs.append("%d confidential term(s) (indices %s) in the commits being pushed on %s "
                     "(range %s: messages, diffs and the files they add). A clean HEAD does "
                     "not mean a clean push -- rewrite the history first."
-                    % (len(hits), hits, label, rng))
+                    % (len(hits), hits, label, " ".join(rng)))
     if b_hits:
         msgs.append("confidential term(s) inside file content pushed on %s: %s."
                     % (label, "; ".join("%s -> indices %s" % h for h in b_hits)))
@@ -802,7 +895,8 @@ def scan_ref(local_ref, local_sha, remote_ref, remote_sha, roster, baseline, cwd
     return msgs
 
 
-def main(stdin_text=None, roster=None, cwd=None):
+def main(stdin_text=None, roster=None, cwd=None, remote=None):
+    """`remote`: the hook's argv[1] (remote name or URL); None scans full history."""
     try:
         sys.stderr.reconfigure(errors="backslashreplace")
     except Exception:
@@ -826,12 +920,12 @@ def main(stdin_text=None, roster=None, cwd=None):
         return 1
     if not roster.can_block():
         return 0  # no active always / context term: nothing can leak
-    baseline = resolve_default_baseline(cwd)
+    remote = push_remote(remote, cwd)
     blocked = False
     for local_ref, local_sha, remote_ref, remote_sha in pushrefs:
         if set(local_sha) == {ZERO}:
             continue  # ref deletion: nothing new reaches the remote
-        for m in scan_ref(local_ref, local_sha, remote_ref, remote_sha, roster, baseline, cwd):
+        for m in scan_ref(local_ref, local_sha, remote_ref, remote_sha, roster, remote, cwd):
             sys.stderr.write("pre-push BLOCKED: %s\n" % m)
             blocked = True
     if blocked:
@@ -842,4 +936,4 @@ def main(stdin_text=None, roster=None, cwd=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(remote=sys.argv[1] if len(sys.argv) > 1 else None))

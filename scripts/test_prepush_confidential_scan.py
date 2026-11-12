@@ -113,8 +113,25 @@ class Sandbox:
         self.git(self.work, "commit", "-q", "--no-verify", "-m", msg)
 
     def push(self, *refspec):
-        p = self.git(self.work, "push", "origin", *(refspec or ("HEAD",)), check=False)
+        return self.push_to("origin", *(refspec or ("HEAD",)))
+
+    def push_to(self, remote, *refspec):
+        p = self.git(self.work, "push", remote, *refspec, check=False)
         return p.returncode, p.stderr.decode("utf-8", "replace")
+
+    def bare(self, name):
+        path = os.path.join(self.root, name + ".git")
+        self.git(self.root, "init", "-q", "--bare", "-b", "main", path)
+        return path
+
+    def hash_object(self, data):
+        p = subprocess.run(["git", "hash-object", "-w", "--stdin"], cwd=self.work, input=data,
+                           capture_output=True, env=self.env)
+        assert p.returncode == 0, p.stderr
+        return p.stdout.decode().strip()
+
+    def out(self, *args):
+        return self.git(self.work, *args).stdout.decode().strip()
 
     def close(self):
         _rmtree(self.root)
@@ -311,11 +328,87 @@ class PushGate(unittest.TestCase):
         self.sb.commit("feature.md", "clean\n")
         self.assertAllowed(*self.sb.push("feature"))
 
-    def test_new_branch_without_resolvable_baseline_fails_closed(self):
+    def test_new_branch_without_tracking_refs_scans_full_history(self):
+        # No refs/remotes/origin/* to bound the scan: the pushed ref's FULL history is scanned
+        # (fail-closed), so a term already on the remote's history still blocks.
+        self.sb.commit("old.md", "%s\n" % TERM)
+        self.sb.git(self.sb.work, "push", "-q", "--no-verify", "origin", "main")
         self.sb.git(self.sb.work, "update-ref", "-d", "refs/remotes/origin/main")
         self.sb.git(self.sb.work, "checkout", "-q", "-b", "feature")
         self.sb.commit("feature.md", "clean\n")
         self.assertBlocked(*self.sb.push("feature"))
+
+    def test_new_branch_without_tracking_refs_and_clean_history_is_allowed(self):
+        self.sb.git(self.sb.work, "update-ref", "-d", "refs/remotes/origin/main")
+        self.sb.git(self.sb.work, "checkout", "-q", "-b", "feature")
+        self.sb.commit("feature.md", "clean\n")
+        self.assertAllowed(*self.sb.push("feature"))
+
+    # --- REFUTE round 3 on 655645f9 ----------------------------------------------------
+    def test_replace_ref_cannot_hide_the_pushed_commit(self):
+        w = self.sb.work
+        self.sb.commit("notes.md", "memo for %s\n" % TERM, msg="memo")
+        bad = self.sb.out("rev-parse", "HEAD")
+        clean = self.sb.out("commit-tree", self.sb.out("rev-parse", "HEAD~1^{tree}"),
+                            "-p", "HEAD~1", "-m", "memo")
+        self.sb.git(w, "replace", bad, clean)
+        self.sb.env["GIT_REPLACE_REF_BASE"] = "refs/replace/"
+        self.assertBlocked(*self.sb.push())
+
+    def test_replaced_blob_cannot_hide_pushed_content(self):
+        self.sb.commit("notes.md", "memo for %s\n" % TERM, msg="memo")
+        blob = self.sb.out("rev-parse", "HEAD:notes.md")
+        self.sb.git(self.sb.work, "replace", "-f", blob, self.sb.hash_object(b"clean\n"))
+        self.assertBlocked(*self.sb.push())
+
+    def test_tags_pointing_at_blobs_and_trees_are_scanned(self):
+        w = self.sb.work
+        blob = self.sb.hash_object(("memo %s\n" % TERM).encode())
+        clean_blob = self.sb.hash_object(b"nothing here\n")
+        self.sb.git(w, "tag", "t-blob", blob)
+        self.assertBlocked(*self.sb.push("refs/tags/t-blob"))
+        self.sb.git(w, "tag", "-a", "t-ablob", "-m", "clean", blob)
+        self.assertBlocked(*self.sb.push("refs/tags/t-ablob"))
+        with open(os.path.join(w, "deep.md"), "w", encoding="utf-8") as f:
+            f.write("x %s y\n" % TERM2)
+        self.sb.git(w, "add", "deep.md")
+        tree = self.sb.out("write-tree")
+        self.sb.git(w, "rm", "-q", "--cached", "deep.md")
+        self.sb.git(w, "tag", "t-tree", tree)
+        self.assertBlocked(*self.sb.push("refs/tags/t-tree"))
+        self.sb.git(w, "tag", "-a", "t-atree", "-m", "clean", tree)
+        self.assertBlocked(*self.sb.push("refs/tags/t-atree"))
+        # existing ref moved from a clean blob to the term blob
+        self.sb.git(w, "tag", "t-move", clean_blob)
+        self.sb.git(w, "push", "-q", "--no-verify", "origin", "refs/tags/t-move")
+        self.sb.git(w, "tag", "-f", "t-move", blob)
+        self.assertBlocked(*self.sb.push("+refs/tags/t-move"))
+        # a clean blob tag is allowed
+        self.sb.git(w, "tag", "t-clean", clean_blob)
+        self.assertAllowed(*self.sb.push("refs/tags/t-clean"))
+
+    def test_new_ref_on_a_second_remote_is_bounded_by_that_remote(self):
+        # The term commit is already on origin (private), not on `public`: pushing it to
+        # public must be scanned even though origin's default branch contains it.
+        w = self.sb.work
+        self.sb.commit("notes.md", "memo %s\n" % TERM, msg="memo")
+        self.sb.git(w, "push", "-q", "--no-verify", "origin", "main")
+        self.sb.git(w, "fetch", "-q", "origin")
+        self.sb.git(w, "remote", "add", "public", self.sb.bare("public"))
+        self.assertBlocked(*self.sb.push_to("public", "HEAD:refs/heads/main"))
+        # ... and once public's tracking refs exist, only what public lacks is scanned
+        self.sb.git(w, "push", "-q", "--no-verify", "public", "HEAD:refs/heads/main")
+        self.sb.git(w, "fetch", "-q", "public")
+        self.sb.commit("more.md", "clean\n", msg="clean")
+        self.assertAllowed(*self.sb.push_to("public", "HEAD:refs/heads/feature"))
+
+    def test_push_to_a_bare_url_scans_full_history(self):
+        w = self.sb.work
+        self.sb.commit("notes.md", "memo %s\n" % TERM, msg="memo")
+        self.sb.git(w, "push", "-q", "--no-verify", "origin", "main")
+        self.sb.git(w, "fetch", "-q", "origin")
+        self.sb.commit("more.md", "clean\n", msg="clean")
+        self.assertBlocked(*self.sb.push_to(self.sb.bare("elsewhere"), "HEAD:refs/heads/main"))
 
     def test_branch_deletion_is_allowed(self):
         self.sb.git(self.sb.work, "push", "-q", "--no-verify", "origin", "HEAD:refs/heads/tmp")
@@ -494,6 +587,20 @@ class ContextAndEncoding(unittest.TestCase):
             self.sb.git(w, "config", k, v)
         self.assertBlocked(*self.sb.push())
 
+    def test_non_utf8_path_is_read_through_every_view(self):
+        # a cp1252 path spelling the anchor with an accent, context term inside a .gz
+        sb = self.sb
+        gz = sb.hash_object(gzip.compress(CTX_TERM.encode()))
+        base = sb.out("rev-parse", "HEAD:README.md")
+        listing = (b"100644 blob " + base.encode() + b"\tREADME.md\0"
+                   + b"100644 blob " + gz.encode() + b"\tpr\xf3jectcodeq7.gz\0")
+        p = subprocess.run(["git", "mktree", "-z"], cwd=sb.work, input=listing,
+                           capture_output=True, env=sb.env)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        c = sb.out("commit-tree", p.stdout.decode().strip(), "-p", "HEAD", "-m", "add")
+        sb.git(sb.work, "update-ref", "refs/heads/main", c)
+        self.assertBlocked(*sb.push("main"))
+
     def test_zero_width_anchor_still_gates_on_its_visible_spelling(self):
         self.sb.write_roster({"deal_ctx": {"active": True, "always": [], "context": [CTX_TERM],
                                            "context_requires_any": ["projectcode" + ZWSP + "q7"]}})
@@ -599,6 +706,39 @@ class Units(unittest.TestCase):
         for text in ("brule yard %s", "Br\u00fbl\u00e9 Yard %s", "Bru\u0302le\u0301 yard %s"):
             self.assertEqual(r.hits(text % CTX_TERM), [ti], text)
 
+    def test_invisible_plus_separator_anchor_is_unanchored(self):
+        # rv3/G: anchors whose guard-tight form is only separators
+        for anchors in (["\u2060-"], ["\u200b_"], ["-\u200d"], ["\ufeff-"], ["\u2060 - "],
+                        ["\u2060-", ANCHOR], ["\u00ad."]):
+            r = scan.load_roster(self._roster({"d": {"context": ["zqxvterm"],
+                                                     "context_requires_any": anchors}}))
+            self.assertEqual(r.hits("zqxvterm - x"), [r.terms.index("zqxvterm")], anchors)
+
+    def test_ascii_deleted_re_matches_guard_table(self):
+        table = {c for c in scan._T_GUARD_TIGHT if c < 128}
+        regex = {c for c in range(128) if scan._ASCII_DELETED_RE.match(chr(c))}
+        self.assertEqual(regex, table)
+        self.assertEqual(table, set(range(0, 9)) | set(range(0x0E, 0x1C)) | {0x7F})
+
+    def test_every_git_call_goes_through_one_helper(self):
+        with open(SCAN, encoding="utf-8") as f:
+            src = f.read()
+        self.assertEqual(src.count('["git"'), 1, "only GIT_BASE may spell the git command")
+        self.assertNotIn("subprocess.run([", src)
+        self.assertNotIn("subprocess.Popen([", src)
+        self.assertEqual(scan.GIT_BASE[:2], ["git", "--no-replace-objects"])
+        old = os.environ.get("GIT_REPLACE_REF_BASE")
+        os.environ["GIT_REPLACE_REF_BASE"] = "refs/heads/"
+        try:
+            env = scan._git_env()
+        finally:
+            if old is None:
+                os.environ.pop("GIT_REPLACE_REF_BASE")
+            else:
+                os.environ["GIT_REPLACE_REF_BASE"] = old
+        self.assertEqual(env.get("GIT_NO_REPLACE_OBJECTS"), "1")
+        self.assertNotIn("GIT_REPLACE_REF_BASE", env)
+
     def test_separator_only_anchor_is_unanchored(self):
         # C2: an anchor of separators only has no match form: the group must not go dead.
         for anchors in (["-"], ["_"], ["."], ["-_."], [" - "], ["-", ANCHOR], [ANCHOR, "_"]):
@@ -688,10 +828,10 @@ class Units(unittest.TestCase):
 
     def test_rev_range(self):
         z, a, b = "0" * 40, "a" * 40, "b" * 40
-        self.assertEqual(scan.rev_range(a, b, "refs/remotes/origin/main"), "%s..%s" % (b, a))
-        self.assertEqual(scan.rev_range(a, z, "refs/remotes/origin/main"),
-                         "refs/remotes/origin/main..%s" % a)
-        self.assertIsNone(scan.rev_range(a, z, None))
+        self.assertEqual(scan.rev_range(a, b, "origin"), [a, "^" + b])
+        self.assertEqual(scan.rev_range(a, b, None), [a, "^" + b])
+        self.assertEqual(scan.rev_range(a, z, "origin"), [a, "--not", "--remotes=origin"])
+        self.assertEqual(scan.rev_range(a, z, None), [a])  # bare URL / no tracking refs
 
     def test_require_refs_env_blocks_empty_stdin(self):
         p = self._roster(ROSTER)
