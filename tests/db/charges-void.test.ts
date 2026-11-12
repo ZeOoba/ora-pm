@@ -40,7 +40,7 @@ type Db = ReturnType<typeof freshMigratedDb>
 
 function seedLease(db: Db) {
   db.none(`
-    INSERT INTO properties (id, name, address, city, state) VALUES ('${PROP}', '9050 Red Branch', '9050 Red Branch Rd', 'Columbia', 'MD');
+    INSERT INTO properties (id, name, address, city, state) VALUES ('${PROP}', '100 Example', '100 Example Rd', 'Columbia', 'MD');
     INSERT INTO units (id, property_id, suite, sf) VALUES ('${UNIT}', '${PROP}', 'A1', 1000);
     INSERT INTO tenants (id, name) VALUES ('${TENANT}', 'Acme Co');
     INSERT INTO leases (id, tenant_id, unit_id, start_date, end_date, base_rent_monthly)

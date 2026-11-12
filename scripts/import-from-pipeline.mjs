@@ -8,6 +8,7 @@
 // Usage:
 //   node scripts/import-from-pipeline.mjs --file <TENANTS.json> --property "<label>" [--dry-run] [--no-balances]
 //   node scripts/import-from-pipeline.mjs --file <TENANTS.json> --all [--dry-run] [--no-balances]
+//   [--properties <roster.json>]  (default scripts/pipeline-properties.local.json, gitignored)
 //
 // Reads SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY from .env (service role bypasses RLS).
 
@@ -15,6 +16,7 @@ import { createClient } from '@supabase/supabase-js'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+import { DEFAULT_PROPERTIES_PATH, PropertyConfigError, loadPropertyConfig } from './pipeline-properties.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(__dirname, '..')
@@ -34,41 +36,25 @@ const DRY_RUN = args.includes('--dry-run')
 const WITH_BALANCES = !args.includes('--no-balances')
 
 if (!FILE || (!ALL && (!PROPERTY_LABEL || PROPERTY_LABEL === true))) {
-  console.error('Usage: import-from-pipeline.mjs --file <TENANTS.json> (--property "<label>" | --all) [--dry-run] [--no-balances]')
+  console.error('Usage: import-from-pipeline.mjs --file <TENANTS.json> (--property "<label>" | --all) [--dry-run] [--no-balances] [--properties <roster.json>]')
   process.exit(2)
 }
 
-// ── property metadata ─────────────────────────────────────────────────────────
-// Keyed by the pipeline `p` label. Street from pipeline config/property_map.json;
-// city/state from the firm's Master workbook (Command Center snapshot, authoritative).
-// ZIP intentionally null unless independently confirmed (firm SoR does not track ZIP).
-// entity_llc null pending confirmation (real ownership entities are messy in source).
-const PROPERTY_META = {
-  '2000 Zettler':   { name: '2000 Zettler Rd',          address: '2000 Zettler Rd',          city: 'Columbus',     state: 'OH', zip: null,    property_type: 'industrial', entity_llc: null },
-  '2012 Zettler':   { name: '2012 Zettler Rd',          address: '2012 Zettler Rd',          city: 'Columbus',     state: 'OH', zip: null,    property_type: 'industrial', entity_llc: null },
-  '3540 E 5th':     { name: '3540 E 5th Ave',           address: '3540 E 5th Ave',           city: 'Columbus',     state: 'OH', zip: null,    property_type: 'industrial', entity_llc: null },
-  '401 Sunburst':   { name: '401 Sunburst Hwy',         address: '401 Sunburst Hwy',         city: 'Cambridge',    state: 'MD', zip: null,    property_type: 'industrial', entity_llc: null },
-  '55 New Plant':   { name: '55 New Plant Ct',          address: '55 New Plant Ct',          city: 'Owings Mills', state: 'MD', zip: null,    property_type: 'industrial', entity_llc: null },
-  'Banwick':        { name: '2800 Banwick Rd',          address: '2800 Banwick Rd',          city: 'Columbus',     state: 'OH', zip: null,    property_type: 'industrial', entity_llc: null },
-  'Broadway':       { name: '1900 N Broadway',          address: '1900 N Broadway',          city: 'Baltimore',    state: 'MD', zip: null,    property_type: 'industrial', entity_llc: null },
-  'E 5th Ave':      { name: '4595 E 5th Ave',           address: '4595 E 5th Ave',           city: 'Columbus',     state: 'OH', zip: null,    property_type: 'industrial', entity_llc: null },
-  'E Livingston':   { name: '3875 E Livingston Ave',    address: '3875 E Livingston Ave',    city: 'Columbus',     state: 'OH', zip: null,    property_type: 'industrial', entity_llc: null },
-  'Fishel Dr':      { name: '7658 Fishel Dr N',         address: '7658 Fishel Dr N',         city: 'Dublin',       state: 'OH', zip: null,    property_type: 'industrial', entity_llc: null },
-  'Hwy 350':        { name: '9620 E State Route 350',   address: '9620 E State Route 350',   city: 'Raytown',      state: 'MO', zip: null,    property_type: 'industrial', entity_llc: null },
-  'Info Lane':      { name: '29000 Information Lane',    address: '29000 Information Lane',    city: 'Easton',       state: 'MD', zip: null,    property_type: 'industrial', entity_llc: null },
-  'Morrison':       { name: '384 Old Morrison Rd',      address: '384 Old Morrison Rd',      city: 'Columbus',     state: 'OH', zip: null,    property_type: 'industrial', entity_llc: null },
-  'Northwood':      { name: '2203-2207 Northwood Dr',   address: '2203-2207 Northwood Dr',   city: 'Salisbury',    state: 'MD', zip: null,    property_type: 'industrial', entity_llc: null },
-  'Rarig':          { name: '1100 Rarig Ave',           address: '1100 Rarig Ave',           city: 'Columbus',     state: 'OH', zip: null,    property_type: 'industrial', entity_llc: null },
-  'Red Branch':     { name: '9050 Red Branch Road',     address: '9050 Red Branch Rd',       city: 'Columbia',     state: 'MD', zip: '21045', property_type: 'industrial', entity_llc: null },
-  'Westerville':    { name: '3034 Westerville Rd',      address: '3034 Westerville Rd',      city: 'Columbus',     state: 'OH', zip: null,    property_type: 'industrial', entity_llc: null },
+// ── property roster ───────────────────────────────────────────────────────────
+// The roster (pipeline label -> properties-table columns) and the pipeline labels that must
+// never be imported live in a gitignored local file, never in this public repo: see
+// scripts/pipeline-properties.mjs and the synthetic scripts/pipeline-properties.example.json.
+// Missing, malformed or example roster => exit 2 before anything else is read.
+let PROPERTY_META, EXCLUDE
+try {
+  const propsPath = arg('--properties', DEFAULT_PROPERTIES_PATH)
+  if (typeof propsPath !== 'string') throw new PropertyConfigError('--properties needs a path')
+  ;({ PROPERTY_META, EXCLUDE } = loadPropertyConfig(propsPath))
+} catch (e) {
+  if (!(e instanceof PropertyConfigError)) throw e
+  console.error(e.message)
+  process.exit(2)
 }
-
-// Pipeline labels that appear in the rent roll but are NOT owned/managed properties
-// and must never be imported as such:
-//   - "5600 Sunnyside": SOLD via seller financing; it is a LOAN (note receivable) to
-//     Restoration Church Trust. The "$16,713/mo" is a loan payment, not rent. Belongs
-//     in a debt/notes module, not the rent roll.
-const EXCLUDE = new Set(['5600 Sunnyside'])
 
 // ── load .env ─────────────────────────────────────────────────────────────────
 function loadEnv() {
@@ -172,7 +158,7 @@ function labelsToRun() {
     return known.sort()
   }
   if (EXCLUDE.has(PROPERTY_LABEL)) {
-    console.error(`"${PROPERTY_LABEL}" is excluded (not a managed property — see EXCLUDE in this script).`)
+    console.error(`"${PROPERTY_LABEL}" is excluded (not a managed property): ${EXCLUDE.get(PROPERTY_LABEL)}`)
     process.exit(1)
   }
   return [PROPERTY_LABEL]

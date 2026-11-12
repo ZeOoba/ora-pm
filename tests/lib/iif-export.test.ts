@@ -31,7 +31,7 @@ describe('generateIIF', () => {
 describe('buildPropertyJournalEntry', () => {
   it('builds a balanced journal entry (debits = credits)', () => {
     const summary = {
-      propertyName: '9050 Red Branch',
+      propertyName: '100 Example',
       entityLLC: 'ORA LLC',
       periodStart: new Date('2026-06-01'),
       periodEnd: new Date('2026-06-30'),

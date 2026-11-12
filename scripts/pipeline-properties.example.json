@@ -1,0 +1,11 @@
+{
+  "_example": true,
+  "_comment": "Synthetic values only. Copy to scripts/pipeline-properties.local.json (gitignored) and replace with the real roster. Keys under properties are the pipeline `p` labels; each value is exactly the properties-table columns the importer writes. exclude lists pipeline labels that are not managed properties (sold, notes receivable, etc.) with the reason.",
+  "properties": {
+    "Example A": { "name": "100 Example Rd", "address": "100 Example Rd", "city": "Exampleville", "state": "OH", "zip": null, "property_type": "industrial", "entity_llc": null },
+    "Example B": { "name": "200 Sample Ave", "address": "200 Sample Ave", "city": "Sampletown", "state": "MD", "zip": "00000", "property_type": "industrial", "entity_llc": null }
+  },
+  "exclude": {
+    "Example Sold": "Sold; carried as a note receivable, not a managed property. Belongs in a debt/notes module, not the rent roll."
+  }
+}

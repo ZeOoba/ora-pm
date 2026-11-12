@@ -13,7 +13,7 @@ describe('bucketByAge', () => {
 })
 
 describe('buildAgingRow', () => {
-  const lease = { lease_id: 'l1', tenant_name: 'Acme', property_name: '9050 Red Branch', suite: 'A1' }
+  const lease = { lease_id: 'l1', tenant_name: 'Acme', property_name: '100 Example', suite: 'A1' }
   const today = new Date('2026-06-15')
 
   it('places unpaid charge in correct bucket', () => {
