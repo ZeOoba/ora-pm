@@ -467,6 +467,33 @@ class ContextAndEncoding(unittest.TestCase):
         self.sb.commit("memo.docx", self._docx(CTX_TERM), msg="add memo")
         self.assertAllowed(*self.sb.push())
 
+    # --- REFUTE round 2 on 30d2a246 ----------------------------------------------------
+    def test_log_config_cannot_misattribute_blobs_between_commits(self):
+        # C1/C8: with log.showSignature=true a signature line precedes a commit's marker; the
+        # older (signed) commit's blob must not be credited to the newer commit.
+        w = self.sb.work
+        signed = False
+        keygen = shutil.which("ssh-keygen")
+        if keygen:
+            key = os.path.join(self.sb.root, "sk")
+            k = subprocess.run([keygen, "-q", "-t", "ed25519", "-N", "", "-f", key],
+                               capture_output=True)
+            if k.returncode == 0:
+                self.sb.git(w, "config", "gpg.format", "ssh")
+                self.sb.git(w, "config", "user.signingkey", key.replace("\\", "/"))
+                signed = True
+        with open(os.path.join(w, "f.gz"), "wb") as f:
+            f.write(gzip.compress(CTX_TERM.encode()))
+        self.sb.git(w, "add", "f.gz")
+        self.sb.git(w, "commit", "-q", "--no-verify", *(["-S"] if signed else []),
+                    "-m", "%s signed older" % ANCHOR)
+        self.sb.commit("b.txt", "x\n", msg="unsigned newer")
+        for k, v in (("log.showSignature", "true"), ("color.ui", "always"),
+                     ("diff.relative", "true"), ("log.decorate", "full"),
+                     ("format.pretty", "oneline")):
+            self.sb.git(w, "config", k, v)
+        self.assertBlocked(*self.sb.push())
+
     def test_zero_width_anchor_still_gates_on_its_visible_spelling(self):
         self.sb.write_roster({"deal_ctx": {"active": True, "always": [], "context": [CTX_TERM],
                                            "context_requires_any": ["projectcode" + ZWSP + "q7"]}})
@@ -571,6 +598,52 @@ class Units(unittest.TestCase):
         ti = r.terms.index(CTX_TERM)
         for text in ("brule yard %s", "Br\u00fbl\u00e9 Yard %s", "Bru\u0302le\u0301 yard %s"):
             self.assertEqual(r.hits(text % CTX_TERM), [ti], text)
+
+    def test_separator_only_anchor_is_unanchored(self):
+        # C2: an anchor of separators only has no match form: the group must not go dead.
+        for anchors in (["-"], ["_"], ["."], ["-_."], [" - "], ["-", ANCHOR], [ANCHOR, "_"]):
+            r = scan.load_roster(self._roster({"d": {"context": ["zqxvterm"],
+                                                     "context_requires_any": anchors}}))
+            self.assertTrue(r.can_block())
+            self.assertEqual(r.hits("zqxvterm - x"), [r.terms.index("zqxvterm")], anchors)
+
+    def test_invisible_or_combining_char_inside_anchor_in_text(self):
+        # C2 text side: the guard tightens the TEXT too, so these anchors are present.
+        r = scan.load_roster(self._roster(CTX_ROSTER))
+        ti = r.terms.index(CTX_TERM)
+        for text in ("projectcode\u2060q7: %s", "projectcod\u0301eq7: %s",
+                     "project" + ZWSP + "codeq7 &amp; %s", "PROJECTCODE\u00adQ7 %s"):
+            self.assertEqual(r.hits(text % CTX_TERM), [ti], repr(text))
+        self.assertEqual(r.hits("projectcode q7: %s" % CTX_TERM), [])
+        self.assertEqual(r.hits("projectcode\u2060q7 only"), [])
+
+    def test_unrecognised_raw_log_field_blocks(self):
+        mk = "ORA-PREPUSH-x"
+        good = mk + "a" * 40 + "\0\n:100644 100644 " + "1" * 40 + " " + "2" * 40 + " M\0p\0"
+        self.assertEqual(scan.parse_raw_log(good.encode(), mk), [("a" * 40, "p", "2" * 40)])
+        for junk in ("No signature\n" + mk + "b" * 40, "\x1b[33m" + mk + "b" * 40, "gpg: x"):
+            with self.assertRaises(scan.Unscannable, msg=repr(junk)):
+                scan.parse_raw_log((good + junk + "\0").encode(), mk)
+        self.assertEqual(scan.parse_raw_log((good + "\n\0").encode(), mk),
+                         [("a" * 40, "p", "2" * 40)])
+
+    def test_git_base_pins_log_output_config(self):
+        pinned = " ".join(scan.GIT_BASE)
+        for kv in ("log.showSignature=false", "color.ui=false", "diff.relative=false"):
+            self.assertIn(kv, pinned)
+
+    def test_guard_tables_match_live_guard_when_present(self):
+        import re
+        guard = os.path.join(os.path.expanduser("~"), ".claude", "hooks",
+                             "confidentiality-guard.py")
+        if not os.path.isfile(guard):
+            return  # CI / other machines: the pinned hash below still guards the copy
+        with open(guard, encoding="utf-8") as f:
+            src = f.read()
+        for name in ("_TABLE_MN", "_TABLE_FMT"):
+            m = re.search(r'^%s = "([^"]*)"' % name, src, re.M)
+            self.assertIsNotNone(m, name)
+            self.assertEqual(m.group(1), getattr(scan, name), "%s drifted from the guard" % name)
 
     def test_guard_tables_are_pinned(self):
         import hashlib

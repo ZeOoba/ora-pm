@@ -25,15 +25,16 @@ What is scanned, per pushed ref:
   * the pushed ref names, and every annotated tag object in a pushed tag's chain.
 Every text is also read URL-decoded (`unquote_plus` and plain `unquote`, so `%20`, `+` and
 `%51uiet` decode), repeated to a fixpoint bounded at 4 rounds, which unwraps up to four
-levels of encoding (`%20`, `%2520`, `%252520`, `%25252520`); deeper nesting is a residual. URL-decoding runs on the
-raw and the entity-decoded text (tag-stripped readings are not URL-decoded), so an encoded
-term inside an `href` attribute is read too. Plain `unquote` (which keeps a literal `+`) is
-only run when some roster string contains `+`; otherwise it can find nothing `unquote_plus`
-does not. Cost, versus the scan before URL-decoding existed (4 MB texts): dense in `+`,
-`%`, `&` and `<` (`a+b%2Bc%252Bd...&amp;amp;<i>x</i>`) about 3.3x, rising to about 10x
-when a roster string contains `+` (plain unquote then runs too; the refute pass measured
-11.6x, 0.85 s -> 9.9 s, before this gate existed); %-only text about 6x. Clean text with
-no `%` or `+` costs nothing extra.
+levels of encoding (`%20`, `%2520`, `%252520`, `%25252520`); deeper nesting is a residual.
+URL-decoding runs on the raw and the entity-decoded text (tag-stripped readings are not
+URL-decoded), so an encoded term inside an `href` attribute is read too. Plain `unquote`
+(which keeps a literal `+`) is only run when some roster string contains `+`; otherwise it
+can find nothing `unquote_plus` does not.
+Cost versus origin/main, measured best of 3 on 4 MB texts with an anchored roster:
+clean ASCII 1.1x; dense `+ % & <` (`a+b%2Bc%252Bd...&amp;amp;<i>x</i>`) 3.7x, 7.7x when a
+roster string contains `+`; %-only 6.1x; accented non-ASCII text 7.9x (the guard-tight
+anchor reading: NFKD over every non-ASCII window). The earlier refute pass measured 3.4x /
+5.0x / 3.4x on 30d2a246, before the tight anchor reading existed.
 Matching: NFKC + casefold on both sides; any run of whitespace / `_` / `-` / `.` / NBSP
 counts as one separator, and a separator-free form of each MULTI-word term (5+ chars) is
 also matched against the normalized text, so `LOI_<TermNoSpaces>_MMDDYYYY` and line-wrapped
@@ -60,10 +61,13 @@ digits, combining marks (Mn) and the guard's invisible set _TABLE_FMT deleted, w
 collapsed: U+3164, U+2800, U+115F/1160, U+0301, U+FE0F, ZWSP ... all count as blank; a
 blank anchor matches everywhere, as in the guard) -- has its context terms treated as
 `always` terms. That is stricter than the guard for a missing / empty anchor list, which the
-guard reads as "never fires"; fail-closed wins here. Each usable anchor is matched in its
-plain normalized form AND its tight form, so `projectcode<ZWSP>q7` fires on `projectcodeq7`
-and an accented anchor fires with or without the accent, as the guard does (its punctuation
-and non-ASCII digit folds are not mirrored). An anchor alone never blocks.
+guard reads as "never fires"; fail-closed wins here. An anchor made only of separators
+(`-`, `_`, `.`) has no match form and counts as blank too. Each usable anchor is matched in
+its plain normalized form AND its tight form, against the normalized text AND the guard's
+tight form of the raw / entity-decoded text, so `projectcode<ZWSP>q7` in the roster fires on
+`projectcodeq7`, `projectcode<WORD JOINER>q7` or a stray combining mark in the text still
+fires, and an accented anchor fires with or without the accent, as the guard does (its
+punctuation and non-ASCII digit folds are not mirrored). An anchor alone never blocks.
 
 Output never echoes a term: hits are reported as roster indices, and a path or ref name
 that itself contains ANY roster string (always, context or anchor) is withheld.
@@ -89,7 +93,10 @@ Residual (not covered): text inside images, OCR-only scans, raw zlib / lzma-alon
 PNG zTXt chunks, and encodings other than those listed above (URL-encoding nested past 4
 rounds included); a context term and its anchor split across two commits; zero-width
 characters or combining marks inside an always / context term (anchors are tightened, terms
-are not); history already on the remote is not rescanned.
+are not); URL-encoded or tag-split anchors with invisible characters inside (the tight
+reading covers the raw and entity-decoded text only); a term interleaved with markup whose
+total span exceeds the slice overlap AND straddles a 256 KB slice edge; history already on
+the remote is not rescanned.
 
 Exit 0 = allow, 1 = block (git pre-push convention). Bypass for a verified-clean push is a
 human's `git push --no-verify`; there is deliberately no environment-variable bypass.
@@ -137,6 +144,10 @@ _T_SUPERSCRIPT = {c: None for a, b in ((0xB2, 0xB3), (0xB9, 0xB9), (0x2070, 0x20
                   for c in range(a, b + 1)}
 
 
+# The only ASCII characters in the guard's deletion set (_TABLE_FMT: 0-8, e-1b, 7f).
+_ASCII_DELETED_RE = re.compile(r"[\x00-\x08\x0e-\x1b\x7f]")
+
+
 def _guard_tight(t):
     """The guard's tight form (_tight_form): superscript digits deleted, NFKD, lowercase,
     combining marks and the invisible set deleted, whitespace runs collapsed."""
@@ -144,9 +155,14 @@ def _guard_tight(t):
     return " ".join(c.translate(_T_GUARD_TIGHT).split())
 
 # Pin everything that could change what `git log` prints: no external diff, no textconv, no
-# colour, unquoted paths, UTF-8 output regardless of i18n.logOutputEncoding.
+# colour, unquoted paths, UTF-8 output regardless of i18n.logOutputEncoding, no signature
+# lines before a commit (log.showSignature), no diff limited to the cwd (diff.relative).
+# format.pretty / log.decorate / log.abbrevCommit do not reach an explicit --format without
+# %d, and --no-ext-diff / --no-textconv / --no-renames / --no-abbrev are passed per call.
+# Parsers still fail closed on any line they do not recognise.
 GIT_BASE = ["git", "-c", "core.quotepath=off", "-c", "diff.noprefix=false",
-            "-c", "i18n.logOutputEncoding=UTF-8"]
+            "-c", "i18n.logOutputEncoding=UTF-8", "-c", "log.showSignature=false",
+            "-c", "color.ui=false", "-c", "diff.relative=false"]
 
 SEP_RE = re.compile(r"[\s_.\- ­‐-―]+")
 TAG_RE = re.compile(r"<[^<>]{0,4000}>")
@@ -196,7 +212,7 @@ def _url_views(cands, plus_terms):
     return out
 
 
-def _scan_window(text, terms, found, plus_terms):
+def _scan_window(text, terms, found, plus_terms, tight=()):
     cands = [text]
     if "&" in text:
         cands.append(html.unescape(text))
@@ -215,34 +231,49 @@ def _scan_window(text, terms, found, plus_terms):
             if t in n or (" " in t and len(_squash(t)) >= MIN_SQUASHED_LEN
                           and _squash(t) in n):
                 found.add(i)
+    # Anchors (`tight` indices) are also looked for in the guard's tight form of the raw and
+    # entity-decoded text, as find_hit() does: `anchor<WORD JOINER>q7` and an anchor with a
+    # stray combining mark are present. Only anchors: always / context terms are not.
+    todo = [i for i in tight if i not in found]
+    if todo:
+        for c in cands[:2]:
+            if c.isascii() and not _ASCII_DELETED_RE.search(c):
+                continue  # nothing for the tight form to delete: same as the plain reading
+            n = normalize(_guard_tight(c))
+            for i in todo:
+                if terms[i] in n:
+                    found.add(i)
 
 
-def scan_text(text, terms):
+def scan_text(text, terms, tight=()):
     """Sorted indices of (already-normalized) terms present in text -- never the terms.
-    Raw presence only: Roster.blocking() decides which of them block.
+    Raw presence only: Roster.blocking() decides which of them block. `tight`: indices
+    (anchors) also matched against the guard's tight form of the text.
 
     Large texts are scanned in overlapping windows: NFKC on one multi-MB string is
     super-linear (REFUTE round 2, N2: 16 s for 4 MB). The overlap (OVERLAP_FACTOR = 16x the
-    longest term, at least MIN_OVERLAP) exceeds any term plus the URL-encoding (up to 9
-    characters per character after 4 rounds) and markup that could sit inside it, so no
-    match is lost at a window edge. These slices are a performance device, not the
-    context-term window: indices found in every slice of one text are pooled first."""
+    longest term, at least MIN_OVERLAP = 8192 characters) covers a term in up to 4 rounds of
+    URL-encoding (9 characters per character) at a window edge. It does NOT bound markup:
+    TAG_RE strips tags up to 4000 characters each, so a term interleaved with tags whose
+    total span exceeds the overlap, sitting exactly on a slice edge, can be missed
+    (documented residual). These slices are a performance device, not the context-term
+    window: indices found in every slice of one text are pooled first."""
     found = set()
     plus_terms = any("+" in t for t in terms)
     if len(text) <= WINDOW:
-        _scan_window(text, terms, found, plus_terms)
+        _scan_window(text, terms, found, plus_terms, tight)
         return sorted(found)
     overlap = max(MIN_OVERLAP, OVERLAP_FACTOR * max((len(t) for t in terms), default=0))
     step = WINDOW - overlap
     for start in range(0, len(text), step):
-        _scan_window(text[start:start + WINDOW], terms, found, plus_terms)
+        _scan_window(text[start:start + WINDOW], terms, found, plus_terms, tight)
         if len(found) == len(terms) or start + WINDOW >= len(text):
             break
     return sorted(found)
 
 
-def shown(name, terms):
-    return WITHHELD if scan_text(name, terms) else name
+def shown(name, roster):
+    return WITHHELD if roster.scan(name) else name
 
 
 # --------------------------------------------------------------------------- roster
@@ -262,10 +293,16 @@ class Roster:
     uncond  -- indices that block on their own (always terms, plus the context terms of a
                deal with no usable anchor).
     groups  -- [(anchor indices, context indices)]: the context indices block only when one
-               of the anchor indices was found in the same window."""
+               of the anchor indices was found in the same window.
+    tight   -- every anchor index (also matched against the guard's tight form of a text)."""
 
     def __init__(self, terms, uncond, groups):
         self.terms, self.uncond, self.groups = terms, frozenset(uncond), groups
+        self.tight = tuple(sorted({i for anchors, _ctx in groups for i in anchors}))
+
+    def scan(self, text):
+        """Raw indices present in one text (see scan_text)."""
+        return scan_text(text, self.terms, self.tight)
 
     def can_block(self):
         return bool(self.uncond) or any(ctx for _anchors, ctx in self.groups)
@@ -281,7 +318,7 @@ class Roster:
 
     def hits(self, text):
         """Blocking indices in one text treated as one window."""
-        return self.blocking(scan_text(text, self.terms))
+        return self.blocking(self.scan(text))
 
 
 def _blank(t):
@@ -330,7 +367,10 @@ def load_roster(path=None):
         if (raw["always"] or raw["context"]) and not (always or context):
             return None  # declares terms, none usable: cannot know what to look for
         anchors_raw = raw["context_requires_any"]
-        unanchored = not anchors_raw or any(_blank(a) for a in anchors_raw)
+        # An anchor with no match form (blank, or separators only: `-`, `_`, `.`) would
+        # leave a group that can never fire: treat the group as unanchored instead.
+        unanchored = not anchors_raw or any(_blank(a) or not _anchor_forms(a)
+                                            for a in anchors_raw)
         anchors = [] if unanchored else [f for a in anchors_raw for f in _anchor_forms(a)]
         deals.append((always, context, anchors, unanchored))
     terms = sorted({t for a, c, an, _u in deals for t in a + c + an})
@@ -414,11 +454,20 @@ def range_blobs(rng, cwd=None):
     blob is listed once per commit that introduces it. RAISES Unscannable."""
     marker = "ORA-PREPUSH-" + os.urandom(16).hex()
     p = subprocess.run(GIT_BASE + ["log", "--raw", "--cc", "--root", "-z", "--no-abbrev",
-                                   "--no-renames", "--format=" + marker + "%H", rng],
+                                   "--no-renames", "--no-color", "--format=" + marker + "%H",
+                                   rng],
                        capture_output=True, cwd=cwd)
     if p.returncode != 0:
         raise Unscannable("`git log --raw` failed for the pushed range")
-    fields = p.stdout.decode("utf-8", "surrogateescape").split("\0")
+    return parse_raw_log(p.stdout, marker)
+
+
+def parse_raw_log(stdout, marker):
+    """Parse `git log --raw -z --format=<marker>%H` output into [(commit, path, blob)].
+    Any non-empty field that is neither a marker nor a raw record RAISES Unscannable: an
+    unexpected line (a signature, colour codes) could otherwise shift blobs onto the wrong
+    commit."""
+    fields = stdout.decode("utf-8", "surrogateescape").split("\0")
     out, seen, commit = [], set(), None
     i = 0
     while i < len(fields):
@@ -430,6 +479,8 @@ def range_blobs(rng, cwd=None):
             i += 1
             continue
         if not meta.startswith(":"):
+            if meta.strip():
+                raise Unscannable("unrecognised `git log --raw` output")
             i += 1
             continue
         if commit is None:
@@ -613,7 +664,6 @@ def scan_blobs(rng, roster, cwd=None):
     hits: [(shown_path, indices)]; unscannable: [reason]; per_commit: {commit sha: raw
     indices of the content and path of every blob that commit introduces}, which the
     caller pools into that commit's window."""
-    terms = roster.terms
     hits, bad, per_commit = [], [], {}
     try:
         paths_by_sha, commits_by_sha = {}, {}
@@ -621,9 +671,9 @@ def scan_blobs(rng, roster, cwd=None):
             if path not in paths_by_sha.setdefault(sha, []):
                 paths_by_sha[sha].append(path)
             commits_by_sha.setdefault(sha, []).append((commit, path))
-            per_commit.setdefault(commit, set()).update(scan_text(path, terms))
+            per_commit.setdefault(commit, set()).update(roster.scan(path))
         for sha, _typ, blob in iter_objects(sorted(paths_by_sha), cwd):
-            path = shown(paths_by_sha[sha][0], terms)
+            path = shown(paths_by_sha[sha][0], roster)
             try:
                 texts = expand(blob, [MAX_DECOMPRESSED_BYTES])
             except Unscannable as e:
@@ -631,11 +681,11 @@ def scan_blobs(rng, roster, cwd=None):
                 continue
             found = set()
             for text in texts:
-                found.update(scan_text(text, terms))
+                found.update(roster.scan(text))
             for commit, _p in commits_by_sha[sha]:
                 per_commit[commit].update(found)
             for p in paths_by_sha[sha]:
-                found.update(scan_text(p, terms))
+                found.update(roster.scan(p))
             blocking = roster.blocking(found)
             if blocking:
                 hits.append((path, blocking))
@@ -644,7 +694,7 @@ def scan_blobs(rng, roster, cwd=None):
     return hits, bad, per_commit
 
 
-def commit_object_found(rng, terms, cwd=None):
+def commit_object_found(rng, roster, cwd=None):
     """{commit sha: raw indices} found in the raw commit objects of rng: message, author /
     committer, mergetag and encoding headers -- a legacy-encoded message is read through
     every view. RAISES Unscannable."""
@@ -652,11 +702,11 @@ def commit_object_found(rng, terms, cwd=None):
     for sha, _typ, data in iter_objects(range_commits(rng, cwd), cwd):
         found = out.setdefault(sha, set())
         for text in text_views(data):
-            found.update(scan_text(text, terms))
+            found.update(roster.scan(text))
     return out
 
 
-def patch_found(rng, terms, cwd=None):
+def patch_found(rng, roster, cwd=None):
     """{commit sha: raw indices} found in each commit's own `git log -p --cc` output (its
     re-encoded message and its patch). Commits are split on a per-run random marker that no
     pushed content can forge. RAISES Unscannable."""
@@ -676,7 +726,7 @@ def patch_found(rng, terms, cwd=None):
         sha = chunk[:64].split("\n", 1)[0].strip()
         if not _is_sha(sha):
             raise Unscannable("unparseable `git log -p` output")
-        out.setdefault(sha, set()).update(scan_text(chunk, terms))
+        out.setdefault(sha, set()).update(roster.scan(chunk))
     return out
 
 
@@ -692,7 +742,7 @@ def tag_chain_hits(local_sha, roster, cwd=None):
             return sorted(found)
         one = set()
         for text in text_views(data):
-            one.update(scan_text(text, roster.terms))
+            one.update(roster.scan(text))
         found.update(roster.blocking(one))
         first = data.split(b"\n", 1)[0].decode("ascii", "replace").split()
         if len(first) != 2 or first[0] != "object" or not _is_sha(first[1]):
@@ -704,9 +754,8 @@ def tag_chain_hits(local_sha, roster, cwd=None):
 # --------------------------------------------------------------------------- main
 def scan_ref(local_ref, local_sha, remote_ref, remote_sha, roster, baseline, cwd=None):
     """List of block messages for one pushed ref (empty = clean)."""
-    terms = roster.terms
     msgs = []
-    label = shown(local_ref, terms)
+    label = shown(local_ref, roster)
     name_hits = sorted(set(roster.hits(local_ref) + roster.hits(remote_ref)))
     if name_hits:
         msgs.append("a pushed ref NAME contains confidential term(s) (indices %s)." % name_hits)
@@ -726,12 +775,12 @@ def scan_ref(local_ref, local_sha, remote_ref, remote_sha, roster, baseline, cwd
     # One commit = one window: its raw object (every view), its own patch, and the content
     # and path of every blob it introduces (scan_blobs) -- see "Context terms" above.
     try:
-        per_commit = patch_found(rng, terms, cwd)
+        per_commit = patch_found(rng, roster, cwd)
     except Unscannable as e:
         msgs.append("(fail-closed) %s for %s." % (e, label))
         return msgs
     try:
-        for sha, found in commit_object_found(rng, terms, cwd).items():
+        for sha, found in commit_object_found(rng, roster, cwd).items():
             per_commit.setdefault(sha, set()).update(found)
     except Unscannable as e:
         msgs.append("(fail-closed) commit objects for %s could not be read: %s" % (label, e))
