@@ -31,6 +31,9 @@ INSTALLER = os.path.join(HERE, "install_prepush_hook.py")        # default-.git/
 TERM = "Zyxwv Quillborne"          # invented
 TERM2 = "Vrenk Oltaz Parcel"       # invented
 INACTIVE = "Plorbix Glimmerfen"    # invented, belongs to a closed deal
+CTX_TERM = "quiet marsh park"      # invented context term
+ANCHOR = "projectcodeq7"           # invented context_requires_any anchor (NOT an always term)
+ZWSP = "\u200b"
 
 spec = importlib.util.spec_from_file_location("prepush_confidential_scan", SCAN)
 scan = importlib.util.module_from_spec(spec)
@@ -134,8 +137,10 @@ class PushGate(unittest.TestCase):
     def assertBlocked(self, rc, err):
         self.assertNotEqual(rc, 0, "push should have been blocked:\n" + err)
         self.assertIn("pre-push BLOCKED", err)
-        for t in (TERM, TERM2):
-            self.assertNotIn(t.lower(), err.lower(), "a roster term was echoed")
+        low = err.lower()
+        for t in (TERM, TERM2, CTX_TERM, ANCHOR):
+            self.assertNotIn(t.lower(), low, "a roster term was echoed")
+            self.assertNotIn(t.lower().replace(" ", ""), low, "a roster term was echoed")
 
     def assertAllowed(self, rc, err):
         self.assertEqual(rc, 0, "push should have been allowed:\n" + err)
@@ -337,6 +342,101 @@ class PushGate(unittest.TestCase):
         self.assertAllowed(*self.sb.push())
 
 
+CTX_ROSTER = {
+    "_meta": {"note": "synthetic context-only roster"},
+    "deal_ctx": {"active": True, "always": [], "context": [CTX_TERM],
+                 "context_requires_any": [ANCHOR]},
+}
+
+
+class ContextAndEncoding(unittest.TestCase):
+    """Context terms (context / context_requires_any) and URL-encoded terms (2026-11-12)."""
+
+    assertBlocked = PushGate.assertBlocked
+    assertAllowed = PushGate.assertAllowed
+
+    def setUp(self):
+        self.sb = Sandbox(CTX_ROSTER)
+
+    def tearDown(self):
+        self.sb.close()
+
+    def _each_blocked(self, cases):
+        for name, body in cases:
+            self.sb.commit(name, body)
+            self.assertBlocked(*self.sb.push())
+            self.sb.git(self.sb.work, "reset", "-q", "--hard", "HEAD~1")
+
+    # --- context terms -------------------------------------------------------------------
+    def test_context_term_without_anchor_is_allowed(self):
+        self.sb.commit("notes.md", "walk to %s on saturday\n" % CTX_TERM)
+        self.assertAllowed(*self.sb.push())
+
+    def test_anchor_alone_is_allowed(self):
+        self.sb.commit("notes.md", "ref %s only\n" % ANCHOR)
+        self.assertAllowed(*self.sb.push())
+
+    def test_context_only_deal_with_anchor_in_same_file_is_blocked(self):
+        self.sb.commit("notes.md", "%s update: %s\n" % (ANCHOR, CTX_TERM.title()))
+        self.assertBlocked(*self.sb.push())
+
+    def test_anchor_in_commit_message_and_term_in_same_commit_diff_is_blocked(self):
+        self.sb.commit("notes.md", "site visit at %s\n" % CTX_TERM, msg="%s notes" % ANCHOR)
+        self.assertBlocked(*self.sb.push())
+
+    def test_anchor_and_term_in_one_docx_are_one_window(self):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("word/header1.xml", "<w:t>%s</w:t>" % ANCHOR)
+            z.writestr("word/document.xml", "<w:t>%s</w:t>" % CTX_TERM)
+        self.sb.commit("memo.docx", buf.getvalue())
+        self.assertBlocked(*self.sb.push())
+
+    def test_anchor_and_term_in_different_commits_and_files_are_separate_windows(self):
+        # Documented window: one commit (raw object + its patch) or one blob (all views).
+        self.sb.commit("a.md", "ref %s\n" % ANCHOR)
+        self.sb.commit("b.md", "walk to %s\n" % CTX_TERM)
+        self.assertAllowed(*self.sb.push())
+
+    def test_context_term_with_no_usable_anchor_is_always_level(self):
+        for anchors in (None, [], [""], ["   "], [ZWSP], ["", ANCHOR], [ZWSP, ANCHOR]):
+            deal = {"active": True, "always": [], "context": [CTX_TERM]}
+            if anchors is not None:
+                deal["context_requires_any"] = anchors
+            self.sb.write_roster({"deal_ctx": deal})
+            self.sb.commit("notes.md", "walk to %s\n" % CTX_TERM)
+            self.assertBlocked(*self.sb.push())
+            self.sb.git(self.sb.work, "reset", "-q", "--hard", "HEAD~1")
+
+    def test_malformed_context_blocks_clean_push(self):
+        for bad in ({"context": "not-a-list", "context_requires_any": [ANCHOR]},
+                    {"context": [CTX_TERM, 7], "context_requires_any": [ANCHOR]},
+                    {"context": [CTX_TERM], "context_requires_any": "not-a-list"},
+                    {"context": [CTX_TERM], "context_requires_any": [ANCHOR, None]},
+                    {"context": None, "context_requires_any": [ANCHOR]}):
+            self.sb.write_roster({"deal_ctx": dict(bad, active=True, always=[])})
+            self.sb.commit("notes.md", "nothing confidential here\n")
+            self.assertBlocked(*self.sb.push())
+            self.sb.git(self.sb.work, "reset", "-q", "--hard", "HEAD~1")
+
+    # --- URL-encoded terms ---------------------------------------------------------------
+    def test_url_encoded_term_is_blocked(self):
+        self.sb.write_roster({"deal_u": {"active": True, "always": [CTX_TERM]}})
+        self._each_blocked((
+            ("pct.md", "see /search?q=Quiet%20Marsh%20Park\n"),
+            ("plus.md", "see /search?q=Quiet+Marsh+Park&x=1\n"),
+            ("hexletter.md", "see /x/%51uiet%20%4Darsh%20Park\n"),
+            ("double.md", "see /x?u=Quiet%2520Marsh%2520Park\n"),
+            ("triple.md", "see /x?u=Quiet%252520Marsh%252520Park\n"),
+            ("href.html", '<a href="/q?t=quiet%20marsh%20park">listing</a>\n'),
+            ("entity.html", "<p>quiet&#37;20marsh&#37;20park</p>\n"),
+        ))
+
+    def test_url_encoded_context_term_with_anchor_is_blocked(self):
+        self.sb.commit("notes.md", "%s: /q?t=Quiet+Marsh+Park\n" % ANCHOR)
+        self.assertBlocked(*self.sb.push())
+
+
 GZIP_TRUNCATED = gzip.compress(b"x" * 5000)[:-12]
 
 
@@ -361,6 +461,62 @@ class Units(unittest.TestCase):
                          ["abc"])  # missing `active` counts as active
         self.assertEqual(scan.load_terms(self._roster(ROSTER)),
                          sorted([TERM.lower(), TERM2.lower()]))
+
+    def test_load_terms_context_shapes(self):
+        ok = {"d": {"always": [], "context": [CTX_TERM], "context_requires_any": [ANCHOR]}}
+        self.assertEqual(scan.load_terms(self._roster(ok)), sorted([CTX_TERM, ANCHOR]))
+        for bad in ({"context": "x"}, {"context": [1]}, {"context": None},
+                    {"context": [CTX_TERM], "context_requires_any": "x"},
+                    {"context": [CTX_TERM], "context_requires_any": [None]},
+                    {"context": [CTX_TERM], "context_requires_any": [["x"]]},
+                    {"context_requires_any": [ANCHOR, 3]}):
+            self.assertIsNone(scan.load_terms(self._roster({"d": dict(bad, always=[])})), bad)
+            self.assertIsNone(scan.load_roster(self._roster({"d": dict(bad, always=[])})), bad)
+        # a metadata-looking key that carries context terms is a deal, not metadata
+        self.assertEqual(scan.load_terms(self._roster({"_d": {"context": ["Abcde"]}})), ["abcde"])
+        # declared terms that are all blank: cannot know what to look for -> fail closed
+        self.assertIsNone(scan.load_roster(self._roster({"d": {"context": ["  "]}})))
+        self.assertIsNone(scan.load_roster(self._roster({"d": {"always": [""]}})))
+        # an inactive deal's context terms are ignored
+        r = scan.load_roster(self._roster({"d": {"active": False, "context": [CTX_TERM]}}))
+        self.assertFalse(r.can_block())
+
+    def test_context_resolution(self):
+        r = scan.load_roster(self._roster(CTX_ROSTER))
+        self.assertTrue(r.can_block(), "a context-only deal must never take the fast path")
+        ti, ai = r.terms.index(CTX_TERM), r.terms.index(ANCHOR)
+        self.assertEqual(r.blocking([ti]), [])
+        self.assertEqual(r.blocking([ai]), [])
+        self.assertEqual(r.blocking([ti, ai]), [ti])
+        self.assertEqual(r.hits("%s .. %s" % (ANCHOR.upper(), CTX_TERM)), [ti])
+        self.assertEqual(r.hits(CTX_TERM), [])
+        for anchors in (None, [], [""], [" \t"], [ZWSP], ["", ANCHOR]):
+            deal = {"context": [CTX_TERM]}
+            if anchors is not None:
+                deal["context_requires_any"] = anchors
+            r = scan.load_roster(self._roster({"d": deal}))
+            self.assertEqual(r.hits("at %s today" % CTX_TERM), [r.terms.index(CTX_TERM)], anchors)
+
+    def test_context_only_roster_scans_instead_of_fast_path(self):
+        repo = tempfile.mkdtemp()
+        self.addCleanup(_rmtree, repo)
+        subprocess.run(["git", "init", "-q", repo], check=True, capture_output=True)
+        line = "refs/heads/main %s refs/heads/main %s\n" % ("a" * 40, "b" * 40)
+        # unknown shas: a real scan fails closed; the old fast path returned 0 unscanned
+        self.assertEqual(scan.main(stdin_text=line, roster=self._roster(CTX_ROSTER), cwd=repo), 1)
+        self.assertEqual(scan.main(stdin_text=line, roster=self._roster(
+            {"d": {"active": False, "context": [CTX_TERM]}}), cwd=repo), 0)
+
+    def test_url_encoded_forms_match(self):
+        t = [CTX_TERM]
+        for text in ("Quiet%20Marsh%20Park", "Quiet+Marsh+Park", "%51uiet%20Marsh%20Park",
+                     "Quiet%2520Marsh%2520Park", "Quiet%252520Marsh%252520Park",
+                     "quiet%2Bmarsh%2Bpark", "Q%75iet%5FMarsh%2DPark"):
+            self.assertEqual(scan.scan_text(text, t), [0], text)
+        # decoding must not create cross-word matches for a one-word term
+        self.assertEqual(scan.scan_text("east+on east%20on", ["easton"]), [])
+        # a term that itself contains '+' still matches its literal spelling
+        self.assertEqual(scan.scan_text("re: C+D Yard", ["c+d yard"]), [0])
 
     def test_scan_text_reports_indices_only(self):
         self.assertEqual(scan.scan_text("..ZYXWV QUILLBORNE..", ["vrenk", "zyxwv quillborne"]), [1])

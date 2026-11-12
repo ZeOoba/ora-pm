@@ -3,8 +3,10 @@
 
 This repo is PUBLIC (Gabriel ruling 2026-11-09), so it is an external surface: no active
 confidential deal may reach it before closing. This gate scans everything a push would make
-new on the remote and BLOCKS if any active `always` term from the machine-local roster
-(~/.claude/hooks/confidential-terms.json, never committed anywhere) appears in it.
+new on the remote and BLOCKS if any active deal's term from the machine-local roster
+(~/.claude/hooks/confidential-terms.json, never committed anywhere) appears in it: an
+`always` term anywhere, or a `context` term together with one of that deal's
+`context_requires_any` anchors in the same window (see "Context terms" below).
 
 Ported from ~/.claude/hooks/git-prepush-confidential-scan.py (the ora-claude-config gate,
 which has carried this design since 2026-06-11), terms-only: that gate's credential scan
@@ -21,6 +23,11 @@ What is scanned, per pushed ref:
     matches); gzip / bz2 / xz / zip / tar decompressed in memory, nested to a small depth
     (docx / xlsx are zips);
   * the pushed ref names, and every annotated tag object in a pushed tag's chain.
+Every text is also read URL-decoded (`unquote_plus` and plain `unquote`, so `%20`, `+` and
+`%51uiet` decode), repeated to a fixpoint bounded at 4 rounds, which unwraps double- and
+triple-encoding (`%2520`, `%252520`); deeper nesting is a residual. URL-decoding runs on the
+raw and the entity-decoded text (tag-stripped readings are not URL-decoded), so an encoded
+term inside an `href` attribute is read too.
 Matching: NFKC + casefold on both sides; any run of whitespace / `_` / `-` / `.` / NBSP
 counts as one separator, and a separator-free form of each MULTI-word term (5+ chars) is
 also matched against the normalized text, so `LOI_<TermNoSpaces>_MMDDYYYY` and line-wrapped
@@ -29,11 +36,27 @@ Range: an existing remote ref scans remote_sha..local_sha. A brand-new remote re
 origin/<default>..local_sha (commits not already on the trunk); an orphan branch is
 therefore scanned in full, deliberately.
 
+Context terms (mirrors find_hit() in ~/.claude/hooks/confidentiality-guard.py): a deal's
+`context` term blocks only when one of the same deal's `context_requires_any` anchors also
+appears in the same WINDOW. A window is one scanned unit: one commit (its raw object in every
+text view PLUS its own patch from `git log -p`), one blob (every text view and every
+decompressed archive member -- a docx is one document), one annotated tag object, or one
+pushed ref name. An anchor and a context term that only meet across two commits or two files
+of the same push do not combine (residual; the anchored-context design is about one text).
+A deal whose context terms have no usable anchor -- `context_requires_any` missing or empty,
+or ANY anchor that is blank once normalized (empty, whitespace, zero-width only: a blank
+anchor matches everywhere, as in the guard) -- has its context terms treated as `always`
+terms. That is stricter than the guard for a missing / empty anchor list, which the guard
+reads as "never fires"; fail-closed wins here. An anchor alone never blocks.
+
 Output never echoes a term: hits are reported as roster indices, and a path or ref name
-that itself contains a term is withheld.
+that itself contains ANY roster string (always, context or anchor) is withheld.
 
 FAIL-CLOSED -- each of these BLOCKS the push:
-  * roster missing, unreadable, unparseable, not a JSON object, or any deal entry malformed;
+  * roster missing, unreadable, unparseable, not a JSON object, or any deal entry malformed
+    (a non-dict deal; `always`, `context` or `context_requires_any` present but not a list of
+    strings, null included; or an active deal that declares terms none of which survives
+    normalization -- we cannot know what to look for);
   * `git log` / `git rev-list` / `git cat-file` fails (e.g. remote sha unknown locally --
     run `git fetch`);
   * a brand-new ref whose default-branch baseline cannot be resolved;
@@ -42,11 +65,14 @@ FAIL-CLOSED -- each of these BLOCKS the push:
     (PDF text is often compressed AND glyph-encoded, so no byte scan can prove it clean) --
     verify such a push by hand, then `git push --no-verify`;
   * ORA_PREPUSH_REQUIRE_REFS=1 and no ref lines arrived on stdin.
-A roster with no active deal (all closed) allows every push without scanning.
+A roster with no active deal (all closed) allows every push without scanning, as does one
+whose active deals carry no `always` and no `context` term at all (anchors alone cannot
+block). An active deal with context terms and no always terms is SCANNED, never fast-pathed.
 
 Residual (not covered): text inside images, OCR-only scans, raw zlib / lzma-alone streams,
-PNG zTXt chunks, and encodings other than those listed above; history already on the
-remote is not rescanned.
+PNG zTXt chunks, and encodings other than those listed above (URL-encoding nested past 4
+rounds included); zero-width characters inside a term; a context term and its anchor split
+across two windows; history already on the remote is not rescanned.
 
 Exit 0 = allow, 1 = block (git pre-push convention). Bypass for a verified-clean push is a
 human's `git push --no-verify`; there is deliberately no environment-variable bypass.
@@ -58,6 +84,7 @@ import re
 import subprocess
 import sys
 import unicodedata
+import urllib.parse
 
 ZERO = "0"
 ROSTER_RELPATH = (".claude", "hooks", "confidential-terms.json")
@@ -67,6 +94,7 @@ MAX_MEMBERS = 20000
 MAX_DEPTH = 3
 MIN_SQUASHED_LEN = 5
 WITHHELD = "<withheld: contains a confidential term>"
+MAX_URL_DECODE_ROUNDS = 4
 
 # Pin everything that could change what `git log` prints: no external diff, no textconv, no
 # colour, unquoted paths, UTF-8 output regardless of i18n.logOutputEncoding.
@@ -95,12 +123,38 @@ WINDOW = 256 * 1024
 MIN_OVERLAP = 8192
 
 
+def _url_views(cands):
+    """URL-decoded readings of each candidate: unquote_plus (`+` -> space) and plain unquote
+    (a literal `+` kept), repeated on every NEW reading until nothing changes or
+    MAX_URL_DECODE_ROUNDS rounds have run (round 2 unwraps `%2520`, round 3 `%252520`)."""
+    seen = set(cands)
+    out, frontier = [], list(cands)
+    for _ in range(MAX_URL_DECODE_ROUNDS):
+        nxt = []
+        for c in frontier:
+            if "%" not in c and "+" not in c:
+                continue
+            ds = [urllib.parse.unquote_plus(c)]
+            if "%" in c and "+" in c:  # otherwise plain unquote equals one of the two
+                ds.append(urllib.parse.unquote(c))
+            for d in ds:
+                if d not in seen:
+                    seen.add(d)
+                    nxt.append(d)
+        if not nxt:
+            break
+        out += nxt
+        frontier = nxt
+    return out
+
+
 def _scan_window(text, terms, found):
     cands = [text]
     if "&" in text:
         cands.append(html.unescape(text))
-    if "<" in text:
-        cands += [TAG_RE.sub("", c) for c in list(cands)]
+    # Tag-strip the raw / entity-decoded readings only; URL-decoding reads those same two
+    # (an encoded term inside an href survives there). Keeps the worst case near 2x.
+    cands += [TAG_RE.sub("", c) for c in list(cands) if "<" in c] + _url_views(cands)
     for c in cands:
         n = normalize(c)
         for i, t in enumerate(terms):
@@ -117,10 +171,13 @@ def _scan_window(text, terms, found):
 
 def scan_text(text, terms):
     """Sorted indices of (already-normalized) terms present in text -- never the terms.
+    Raw presence only: Roster.blocking() decides which of them block.
 
     Large texts are scanned in overlapping windows: NFKC on one multi-MB string is
-    super-linear (REFUTE round 2, N2: 16 s for 4 MB). The overlap exceeds any term plus the
-    markup that could sit inside it, so no match is lost at a window edge."""
+    super-linear (REFUTE round 2, N2: 16 s for 4 MB). The overlap (8x the longest term)
+    exceeds any term plus the markup or URL-encoding (3x per round) that could sit inside
+    it, so no match is lost at a window edge. These slices are a performance device, not the
+    context-term window: indices found in every slice of one text are pooled first."""
     found = set()
     if len(text) <= WINDOW:
         _scan_window(text, terms, found)
@@ -144,12 +201,53 @@ def roster_path():
     return os.path.join(os.path.expanduser("~"), *ROSTER_RELPATH)
 
 
-def load_terms(path=None):
-    """Normalized active `always` terms (sorted, deduplicated), or None when the roster cannot
-    be read or any deal entry is malformed (fail-closed: we cannot prove we know its terms).
+TERM_FIELDS = ("always", "context", "context_requires_any")
+
+
+class Roster:
+    """The active roster as matchable data.
+
+    terms   -- sorted, deduplicated normalized vocabulary: every active always, context and
+               anchor string. Reported indices point into this list.
+    uncond  -- indices that block on their own (always terms, plus the context terms of a
+               deal with no usable anchor).
+    groups  -- [(anchor indices, context indices)]: the context indices block only when one
+               of the anchor indices was found in the same window."""
+
+    def __init__(self, terms, uncond, groups):
+        self.terms, self.uncond, self.groups = terms, frozenset(uncond), groups
+
+    def can_block(self):
+        return bool(self.uncond) or any(ctx for _anchors, ctx in self.groups)
+
+    def blocking(self, found):
+        """Sorted blocking indices among `found`, the indices present in ONE window."""
+        found = set(found)
+        out = found & self.uncond
+        for anchors, ctx in self.groups:
+            if found & anchors:
+                out |= found & ctx
+        return sorted(out)
+
+    def hits(self, text):
+        """Blocking indices in one text treated as one window."""
+        return self.blocking(scan_text(text, self.terms))
+
+
+def _blank(t):
+    """True for an anchor that normalizes to nothing: empty, whitespace or zero-width only."""
+    return not "".join(ch for ch in normalize(t)
+                       if unicodedata.category(ch) != "Cf").strip()
+
+
+def load_roster(path=None):
+    """Roster, or None when the roster cannot be read or any deal entry is malformed
+    (fail-closed: we cannot prove we know its terms).
 
     A deal counts unless it explicitly says `"active": false` (a missing flag is treated as
-    active). A key starting with "_" is metadata (e.g. `_meta`) unless it carries `always`."""
+    active). A key starting with "_" is metadata (e.g. `_meta`) unless it carries one of
+    `always` / `context` / `context_requires_any`. Each of those fields, when present, must be
+    a list of strings (null is malformed), on inactive deals too."""
     path = path or roster_path()
     try:
         with open(path, encoding="utf-8") as f:
@@ -158,22 +256,49 @@ def load_terms(path=None):
         return None
     if not isinstance(data, dict):
         return None
-    out = set()
+    deals = []
     for key, deal in data.items():
-        if key.startswith("_") and not (isinstance(deal, dict) and "always" in deal):
+        if key.startswith("_") and not (isinstance(deal, dict)
+                                        and any(f in deal for f in TERM_FIELDS)):
             continue
         if not isinstance(deal, dict):
             return None
+        raw = {}
+        for field in TERM_FIELDS:
+            v = deal.get(field, [])
+            if not isinstance(v, list) or not all(isinstance(t, str) for t in v):
+                return None
+            raw[field] = v
         if deal.get("active", True) is False:
             continue
-        always = deal.get("always", [])
-        if not isinstance(always, list) or not all(isinstance(t, str) for t in always):
-            return None
-        for t in always:
-            n = normalize(t).strip()
-            if n:
-                out.add(n)
-    return sorted(out)
+        always = [n for n in (normalize(t).strip() for t in raw["always"]) if n]
+        context = [n for n in (normalize(t).strip() for t in raw["context"]) if n]
+        if (raw["always"] or raw["context"]) and not (always or context):
+            return None  # declares terms, none usable: cannot know what to look for
+        anchors_raw = raw["context_requires_any"]
+        unanchored = not anchors_raw or any(_blank(a) for a in anchors_raw)
+        anchors = [] if unanchored else [normalize(a).strip() for a in anchors_raw]
+        deals.append((always, context, anchors, unanchored))
+    terms = sorted({t for a, c, an, _u in deals for t in a + c + an})
+    idx = {t: i for i, t in enumerate(terms)}
+    uncond, groups = set(), []
+    for always, context, anchors, unanchored in deals:
+        uncond.update(idx[t] for t in always)
+        if not context:
+            continue
+        if unanchored:
+            uncond.update(idx[t] for t in context)
+        else:
+            groups.append((frozenset(idx[t] for t in anchors),
+                           frozenset(idx[t] for t in context)))
+    return Roster(terms, uncond, groups)
+
+
+def load_terms(path=None):
+    """The roster's normalized vocabulary (sorted), or None when it is unreadable / malformed.
+    Kept for callers that only need the strings; matching goes through load_roster()."""
+    r = load_roster(path)
+    return None if r is None else r.terms
 
 
 # --------------------------------------------------------------------------- refs / range
@@ -418,9 +543,11 @@ def expand(data, budget, depth=0):
     return out
 
 
-def scan_blobs(rng, terms, cwd=None):
-    """(hits, unscannable) over every blob added or modified in rng.
+def scan_blobs(rng, roster, cwd=None):
+    """(hits, unscannable) over every blob added or modified in rng. One blob -- all of its
+    text views and decompressed members -- is one context window.
     hits: [(shown_path, indices)]; unscannable: [reason]."""
+    terms = roster.terms
     hits, bad = [], []
     try:
         paths_by_sha = {}
@@ -436,34 +563,64 @@ def scan_blobs(rng, terms, cwd=None):
             found = set()
             for text in texts:
                 found.update(scan_text(text, terms))
-            if found:
-                hits.append((path, sorted(found)))
+            blocking = roster.blocking(found)
+            if blocking:
+                hits.append((path, blocking))
     except (Unscannable, ValueError, OSError) as e:
         bad.append("blob enumeration failed (%s)" % e)
     return hits, bad
 
 
-def commit_object_hits(rng, terms, cwd=None):
-    """Indices found in the raw commit objects of rng: message, author / committer, mergetag
-    and encoding headers -- a message in a legacy encoding is read through every view."""
-    found = set()
-    for _sha, _typ, data in iter_objects(range_commits(rng, cwd), cwd):
+def commit_object_found(rng, terms, cwd=None):
+    """{commit sha: raw indices} found in the raw commit objects of rng: message, author /
+    committer, mergetag and encoding headers -- a legacy-encoded message is read through
+    every view. RAISES Unscannable."""
+    out = {}
+    for sha, _typ, data in iter_objects(range_commits(rng, cwd), cwd):
+        found = out.setdefault(sha, set())
         for text in text_views(data):
             found.update(scan_text(text, terms))
-    return sorted(found)
+    return out
 
 
-def tag_chain_hits(local_sha, terms, cwd=None):
-    """Indices found in every annotated tag object reachable by peeling local_sha (a tag of
-    a tag transfers both objects). Empty for anything that is not a tag. RAISES Unscannable."""
+def patch_found(rng, terms, cwd=None):
+    """{commit sha: raw indices} found in each commit's own `git log -p --cc` output (its
+    re-encoded message and its patch). Commits are split on a per-run random marker that no
+    pushed content can forge. RAISES Unscannable."""
+    marker = "ORA-PREPUSH-" + os.urandom(16).hex()
+    p = subprocess.run(GIT_BASE + ["log", "-p", "--cc", "--root", "--no-color",
+                                   "--no-ext-diff", "--no-textconv",
+                                   "--format=" + marker + "%H%n%an <%ae>%n%cn <%ce>%n%B", rng],
+                       capture_output=True, cwd=cwd)
+    if p.returncode != 0:
+        raise Unscannable("`git log -p %s` failed (remote sha unknown locally? run "
+                          "`git fetch` first)" % rng)
+    out = {}
+    chunks = p.stdout.decode("utf-8", "ignore").split(marker)
+    if chunks[0].strip():
+        raise Unscannable("unparseable `git log -p` output")
+    for chunk in chunks[1:]:
+        sha = chunk[:64].split("\n", 1)[0].strip()
+        if not _is_sha(sha):
+            raise Unscannable("unparseable `git log -p` output")
+        out.setdefault(sha, set()).update(scan_text(chunk, terms))
+    return out
+
+
+def tag_chain_hits(local_sha, roster, cwd=None):
+    """Blocking indices in every annotated tag object reachable by peeling local_sha (a tag
+    of a tag transfers both objects); each tag object is one window. Empty for anything that
+    is not a tag. RAISES Unscannable."""
     found, sha = set(), local_sha
     for _ in range(16):
         objs = list(iter_objects([sha], cwd))
         _s, typ, data = objs[0]
         if typ != "tag":
             return sorted(found)
+        one = set()
         for text in text_views(data):
-            found.update(scan_text(text, terms))
+            one.update(scan_text(text, roster.terms))
+        found.update(roster.blocking(one))
         first = data.split(b"\n", 1)[0].decode("ascii", "replace").split()
         if len(first) != 2 or first[0] != "object" or not _is_sha(first[1]):
             raise Unscannable("unparseable tag object")
@@ -472,15 +629,16 @@ def tag_chain_hits(local_sha, terms, cwd=None):
 
 
 # --------------------------------------------------------------------------- main
-def scan_ref(local_ref, local_sha, remote_ref, remote_sha, terms, baseline, cwd=None):
+def scan_ref(local_ref, local_sha, remote_ref, remote_sha, roster, baseline, cwd=None):
     """List of block messages for one pushed ref (empty = clean)."""
+    terms = roster.terms
     msgs = []
     label = shown(local_ref, terms)
-    name_hits = sorted(set(scan_text(local_ref, terms) + scan_text(remote_ref, terms)))
+    name_hits = sorted(set(roster.hits(local_ref) + roster.hits(remote_ref)))
     if name_hits:
         msgs.append("a pushed ref NAME contains confidential term(s) (indices %s)." % name_hits)
     try:
-        t_hits = tag_chain_hits(local_sha, terms, cwd)
+        t_hits = tag_chain_hits(local_sha, roster, cwd)
     except Unscannable as e:
         msgs.append("(fail-closed) could not read the pushed object for %s: %s" % (label, e))
         t_hits = []
@@ -492,23 +650,23 @@ def scan_ref(local_ref, local_sha, remote_ref, remote_sha, terms, baseline, cwd=
         msgs.append("(fail-closed) %s is a brand-new remote ref and origin's default branch "
                     "could not be resolved to bound the scan -- run `git fetch` first." % label)
         return msgs
-    p = subprocess.run(GIT_BASE + ["log", "-p", "--cc", "--root", "--no-color",
-                                   "--no-ext-diff", "--no-textconv", rng],
-                       capture_output=True, cwd=cwd)
-    if p.returncode != 0:
-        msgs.append("(fail-closed) `git log -p %s` failed for %s (remote sha unknown "
-                    "locally? run `git fetch` first)." % (rng, label))
-        return msgs
-    hits = scan_text(p.stdout.decode("utf-8", "ignore"), terms)
+    # One commit = one window: its raw object (every view) pooled with its own patch.
     try:
-        hits = sorted(set(hits) | set(commit_object_hits(rng, terms, cwd)))
+        per_commit = patch_found(rng, terms, cwd)
+    except Unscannable as e:
+        msgs.append("(fail-closed) %s for %s." % (e, label))
+        return msgs
+    try:
+        for sha, found in commit_object_found(rng, terms, cwd).items():
+            per_commit.setdefault(sha, set()).update(found)
     except Unscannable as e:
         msgs.append("(fail-closed) commit objects for %s could not be read: %s" % (label, e))
+    hits = sorted({i for found in per_commit.values() for i in roster.blocking(found)})
     if hits:
         msgs.append("%d confidential term(s) (indices %s) in the commit messages / diffs "
                     "being pushed on %s (range %s). A clean HEAD does not mean a clean "
                     "push -- rewrite the history first." % (len(hits), hits, label, rng))
-    b_hits, b_bad = scan_blobs(rng, terms, cwd)
+    b_hits, b_bad = scan_blobs(rng, roster, cwd)
     if b_hits:
         msgs.append("confidential term(s) inside file content pushed on %s: %s."
                     % (label, "; ".join("%s -> indices %s" % h for h in b_hits)))
@@ -523,8 +681,8 @@ def main(stdin_text=None, roster=None, cwd=None):
         sys.stderr.reconfigure(errors="backslashreplace")
     except Exception:
         pass
-    terms = load_terms(roster)
-    if terms is None:
+    roster = load_roster(roster)
+    if roster is None:
         sys.stderr.write("pre-push BLOCKED (fail-closed): the confidential-deal roster "
                          "(~/.claude/hooks/confidential-terms.json) is missing, unreadable or "
                          "malformed -- cannot prove the push is clean (Invariant 3).\n")
@@ -540,20 +698,20 @@ def main(stdin_text=None, roster=None, cwd=None):
         sys.stderr.write("pre-push BLOCKED (fail-closed): zero ref lines on stdin while "
                          "ORA_PREPUSH_REQUIRE_REFS=1.\n")
         return 1
-    if not terms:
-        return 0  # no active confidential deal: nothing can leak
+    if not roster.can_block():
+        return 0  # no active always / context term: nothing can leak
     baseline = resolve_default_baseline(cwd)
     blocked = False
     for local_ref, local_sha, remote_ref, remote_sha in pushrefs:
         if set(local_sha) == {ZERO}:
             continue  # ref deletion: nothing new reaches the remote
-        for m in scan_ref(local_ref, local_sha, remote_ref, remote_sha, terms, baseline, cwd):
+        for m in scan_ref(local_ref, local_sha, remote_ref, remote_sha, roster, baseline, cwd):
             sys.stderr.write("pre-push BLOCKED: %s\n" % m)
             blocked = True
     if blocked:
         sys.stderr.write("Terms are never printed; indices refer to the active roster's "
-                         "sorted, normalized always-terms. Bypass only after verifying the "
-                         "push is clean: git push --no-verify\n")
+                         "sorted, normalized always / context / anchor strings. Bypass only "
+                         "after verifying the push is clean: git push --no-verify\n")
     return 1 if blocked else 0
 
 
