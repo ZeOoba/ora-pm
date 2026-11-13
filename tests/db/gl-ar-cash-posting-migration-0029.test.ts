@@ -28,7 +28,9 @@ describe('migration 0029 — cash posting rules (textual pins)', () => {
     const m = /CASE p_type\s+([\s\S]*?) ELSE 99 END/.exec(sql)
     expect(m).not.toBeNull()
     const db = Object.fromEntries([...m![1].matchAll(/WHEN '(\w+)' THEN (\d+)/g)].map((x) => [x[1], Number(x[2])]))
-    expect(db).toEqual(CASH_PRIORITY)
+    // 0032 adds balance_forward (pinned in gl-balance-forwards-migration-0032.test.ts).
+    const { balance_forward: _bf, ...charges } = CASH_PRIORITY
+    expect(db).toEqual(charges)
   })
 
   it('C1/C2: events verified at commit; seq assigned by the database under the entity lock; insert-only', () => {

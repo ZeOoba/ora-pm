@@ -184,10 +184,12 @@ describe('reserve_autopay_payment() — outcomes', () => {
 
   // Balance forwards (0030) are inserted directly here: apply_balance_forwards() needs a whole
   // preview round-trip and is not what is under test. as_of must be in the past (0030 CHECK/guard),
-  // so these use a period in the future relative to the fixture dates.
+  // so these use a period in the future relative to the fixture dates. 0032's insert trigger
+  // re-checks app_balance against the lease's history, so it is the real app balance here.
   async function balanceForward(asOf: string, amount = '100.00') {
     await db.query(
-      `INSERT INTO balance_forwards (lease_id, as_of, qb_balance, app_balance, amount, created_by) VALUES ($1, $2, $3, 0, $3, 'test')`,
+      `INSERT INTO balance_forwards (lease_id, as_of, qb_balance, app_balance, amount, created_by)
+       SELECT $1, $2::date, a + $3::numeric, a, $3::numeric, 'test' FROM (SELECT balance_forward_app_cents($1, $2::date)::numeric / 100 AS a) x`,
       [LEASE, asOf, amount],
     )
   }

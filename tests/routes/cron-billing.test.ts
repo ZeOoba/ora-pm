@@ -449,6 +449,15 @@ beforeEach(() => {
 describe('POST /api/cron/monthly-billing — balance forwards from QuickBooks (0030)', () => {
   // The database refuses any charge dated on or before a lease's live balance-forward cut-off, and
   // the upsert is one statement, so such charges must never enter the batch.
+  it('sends the bulk upsert in lease-id order (the same lock order as apply_balance_forwards, 0032 REFUTE-11 D1)', async () => {
+    state.leases = [nonAutopayLease('lease_c'), nonAutopayLease('lease_a'), nonAutopayLease('lease_b')]
+    const res = await postBilling()
+    expect(res.status).toBe(200)
+    const ids = state.charges.map(c => c.lease_id)
+    expect(ids.length).toBeGreaterThan(2)
+    expect(ids).toEqual([...ids].sort())
+  })
+
   it('keeps a frozen lease’s charges out of the batch; other leases still bill; an already-posted one is just skipped', async () => {
     state.leases = [nonAutopayLease('lease_a'), nonAutopayLease('lease_b')]
     state.balanceForwards = [{ lease_id: 'lease_a', as_of: '2026-06-15' }]
