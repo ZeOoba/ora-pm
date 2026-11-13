@@ -158,6 +158,30 @@ describe('POST /api/balance-forwards/plan', () => {
   })
 })
 
+describe('the ledger tie-out (0032)', () => {
+  it('GET / marks a forward counted in the AR tie-out', async () => {
+    tables.balance_forwards = pgTable([
+      { id: 'bf-a', lease_id: L1, as_of: '2026-09-30', amount: 5, created_at: '2026-11-13T00:00:00Z', voided_at: null },
+      { id: 'bf-b', lease_id: L2, as_of: '2026-09-30', amount: 5, created_at: '2026-11-12T00:00:00Z', voided_at: null },
+    ])
+    tables.gl_ar_tieout_items = pgTable([{ source_id: 'bf-a', kind: 'balance_forward' }])
+    const res = await app.request(`/api/balance-forwards?llc=${encodeURIComponent(LLC)}`, {}, env)
+    const { data } = await res.json() as { data: { id: string; counted_at_tieout: boolean }[] }
+    expect(Object.fromEntries(data.map((r) => [r.id, r.counted_at_tieout]))).toEqual({ 'bf-a': true, 'bf-b': false })
+  })
+
+  it('preview blocks a lease whose LLC is tied out; apply never sends it', async () => {
+    tables.properties = pgTable([{ id: 'p1', entity_llc: LLC, gl_entity_id: 'e1' }])
+    tables.gl_ar_tieouts = pgTable([{ entity_id: 'e1', as_of: '2026-09-30' }])
+    tables.gl_entities = pgTable([{ id: 'e1', ledger_start_date: '2026-10-01' }])
+    const { data } = await (await post({ llc: LLC, as_of: '2026-11-12', csv })).json() as { data: Plan }
+    expect(data.rows.every((r) => r.status === 'blocked')).toBe(true)
+    expect(data.adjust_count).toBe(0)
+    expect((await post({ llc: LLC, as_of: '2026-11-12', csv, apply: true, expected_plan_hash: data.plan_hash })).status).toBe(422)
+    expect(mockRpc).not.toHaveBeenCalled()
+  })
+})
+
 describe('POST /api/balance-forwards/:id/void', () => {
   const id = 'c79d005e-e41e-4aa4-8d33-d795687c8ec4'
   const voidReq = (body: unknown) => app.request(`/api/balance-forwards/${id}/void`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, env)

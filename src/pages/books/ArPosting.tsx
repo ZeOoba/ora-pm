@@ -21,6 +21,8 @@ type ArSetup = {
   roles: { role: string; account_id: string }[]
   tieout: { as_of: string; app_ar_cents: number; gl_ar_cents: number; confirmed_by: string; confirmed_at: string } | null
   properties: { id: string; name: string; gl_entity_id: string | null }[]
+  /** 0032: the LLC's live balance forwards from QuickBooks (Books › Balance forward). */
+  balance_forwards?: { count: number; net_cents: number; positive_cents: number; negative_cents: number; after_cutoff: { lease_id: string; as_of: string; amount_cents: number }[] }
 }
 type ArItem = { kind: string; source_id: string; lease_id: string; date: string; cents: number; label: string; debit_role: string; credit_role: string }
 export type ArRun = {
@@ -69,6 +71,7 @@ export function ArPosting() {
 
   const s = setup.data?.data
   const cash = s?.accounting_basis === 'cash'
+  const bf = s?.balance_forwards
   const roleMap = new Map((s?.roles ?? []).map((r) => [r.role, r.account_id]))
   const accounts = chart.data?.data ?? []
 
@@ -153,7 +156,7 @@ export function ArPosting() {
                   <select id={`ar-role-${role}`} value={roleMap.get(role) ?? ''} disabled={saveRole.isPending}
                     onChange={(e) => saveRole.mutate({ role, account_id: e.target.value || null })}
                     className="w-full rounded-md border border-border px-3 py-2 text-sm">
-                    <option value="">Not mapped</option>
+                    <option value="">{role === 'balance_forward' ? 'Same as Rent (default)' : 'Not mapped'}</option>
                     {accounts.filter((a) => a.account_type === type && (a.is_active || a.id === roleMap.get(role))).map((a) => (
                       <option key={a.id} value={a.id}>{a.number ? `${a.number} ` : ''}{a.qb_name}</option>
                     ))}
@@ -172,6 +175,18 @@ export function ArPosting() {
                   : 'Before anything posts, the app\'s open AR as of the day before the start date must equal the AR account in the opening balance, to the cent. Map the AR account and assign this LLC\'s properties first.'}
                 {' '}If it does not tie, the message gives both numbers; fix the difference in QuickBooks or the app and re-import the opening balance. Once confirmed, the opening balance can no longer be reversed.
               </p>
+              {bf && bf.count > 0 && (
+                <p className="text-sm text-muted-foreground" aria-label="Balance forwards">
+                  {bf.count} balance forward{bf.count === 1 ? '' : 's'} from QuickBooks (net {signedDollars(bf.net_cents)}) count in this tie-out
+                  {cash ? ': amounts owed are paid by later cash before newer charges (income to the balance forward account, or Rent), credits count as tenant credits' : ' as part of open AR'}.
+                  {' '}Once confirmed they can no longer be voided, and no new ones can be imported for this LLC.
+                </p>
+              )}
+              {bf && bf.after_cutoff.length > 0 && (
+                <ul className="list-disc space-y-1 pl-5 text-sm text-status-danger" aria-label="Balance forwards after the cut-off">
+                  {bf.after_cutoff.map((b) => <li key={b.lease_id}>Balance forward dated {b.as_of} ({signedDollars(b.amount_cents)}) is after the tie-out date; void it and import it again as of the day before {s.ledger_start_date} or earlier.</li>)}
+                </ul>
+              )}
               {tieArmed ? (
                 <div className="flex items-center gap-2">
                   <span className="text-sm text-foreground">Confirm the tie-out? This is recorded once per LLC.</span>
@@ -179,7 +194,7 @@ export function ArPosting() {
                   <Button variant="ghost" onClick={() => setTieArmed(false)}>Cancel</Button>
                 </div>
               ) : (
-                <Button variant="ghost" onClick={() => setTieArmed(true)} disabled={!s.ledger_start_date || !roleMap.get(cash ? 'prepaid_rent' : 'ar')}>Check and confirm tie-out…</Button>
+                <Button variant="ghost" onClick={() => setTieArmed(true)} disabled={!s.ledger_start_date || !roleMap.get(cash ? 'prepaid_rent' : 'ar') || (bf?.after_cutoff.length ?? 0) > 0}>Check and confirm tie-out…</Button>
               )}
             </Card>
           )}

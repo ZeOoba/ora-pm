@@ -44,8 +44,8 @@ type Loaded = { ok: true; leases: BfLease[] } | { ok: false; error: { message: s
 
 /** Every lease on the LLC's properties, with its app balance as of the cut-off (ar_ledger's rules). */
 async function loadLeases(db: Db, llc: string, asOf: string): Promise<Loaded> {
-  const props = await fetchAllPages<{ id: string }>((after) => {
-    let q = db.from('properties').select('id').eq('entity_llc', llc)
+  const props = await fetchAllPages<{ id: string; gl_entity_id: string | null }>((after) => {
+    let q = db.from('properties').select('id, gl_entity_id').eq('entity_llc', llc)
     if (after !== null) q = q.gt('id', after)
     return q.order('id').limit(POSTGREST_MAX_ROWS)
   }, (r) => r.id)
@@ -96,6 +96,18 @@ async function loadLeases(db: Db, llc: string, asOf: string): Promise<Loaded> {
     else if (p.method === 'ach_stripe' && (p.stripe_status === 'pending' || p.stripe_status === 'processing' || p.stripe_status === 'requires_action')) pending.add(p.lease_id)
   }
   const statusBy = new Map(statuses.data.map((l) => [l.id, l.status]))
+  // 0032: each property's ledger entity (one entity_llc name can span several), its AR tie-out date
+  // and ledger start date.
+  const entityByProp = new Map(props.data.map((p) => [p.id, p.gl_entity_id]))
+  const entityIds = [...new Set(props.data.map((p) => p.gl_entity_id).filter((e): e is string => !!e))]
+  const [ties, ents] = await Promise.all([
+    fetchChunked<{ entity_id: string; as_of: string }>(entityIds, CHUNK, (chunk) => db.from('gl_ar_tieouts').select('entity_id, as_of').in('entity_id', chunk), { maxRows: POSTGREST_MAX_ROWS }),
+    fetchChunked<{ id: string; ledger_start_date: string | null }>(entityIds, CHUNK, (chunk) => db.from('gl_entities').select('id, ledger_start_date').in('id', chunk), { maxRows: POSTGREST_MAX_ROWS }),
+  ])
+  if (ties.error) return { ok: false, error: ties.error, publicMsg: 'Failed to load the ledger tie-outs' }
+  if (ents.error) return { ok: false, error: ents.error, publicMsg: 'Failed to load the ledger entities' }
+  const tieBy = new Map(ties.data.map((t) => [t.entity_id, t.as_of]))
+  const startBy = new Map(ents.data.map((e) => [e.id, e.ledger_start_date]))
   const leases: BfLease[] = []
   for (const r of ledger.data) {
     const bf = toCents(r.balance_forward ?? 0)
@@ -104,6 +116,7 @@ async function loadLeases(db: Db, llc: string, asOf: string): Promise<Loaded> {
       lease_id: r.lease_id, tenant_name: r.tenant_name, suite: r.suite, property_name: r.property_name,
       status: statusBy.get(r.lease_id) ?? 'unknown', app_cents: app.get(r.lease_id) ?? 0, pending_ach: pending.has(r.lease_id),
       live_forward: bf !== 0 && r.balance_forward_as_of ? { amount_cents: bf, as_of: r.balance_forward_as_of } : null,
+      ledger: (() => { const e = entityByProp.get(r.property_id); return e ? { tied_out_as_of: tieBy.get(e) ?? null, start_date: startBy.get(e) ?? null } : undefined })(),
     })
   }
   return { ok: true, leases }
@@ -180,9 +193,14 @@ balanceForwardsRouter.get('/', async (c) => {
   const rows = await fetchChunked<Record<string, unknown> & { id: string; lease_id: string; created_at: string }>([...byLease.keys()], CHUNK, (chunk) =>
     db.from('balance_forwards').select('*').in('lease_id', chunk), { maxRows: POSTGREST_MAX_ROWS })
   if (rows.error) return dbError(c, rows.error, 'Failed to load balance forwards')
+  // 0032 BF6: a forward counted in the ledger's AR tie-out can no longer be voided.
+  const counted = await fetchChunked<{ source_id: string }>(rows.data.map((r) => r.id), CHUNK, (chunk) =>
+    db.from('gl_ar_tieout_items').select('source_id').eq('kind', 'balance_forward').in('source_id', chunk), { maxRows: POSTGREST_MAX_ROWS })
+  if (counted.error) return dbError(c, counted.error, 'Failed to load the ledger tie-out')
+  const countedIds = new Set(counted.data.map((x) => x.source_id))
   const data = rows.data.map((r) => {
     const l = byLease.get(r.lease_id)
-    return { ...r, tenant_name: l?.tenant_name ?? null, suite: l?.suite ?? null, property_name: l?.property_name ?? null }
+    return { ...r, tenant_name: l?.tenant_name ?? null, suite: l?.suite ?? null, property_name: l?.property_name ?? null, counted_at_tieout: countedIds.has(r.id) }
   }).sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
   return c.json({ data })
 })

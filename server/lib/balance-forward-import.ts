@@ -33,6 +33,8 @@ export interface BfLease {
   app_cents: number // the app's balance as of the cut-off (ar_ledger's populations)
   pending_ach: boolean // an ACH payment dated on or before the cut-off is still pending/processing
   live_forward: { amount_cents: number; as_of: string } | null
+  /** 0032: the lease's ledger entity — its AR tie-out date (null if not tied out) and ledger start date. */
+  ledger?: { tied_out_as_of: string | null; start_date: string | null }
 }
 
 export interface QbCustomerRow { row: number; customer: string; cents: number }
@@ -249,6 +251,10 @@ export function planBalanceForwards(input: BfPlanInput): BfPlan {
     if (l.live_forward) {
       status = 'has_forward'
       note = `already has a balance forward of ${centsText(l.live_forward.amount_cents)} as of ${l.live_forward.as_of}; void it to import again`
+    } else if (l.ledger?.tied_out_as_of) {
+      // 0032 BF7: the ledger's AR tie-out is done; apply_balance_forwards refuses. Never applied.
+      status = 'blocked'
+      note = `its LLC's AR is already tied out in the ledger as of ${l.ledger.tied_out_as_of}; balance forwards must be imported before the tie-out`
     } else if (l.pending_ach) {
       status = 'blocked'
       note = `an ACH payment on or before ${as_of} is still processing; wait for it to settle`
@@ -261,6 +267,11 @@ export function planBalanceForwards(input: BfPlanInput): BfPlan {
   }
   plan.rows.sort((a, b) => a.property_name.localeCompare(b.property_name) || a.tenant_name.localeCompare(b.tenant_name) || a.lease_id.localeCompare(b.lease_id))
   plan.adjust_count = plan.rows.filter((r) => r.status === 'adjust').length
+  // 0032 BF7: a cut-off on or after an LLC's ledger start date would refuse its AR tie-out.
+  const starts = [...new Set(leases.map((l) => l.ledger?.start_date).filter((d): d is string => !!d && as_of >= d))].sort()
+  if (starts.length && plan.adjust_count > 0) {
+    plan.warnings.push(`the cut-off ${as_of} is on or after the ledger start date ${starts.join(', ')}: the ledger's AR tie-out will refuse these balance forwards; use the day before the start date or earlier`)
+  }
   const zeroed = plan.rows.filter((r) => r.qb_source === 'absent_from_file' && r.status === 'adjust')
   if (zeroed.length) {
     plan.warnings.push(`${zeroed.length} lease${zeroed.length === 1 ? ' has' : 's have'} no QuickBooks customer and will be set to $0 (the app shows ${centsText(zeroed.reduce((a, r) => a + r.app_cents, 0))}); check each is truly paid up in QuickBooks`)

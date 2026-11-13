@@ -19,8 +19,31 @@
 // counted payment now back in a pending state) is listed under `attention` and never posted.
 
 export const CHARGE_TYPES = ['rent', 'cam_estimate', 'cam_true_up', 'late_fee', 'security_deposit', 'utility_water', 'utility_gas', 'utility_electric', 'utility_other', 'percentage_rent', 'other'] as const
-export const AR_ROLES = ['ar', 'undeposited_funds', 'prepaid_rent', ...CHARGE_TYPES] as const
+// 'balance_forward' (0032): income when cash pays a balance forward from QuickBooks on a cash-basis
+// LLC; unmapped, it falls back to 'rent' (arRoleAccount, mirroring gl_ar_account).
+export const AR_ROLES = ['ar', 'undeposited_funds', 'prepaid_rent', ...CHARGE_TYPES, 'balance_forward'] as const
 export type ArRole = (typeof AR_ROLES)[number]
+
+/** The account a role posts to: its own mapping, or for 'balance_forward' the rent mapping (0032 BF2). */
+export function arRoleAccount(roles: Partial<Record<ArRole, string>>, role: ArRole): string | undefined {
+  return roles[role] ?? (role === 'balance_forward' ? roles.rent : undefined)
+}
+
+/** The planners' message for an unmapped role. */
+export function unmappedRoleMessage(role: ArRole): string {
+  return role === 'balance_forward'
+    ? 'map an account to "balance forward" (or "rent", its default) before posting (Books › AR posting › Accounts)'
+    : `map an account to "${role.replace(/_/g, ' ')}" before posting (Books › AR posting › Accounts)`
+}
+
+/** A live balance forward from QuickBooks (0030) as the planners see it. */
+export type LiveBalanceForward = { id: string; lease_id: string; as_of: string; amount: number | string }
+
+/** Attention for a live balance forward the tie-out did not count (the database prevents this; defensive). */
+export function uncountedForwardMessage(bf: LiveBalanceForward, startDate: string): string {
+  return `balance forward from QuickBooks dated ${bf.as_of} is not in the AR tie-out: it is in the app balance but not in the ledger. `
+    + `Void it and import it again as of the day before ${startDate} or earlier, or post a manual journal entry.`
+}
 export type ArKind = 'charge' | 'charge_void' | 'charge_void_pre' | 'payment' | 'payment_return' | 'payment_return_pre'
 
 export type ArCharge = { id: string; lease_id: string; charge_date: string; type: string; amount: number | string; description?: string | null; voided_at: string | null }
@@ -31,15 +54,17 @@ export type ArPlanInput = {
   charges: ArCharge[]
   payments: ArPayment[]
   postings: { kind: ArKind; source_id: string }[]
-  tieoutItems: { kind: 'charge' | 'payment'; source_id: string; counted: boolean }[]
+  tieoutItems: { kind: 'charge' | 'payment' | 'balance_forward'; source_id: string; counted: boolean; cents?: number }[]
   roles: Partial<Record<ArRole, string>>
   /** Locked periods (first of month, YYYY-MM-01); their activity posts in the next open month. */
   lockedMonths?: string[]
+  /** Live balance forwards the tie-out did NOT count (0032: inside the opening AR when counted; nothing posts for them). */
+  liveBalanceForwards?: LiveBalanceForward[]
 }
 export type ArItem = { kind: ArKind; source_id: string; lease_id: string; date: string; cents: number; label: string; debit_role: ArRole; credit_role: ArRole }
 export type ArPlan = {
   items: ArItem[]
-  attention: { source_id: string; kind: 'charge' | 'payment'; message: string }[]
+  attention: { source_id: string; kind: 'charge' | 'payment' | 'balance_forward'; message: string }[]
   skipped: number
   errors: string[]
   /** Net change per role across the run, in cents (debits positive). */
@@ -160,6 +185,9 @@ export function planArRun(input: ArPlanInput): ArPlan {
   plan.items.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : RANK[a.kind] - RANK[b.kind] || (a.source_id < b.source_id ? -1 : 1)))
   const needed = new Set<ArRole>()
   for (const i of plan.items) { needed.add(i.debit_role); needed.add(i.credit_role) }
-  for (const r of needed) if (!input.roles[r]) plan.errors.push(`map an account to "${r.replace(/_/g, ' ')}" before posting (Books › AR posting › Accounts)`)
+  for (const bf of input.liveBalanceForwards ?? []) {
+    plan.attention.push({ source_id: bf.id, kind: 'balance_forward', message: uncountedForwardMessage(bf, input.startDate) })
+  }
+  for (const r of needed) if (!arRoleAccount(input.roles, r)) plan.errors.push(unmappedRoleMessage(r))
   return plan
 }

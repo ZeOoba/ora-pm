@@ -130,3 +130,68 @@ describe('planCashArRun', () => {
     expect(planCashArRun(base({ through: '2026-11-05', tieoutItems: [], charges: [ch('c42', L4, '2026-11-02', 'rent', 500)], payments: [pay('p42', L4, '2026-11-06', 500)], events })).items).toEqual([])
   })
 })
+
+// 0032: balance forwards from QuickBooks in the cash replay. The same numbers as
+// supabase/tests/gl_balance_forwards.test.sql (cash entity CB, CB2).
+describe('balance forwards (0032 BF3)', () => {
+  const T = '0001-01-01'
+  it('a positive forward is due on its date, after a deposit due that day and before rent', () => {
+    // L3: 1,500 deposit and a +1,000 forward, both due 09-30; 1,000 of cash fills the deposit first.
+    const l3 = [{ id: 'bf3', type: 'balance_forward', due_date: '2026-09-30', live: T, cents: 100000 }, { id: 'dep3', type: 'security_deposit', due_date: '2026-09-30', live: T, cents: 150000 }]
+    expect(Object.fromEntries(allocateCash(100000, l3))).toEqual({ security_deposit: 100000 })
+    expect(Object.fromEntries(allocateCash(200000, l3))).toEqual({ security_deposit: 150000, balance_forward: 50000 })
+    // …and ahead of rent due the same day.
+    const sameDay = [{ id: 'r', type: 'rent', due_date: '2026-09-30', live: T, cents: 10000 }, { id: 'bf', type: 'balance_forward', due_date: '2026-09-30', live: T, cents: 10000 }]
+    expect(Object.fromEntries(allocateCash(10000, sameDay))).toEqual({ balance_forward: 10000 })
+    // L1: September rent (due 09-01) is older than the forward (due 09-30), so it is paid first.
+    const l1 = [{ id: 'bf1', type: 'balance_forward', due_date: '2026-09-30', live: T, cents: 50000 }, { id: 'r1', type: 'rent', due_date: '2026-09-01', live: T, cents: 100000 }]
+    expect(Object.fromEntries(allocateCash(60000, l1))).toEqual({ rent: 60000 })
+  })
+
+  it('refuses a negative charge (a credit forward is cash, never a charge)', () => {
+    expect(() => allocateCash(0, [{ id: 'x', type: 'balance_forward', due_date: '2026-09-30', live: T, cents: -1 }])).toThrow(/negative cents/)
+  })
+
+  const L = 'lease-bf'
+  const bfInput = (over: Partial<CashPlanInput> = {}): CashPlanInput => ({
+    startDate: START, through: '2026-10-31',
+    charges: [ch('r09', L, '2026-09-01', 'rent', 1000), ch('r10', L, '2026-10-01', 'rent', 1000)],
+    payments: [pay('p09', L, '2026-09-05', 600), pay('p10', L, '2026-10-05', 1200)],
+    events: [], tieoutItems: [{ kind: 'charge', source_id: 'r09', counted: true }, { kind: 'payment', source_id: 'p09', counted: true }, { kind: 'balance_forward', source_id: 'bf1', counted: true, cents: 50000 }],
+    roles: { undeposited_funds: 'uf', prepaid_rent: 'pp', rent: 'rent' },
+    balanceForwards: [{ id: 'bf1', lease_id: L, as_of: '2026-09-30', cents: 50000 }],
+    ...over,
+  })
+
+  it('later cash pays the forward after older charges, before newer ones; income to rent unless mapped', () => {
+    const plan = planCashArRun(bfInput())
+    expect(plan.errors).toEqual([])
+    expect(plan.items.map((i) => [i.kind, i.source_id])).toEqual([['charge', 'r10'], ['payment', 'p10']])
+    // 1,200: Sep rent's last 400, the 500 forward, October 300.
+    expect(plan.by_role).toEqual({ undeposited_funds: 120000, rent: -70000, balance_forward: -50000 })
+  })
+
+  it('needs balance_forward or rent mapped; either one is enough', () => {
+    expect(planCashArRun(bfInput({ roles: { undeposited_funds: 'uf', prepaid_rent: 'pp' } })).errors.join()).toMatch(/"balance forward" \(or "rent", its default\)/)
+    expect(planCashArRun(bfInput({ roles: { undeposited_funds: 'uf', prepaid_rent: 'pp', balance_forward: 'bfacct', rent: 'rent' } })).errors).toEqual([])
+    const mapped = planCashArRun(bfInput({ charges: [ch('r09', L, '2026-09-01', 'rent', 1000)], payments: [pay('p09', L, '2026-09-05', 600), pay('p10', L, '2026-10-05', 900)],
+      roles: { undeposited_funds: 'uf', prepaid_rent: 'pp', balance_forward: 'bfacct', rent: 'rent' } }))
+    expect(mapped.by_role).toEqual({ undeposited_funds: 90000, rent: -40000, balance_forward: -50000 })
+  })
+
+  it('a credit forward is cash on account: a later charge takes it', () => {
+    // L2: check 200 + a −300 forward = 500 of credit; October rent 400 uses it.
+    const plan = planCashArRun({
+      startDate: START, through: '2026-10-31', charges: [ch('r2', 'l2', '2026-10-01', 'rent', 400)], payments: [pay('p2', 'l2', '2026-09-10', 200)],
+      events: [], tieoutItems: [{ kind: 'payment', source_id: 'p2', counted: true }, { kind: 'balance_forward', source_id: 'bf2', counted: true, cents: -30000 }],
+      roles: { undeposited_funds: 'uf', prepaid_rent: 'pp', rent: 'rent' }, balanceForwards: [{ id: 'bf2', lease_id: 'l2', as_of: '2026-09-30', cents: -30000 }],
+    })
+    expect(plan.by_role).toEqual({ prepaid_rent: 40000, rent: -40000 })
+  })
+
+  it('a live forward the tie-out did not count needs attention and posts nothing', () => {
+    const plan = planCashArRun(bfInput({ balanceForwards: [], liveBalanceForwards: [{ id: 'bfx', lease_id: L, as_of: '2026-10-15', amount: '25.00' }] }))
+    expect(plan.attention).toContainEqual(expect.objectContaining({ source_id: 'bfx', kind: 'balance_forward' }))
+    expect(plan.items.some((i) => i.source_id === 'bfx')).toBe(false)
+  })
+})

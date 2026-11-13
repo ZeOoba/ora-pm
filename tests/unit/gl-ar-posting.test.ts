@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { centralDate, exactCents, planArRun, type ArCharge, type ArPayment, type ArPlanInput } from '../../server/lib/gl-ar-posting'
+import { arRoleAccount, centralDate, exactCents, planArRun, type ArCharge, type ArPayment, type ArPlanInput } from '../../server/lib/gl-ar-posting'
 
 const L = 'lease-1'
 const START = '2027-01-01'
@@ -143,3 +143,23 @@ describe('planArRun (accrual)', () => {
   })
 })
 
+
+describe('balance forwards (0032)', () => {
+  it('counted forwards (either sign) are inside the opening AR: no items, no errors, no roles needed', () => {
+    const p = run({ tieoutItems: [{ kind: 'balance_forward', source_id: 'bf1', counted: true, cents: 75000 }, { kind: 'balance_forward', source_id: 'bf2', counted: true, cents: -30000 }] })
+    expect(p.items).toEqual([])
+    expect(p.errors).toEqual([])
+    expect(p.by_role).toEqual({})
+  })
+  it('a live forward the tie-out did not count needs attention', () => {
+    const p = run({ liveBalanceForwards: [{ id: 'bfx', lease_id: L, as_of: '2027-01-15', amount: 10 }] })
+    expect(p.attention).toEqual([expect.objectContaining({ source_id: 'bfx', kind: 'balance_forward', message: expect.stringMatching(/not in the AR tie-out/) })])
+    expect(p.items).toEqual([])
+  })
+  it('arRoleAccount: balance_forward falls back to rent; other roles do not fall back', () => {
+    expect(arRoleAccount({ rent: 'r' }, 'balance_forward')).toBe('r')
+    expect(arRoleAccount({ rent: 'r', balance_forward: 'b' }, 'balance_forward')).toBe('b')
+    expect(arRoleAccount({ rent: 'r' }, 'late_fee')).toBeUndefined()
+    expect(arRoleAccount({}, 'balance_forward')).toBeUndefined()
+  })
+})

@@ -14,11 +14,13 @@ export const AR_ROLE_LABELS: { role: string; label: string; type: 'asset' | 'lia
   { role: 'utility_other', label: 'Utility — other', type: 'income' },
   { role: 'percentage_rent', label: 'Percentage rent', type: 'income' },
   { role: 'other', label: 'Other charges', type: 'income' },
+  // 0032: cash-basis only; unmapped, it posts to the Rent account.
+  { role: 'balance_forward', label: 'Balance forward from QuickBooks (defaults to Rent)', type: 'income' },
 ]
 
 /** The roles an LLC's basis uses: accrual books AR; cash books tenant credits as prepaid rent. */
 export function rolesForBasis(basis: 'accrual' | 'cash') {
-  return AR_ROLE_LABELS.filter((r) => (basis === 'cash' ? r.role !== 'ar' : r.role !== 'prepaid_rent'))
+  return AR_ROLE_LABELS.filter((r) => (basis === 'cash' ? r.role !== 'ar' : r.role !== 'prepaid_rent' && r.role !== 'balance_forward'))
 }
 
 export const KIND_LABELS: Record<string, string> = {

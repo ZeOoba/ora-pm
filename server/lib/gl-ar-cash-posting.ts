@@ -22,8 +22,11 @@
 // replay date each became live (tie-out charges first), then oldest due date, then deposit, rent,
 // CAM, utilities, percentage rent, other, late fees, then id; the rest is a tenant credit
 // (prepaid_rent). A charge billed late takes only cash still unapplied.
+// Balance forwards from QuickBooks (0032 BF3): a counted positive one is a pseudo-charge live from
+// the start, due on its as_of, after a deposit due that day and before rent (role 'balance_forward',
+// income to rent unless mapped); a counted negative one is cash already on account. Never an event.
 
-import { centralDate, exactCents, type ArCharge, type ArPayment, type ArRole } from './gl-ar-posting'
+import { arRoleAccount, centralDate, exactCents, uncountedForwardMessage, unmappedRoleMessage, type ArCharge, type ArPayment, type ArRole, type LiveBalanceForward } from './gl-ar-posting'
 
 export type CashKind = 'charge' | 'charge_void' | 'payment' | 'payment_return'
 export type CashCharge = ArCharge & { due_date: string }
@@ -35,14 +38,18 @@ export type CashPlanInput = {
   payments: ArPayment[]
   /** Events already in the ledger's replay (gl_ar_cash_events). */
   events: CashEvent[]
-  tieoutItems: { kind: 'charge' | 'payment'; source_id: string; counted: boolean }[]
+  tieoutItems: { kind: 'charge' | 'payment' | 'balance_forward'; source_id: string; counted: boolean; cents?: number }[]
   roles: Partial<Record<ArRole, string>>
   lockedMonths?: string[]
+  /** Balance forwards counted at the tie-out, with the snapshot's SIGNED cents (0032). */
+  balanceForwards?: { id: string; lease_id: string; as_of: string; cents: number }[]
+  /** Live balance forwards the tie-out did NOT count (the database prevents this; defensive). */
+  liveBalanceForwards?: LiveBalanceForward[]
 }
 export type CashItem = { kind: CashKind; source_id: string; lease_id: string; date: string; alloc_date: string; cents: number; label: string }
 export type CashPlan = {
   items: CashItem[]
-  attention: { source_id: string; kind: 'charge' | 'payment'; message: string }[]
+  attention: { source_id: string; kind: 'charge' | 'payment' | 'balance_forward'; message: string }[]
   skipped: number
   errors: string[]
   /** Net change per role across the run, in cents (debits positive). */
@@ -53,6 +60,8 @@ export type CashPlan = {
 export const CASH_PRIORITY: Record<string, number> = {
   security_deposit: 0, rent: 1, cam_estimate: 2, cam_true_up: 3, utility_water: 4, utility_gas: 5,
   utility_electric: 6, utility_other: 7, percentage_rent: 8, other: 9, late_fee: 10,
+  // 0032: a balance forward shares the deposit's priority and sorts after it (allocateCash).
+  balance_forward: 0,
 }
 
 /** A live charge; `live` is its replay date ('0001-01-01' for tie-out charges). */
@@ -60,11 +69,14 @@ export type AllocCharge = { id: string; type: string; due_date: string; live: st
 
 /** Billing-order allocation of `cash` over `charges`: cents per role (prepaid_rent = the credit). */
 export function allocateCash(cash: number, charges: AllocCharge[]): Map<string, number> {
+  for (const c of charges) if (c.cents < 0) throw new Error(`allocateCash: charge ${c.id} has negative cents ${c.cents}`)
   const out = new Map<string, number>()
   const ordered = [...charges].sort((a, b) =>
     a.live !== b.live ? (a.live < b.live ? -1 : 1)
       : a.due_date !== b.due_date ? (a.due_date < b.due_date ? -1 : 1)
-        : (CASH_PRIORITY[a.type] ?? 99) - (CASH_PRIORITY[b.type] ?? 99) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+        : (CASH_PRIORITY[a.type] ?? 99) - (CASH_PRIORITY[b.type] ?? 99)
+          || (a.type === 'balance_forward' ? 1 : 0) - (b.type === 'balance_forward' ? 1 : 0)
+          || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
   let left = cash
   let billed = 0
   for (const c of ordered) {
@@ -102,6 +114,9 @@ export function planCashArRun(input: CashPlanInput): CashPlan {
   const locked = new Set(input.lockedMonths ?? [])
   const firstOpen = (d: string) => { let v = d; while (locked.has(`${v.slice(0, 7)}-01`)) v = nextMonth(v); return v }
   const cands: Candidate[] = []
+  for (const bf of input.liveBalanceForwards ?? []) {
+    plan.attention.push({ source_id: bf.id, kind: 'balance_forward', message: uncountedForwardMessage(bf, start) })
+  }
 
   for (const c of input.charges) {
     const cents = exactCents(c.amount)
@@ -207,6 +222,11 @@ export function planCashArRun(input: CashPlanInput): CashPlan {
     const inSet = snap.get(`payment:${p.id}`) === true || done.has(`payment:${p.id}`)
     if (inSet && !done.has(`payment_return:${p.id}`)) state(p.lease_id).cash += exactCents(p.amount) ?? 0
   }
+  // 0032 BF3: counted balance forwards are part of every lease's starting state.
+  for (const bf of input.balanceForwards ?? []) {
+    if (bf.cents > 0) state(bf.lease_id).charges.set(bf.id, { id: bf.id, type: 'balance_forward', due_date: bf.as_of, live: TIEOUT_LIVE, cents: bf.cents })
+    else if (bf.cents < 0) state(bf.lease_id).cash += -bf.cents
+  }
   const needed = new Set<ArRole>()
   for (const item of plan.items) {
     const s = state(item.lease_id)
@@ -231,6 +251,6 @@ export function planCashArRun(input: CashPlanInput): CashPlan {
     }
   }
   for (const r of Object.keys(plan.by_role) as ArRole[]) if (plan.by_role[r] === 0) delete plan.by_role[r]
-  for (const r of needed) if (!input.roles[r]) plan.errors.push(`map an account to "${r.replace(/_/g, ' ')}" before posting (Books › AR posting › Accounts)`)
+  for (const r of needed) if (!arRoleAccount(input.roles, r)) plan.errors.push(unmappedRoleMessage(r))
   return plan
 }
