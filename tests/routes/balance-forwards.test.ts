@@ -120,7 +120,7 @@ describe('POST /api/balance-forwards/plan', () => {
     expect(a.plan_hash).not.toBe(b.plan_hash)
   })
 
-  it.each(['processing', 'requires_action'])('refuses to apply a plan with errors (an ACH %s before the cut-off) and never calls the RPC', async (status) => {
+  it.each(['processing', 'requires_action', 'requires_payment_method', 'requires_confirmation', 'requires_capture', null])('refuses to apply a plan with errors (an ACH %s before the cut-off) and never calls the RPC', async (status) => {
     world({ payments: [{ id: 'y3', lease_id: L1, amount: '10.00', payment_date: '2026-11-01', method: 'ach_stripe', stripe_status: status }] })
     const preview = await post({ llc: LLC, as_of: '2026-11-12', csv })
     expect(preview.status).toBe(422)

@@ -63,16 +63,23 @@ describe('migration 0032 — balance forwards in the ledger (textual pins)', () 
   })
 
   it('REFUTE-9: apply and void hold the lease chain; moves lock both entities; inserts are guarded; void needs READ COMMITTED', () => {
-    expect(fnBody('apply_balance_forwards')).toMatch(/FOR SHARE OF u, pr;\s+v_entity := gl_lease_entity\(v_lease\)/)
+    // REFUTE-10 R1: chains are walked one row at a time, never through a joined FOR SHARE OF.
+    expect(fnBody('apply_balance_forwards')).toMatch(/v_entity := gl_lock_lease_entity\(v_lease\);/)
     const v = fnBody('void_balance_forward')
-    expect(v).toMatch(/FOR SHARE OF l, u, pr/)
+    expect(v).toMatch(/v_entity := gl_lock_lease_entity\(/)
+    expect(fnBody('balance_forward_insert_guard')).toMatch(/v_entity := gl_lock_lease_entity\(NEW\.lease_id\);/)
+    expect(fnBody('gl_lock_lease_entity')).toMatch(/FROM leases l WHERE l\.id = p_lease FOR SHARE;\s+RETURN gl_lock_unit_entity\(v_unit\);/)
+    expect(fnBody('gl_lock_unit_entity')).toMatch(/FROM units u WHERE u\.id = p_unit FOR SHARE;\s+RETURN gl_lock_property_entity\(v_property\);/)
+    expect(fnBody('gl_lock_property_entity')).toMatch(/FROM properties pr WHERE pr\.id = p_property FOR SHARE;/)
+    expect(sql).not.toMatch(/FOR SHARE OF/)
     expect(v).toMatch(/must run in READ COMMITTED/)
     const move = sql.slice(sql.indexOf('CREATE OR REPLACE FUNCTION balance_forward_entity_move()'))
     expect(move.slice(0, move.indexOf('END $$;'))).toMatch(/WHERE id IN \(v_entity, v_old\) ORDER BY id FOR SHARE/)
     expect(sql).toMatch(/CREATE TRIGGER balance_forwards_insert_guard BEFORE INSERT ON balance_forwards/)
     // Move vs move: a unit/lease move locks its target property/unit before reading its LLC.
-    expect(move).toMatch(/FROM properties p WHERE p\.id = NEW\.property_id FOR SHARE;/)
-    expect(move).toMatch(/WHERE u\.id = NEW\.unit_id FOR SHARE OF u, p;/)
+    // Both the OLD and the NEW chain (REFUTE-10 R1).
+    expect(move).toMatch(/v_old := gl_lock_property_entity\(OLD\.property_id\);\s+v_entity := gl_lock_property_entity\(NEW\.property_id\);/)
+    expect(move).toMatch(/v_old := gl_lock_unit_entity\(OLD\.unit_id\);\s+v_entity := gl_lock_unit_entity\(NEW\.unit_id\);/)
   })
 
   it('REFUTE-9 F1: inside a live forward, items count by their current state', () => {
@@ -80,7 +87,24 @@ describe('migration 0032 — balance forwards in the ledger (textual pins)', () 
     expect(src).toMatch(/c\.charge_date <= b\.as_of\)\s+THEN c\.voided_at IS NULL/)
     // Payments: by their state when the forward was made (a later return still counts; it posts later).
     expect(src).toMatch(/LEFT JOIN balance_forwards bf ON bf\.lease_id = p\.lease_id AND bf\.voided_at IS NULL AND p\.payment_date <= bf\.as_of/)
-    expect(src).toMatch(/p\.status_changed_at <= bf\.created_at THEN coalesce\(p\.stripe_status = 'succeeded', false\)/)
+    // REFUTE-10 C1/C2: by the ids the forward recorded; outside a forward, by the status history.
+    expect(src).toMatch(/WHEN bf\.id IS NULL THEN gl_payment_counted_on\(p\.id, /)
+    expect(src).toMatch(/ELSE p\.id = ANY \(bf\.counted_payment_ids\) END/)
+    expect(src).not.toMatch(/status_changed_at <= bf\.created_at/)
+  })
+
+  it('REFUTE-10: forwards record the payments they counted; payment status history is append-only', () => {
+    const g = fnBody('balance_forward_insert_guard')
+    expect(g).toMatch(/NEW\.counted_payment_ids := v_ids;/)
+    expect(g).toMatch(/IF v_app <> pg_catalog\.round\(NEW\.app_balance \* 100\) THEN/)
+    expect(g).toMatch(/stripe_status NOT IN \('succeeded', 'failed', 'returned', 'canceled', 'disputed'\)/)
+    expect(fnBody('apply_balance_forwards')).toMatch(/stripe_status NOT IN \('succeeded', 'failed', 'returned', 'canceled', 'disputed'\)/)
+    expect(fnBody('balance_forward_immutable')).toMatch(/NEW\.counted_payment_ids\)/)
+    expect(sql).toMatch(/CREATE TRIGGER payment_status_history_record AFTER INSERT OR UPDATE OF stripe_status ON payments/)
+    expect(sql).toMatch(/CREATE TRIGGER payment_status_history_immutable BEFORE UPDATE OR DELETE ON payment_status_history/)
+    expect(sql).toMatch(/ALTER TABLE balance_forwards ALTER COLUMN counted_payment_ids SET NOT NULL;/)
+    // G1: only a first balance_forward mapping is refused after a cash tie-out.
+    expect(fnBody('gl_guard_ar_account')).toMatch(/AND NOT EXISTS \(SELECT 1 FROM gl_ar_accounts a WHERE a\.entity_id = NEW\.entity_id AND a\.role = 'balance_forward'\)/)
   })
 })
 

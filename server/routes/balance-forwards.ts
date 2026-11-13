@@ -17,6 +17,8 @@ export const balanceForwardsRouter = new Hono<{ Bindings: Env }>()
 
 const CHUNK = 100
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
+// An ACH in any other status (every in-flight PaymentIntent status, or none) has not settled.
+const SETTLED_ACH = new Set(['succeeded', 'failed', 'returned', 'canceled', 'disputed'])
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 
@@ -93,7 +95,8 @@ async function loadLeases(db: Db, llc: string, asOf: string): Promise<Loaded> {
     if (cents === null || cents <= 0) return { ok: false, error: { message: `non-numeric or non-positive payments.amount on payment ${p.id}` }, publicMsg: 'Failed to load payments' }
     const counted = p.method === 'check' || p.method === 'wire' || p.method === 'other' || (p.method === 'ach_stripe' && p.stripe_status === 'succeeded')
     if (counted) app.set(p.lease_id, (app.get(p.lease_id) ?? 0) - cents)
-    else if (p.method === 'ach_stripe' && (p.stripe_status === 'pending' || p.stripe_status === 'processing' || p.stripe_status === 'requires_action')) pending.add(p.lease_id)
+    // 0032 REFUTE-10 C3 (mirrors the insert trigger): any ACH not settled blocks the import.
+    else if (p.method === 'ach_stripe' && !SETTLED_ACH.has(p.stripe_status ?? '')) pending.add(p.lease_id)
   }
   const statusBy = new Map(statuses.data.map((l) => [l.id, l.status]))
   // 0032: each property's ledger entity (one entity_llc name can span several), its AR tie-out date

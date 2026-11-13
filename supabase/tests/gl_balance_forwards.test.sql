@@ -387,6 +387,101 @@ DO $$ BEGIN
   RAISE NOTICE 'ok: REFUTE-9 re-check: a payment counted by the forward stays counted; its later return posts as its own event';
 END $$;
 
+-- ── REFUTE-10 C1–C3, G1 ──────────────────────────────────────────────────────────────────────
+-- Accrual AH, tie-out as of 09-30. Each lease: rent (09-01) and one ACH.
+--   H1 ACH 1,000 succeeded at import, QB 300 → +300; afterwards disputed and WON (back to succeeded).
+--   H2 ACH 1,000 succeeded at import, QB 200 → +200; afterwards dispute LOST (written as 'failed').
+--   H3 ACH 700 still 'requires_payment_method': the import is refused; no forward; app AR 700.
+--   H4 no forward: ACH 500 succeeded on 09-08 (recorded history), disputed and won in November.
+-- Every ACH counts as the forward (H1/H2) or its 09-30 status (H4) says: opening AR 300+200+0+700.
+INSERT INTO gl_entities (id, name, accounting_basis) VALUES ('c3200000-0000-4000-8000-0000000000ab', 'BF Dispute LLC', 'accrual');
+INSERT INTO properties (id, name, gl_entity_id) VALUES ('c3210000-0000-4000-8000-0000000000ab', 'BF Dispute Park', 'c3200000-0000-4000-8000-0000000000ab');
+INSERT INTO units (id, property_id, suite) VALUES
+  ('c3220000-0000-4000-8000-0000000000d1', 'c3210000-0000-4000-8000-0000000000ab', 'H1'),
+  ('c3220000-0000-4000-8000-0000000000d2', 'c3210000-0000-4000-8000-0000000000ab', 'H2'),
+  ('c3220000-0000-4000-8000-0000000000d3', 'c3210000-0000-4000-8000-0000000000ab', 'H3'),
+  ('c3220000-0000-4000-8000-0000000000d4', 'c3210000-0000-4000-8000-0000000000ab', 'H4');
+INSERT INTO leases (id, unit_id, tenant_id) VALUES
+  ('c3230000-0000-4000-8000-0000000000d1', 'c3220000-0000-4000-8000-0000000000d1', 'c3240000-0000-4000-8000-000000000001'),
+  ('c3230000-0000-4000-8000-0000000000d2', 'c3220000-0000-4000-8000-0000000000d2', 'c3240000-0000-4000-8000-000000000001'),
+  ('c3230000-0000-4000-8000-0000000000d3', 'c3220000-0000-4000-8000-0000000000d3', 'c3240000-0000-4000-8000-000000000001'),
+  ('c3230000-0000-4000-8000-0000000000d4', 'c3220000-0000-4000-8000-0000000000d4', 'c3240000-0000-4000-8000-000000000001');
+INSERT INTO gl_accounts (id, entity_id, number, qb_name, account_type) VALUES
+  ('c32a0000-0000-4000-8000-0000000ab002', 'c3200000-0000-4000-8000-0000000000ab', '1100', 'Accounts Receivable', 'asset'),
+  ('c32a0000-0000-4000-8000-0000000ab003', 'c3200000-0000-4000-8000-0000000000ab', '1499', 'Undeposited Funds', 'asset'),
+  ('c32a0000-0000-4000-8000-0000000ab006', 'c3200000-0000-4000-8000-0000000000ab', '3000', 'Members'' Equity', 'equity'),
+  ('c32a0000-0000-4000-8000-0000000ab007', 'c3200000-0000-4000-8000-0000000000ab', '4000', 'Rental Income', 'income');
+INSERT INTO gl_ar_accounts (entity_id, role, account_id, updated_by) VALUES
+  ('c3200000-0000-4000-8000-0000000000ab', 'ar', 'c32a0000-0000-4000-8000-0000000ab002', 'tester'),
+  ('c3200000-0000-4000-8000-0000000000ab', 'undeposited_funds', 'c32a0000-0000-4000-8000-0000000ab003', 'tester'),
+  ('c3200000-0000-4000-8000-0000000000ab', 'rent', 'c32a0000-0000-4000-8000-0000000ab007', 'tester');
+INSERT INTO charges (id, lease_id, charge_date, due_date, type, amount) VALUES
+  ('c32c0000-0000-4000-8000-0000000000d1', 'c3230000-0000-4000-8000-0000000000d1', '2026-09-01', '2026-09-01', 'rent', 1000),
+  ('c32c0000-0000-4000-8000-0000000000d2', 'c3230000-0000-4000-8000-0000000000d2', '2026-09-01', '2026-09-01', 'rent', 1000),
+  ('c32c0000-0000-4000-8000-0000000000d3', 'c3230000-0000-4000-8000-0000000000d3', '2026-09-01', '2026-09-01', 'rent', 700),
+  ('c32c0000-0000-4000-8000-0000000000d4', 'c3230000-0000-4000-8000-0000000000d4', '2026-09-01', '2026-09-01', 'rent', 500);
+INSERT INTO payments (id, lease_id, payment_date, amount, method, stripe_status) VALUES
+  ('c32d0000-0000-4000-8000-0000000000d1', 'c3230000-0000-4000-8000-0000000000d1', '2026-09-05', 1000, 'ach_stripe', 'succeeded'),
+  ('c32d0000-0000-4000-8000-0000000000d2', 'c3230000-0000-4000-8000-0000000000d2', '2026-09-05', 1000, 'ach_stripe', 'succeeded'),
+  ('c32d0000-0000-4000-8000-0000000000d3', 'c3230000-0000-4000-8000-0000000000d3', '2026-09-05', 700, 'ach_stripe', 'requires_payment_method'),
+  ('c32d0000-0000-4000-8000-0000000000d4', 'c3230000-0000-4000-8000-0000000000d4', '2026-09-08', 500, 'ach_stripe', 'succeeded');
+-- H4's settlement on 09-08, as the history would have recorded it then.
+INSERT INTO payment_status_history (payment_id, stripe_status, changed_at) VALUES
+  ('c32d0000-0000-4000-8000-0000000000d4', 'succeeded', '2026-09-08 12:00:00-05');
+DO $$
+DECLARE v_ids UUID[];
+BEGIN
+  -- C3: requires_payment_method blocks the import (apply and a direct insert alike).
+  PERFORM pg_temp.expect_error($q$SELECT apply_balance_forwards('2026-09-30', 'manual', NULL, 'tester',
+    '[{"lease_id":"c3230000-0000-4000-8000-0000000000d3","qb_balance":100,"expected_app_balance":700}]')$q$, 'still pending on or before 2026-09-30');
+  PERFORM pg_temp.expect_error($q$INSERT INTO balance_forwards (lease_id, as_of, qb_balance, app_balance, amount, created_by)
+    VALUES ('c3230000-0000-4000-8000-0000000000d3', '2026-09-30', 100, 700, -600, 't')$q$, 'still pending on or before 2026-09-30');
+  -- C1: a direct insert with a stale app balance is refused; apply records the counted ids.
+  PERFORM pg_temp.expect_error($q$INSERT INTO balance_forwards (lease_id, as_of, qb_balance, app_balance, amount, created_by)
+    VALUES ('c3230000-0000-4000-8000-0000000000d1', '2026-09-30', 300, 1000, -700, 't')$q$, 'the app balance as of 2026-09-30 is now 0');
+  PERFORM apply_balance_forwards('2026-09-30', 'manual', NULL, 'tester',
+    '[{"lease_id":"c3230000-0000-4000-8000-0000000000d1","qb_balance":300,"expected_app_balance":0},
+      {"lease_id":"c3230000-0000-4000-8000-0000000000d2","qb_balance":200,"expected_app_balance":0}]');
+  SELECT counted_payment_ids INTO v_ids FROM balance_forwards WHERE lease_id = 'c3230000-0000-4000-8000-0000000000d1' AND voided_at IS NULL;
+  IF v_ids IS DISTINCT FROM ARRAY['c32d0000-0000-4000-8000-0000000000d1'::uuid] THEN RAISE EXCEPTION 'H1 counted ids: %', v_ids; END IF;
+  PERFORM pg_temp.expect_error($q$UPDATE balance_forwards SET counted_payment_ids = '{}' WHERE lease_id = 'c3230000-0000-4000-8000-0000000000d1'$q$, 'can only be voided, not changed');
+  PERFORM pg_temp.expect_error($q$DELETE FROM payment_status_history WHERE payment_id = 'c32d0000-0000-4000-8000-0000000000d4'$q$, 'append-only');
+END $$;
+-- After the import: H1 disputed then won; H2 dispute lost; H4 disputed then won (all in November).
+UPDATE payments SET stripe_status = 'disputed' WHERE id IN ('c32d0000-0000-4000-8000-0000000000d1', 'c32d0000-0000-4000-8000-0000000000d4');
+UPDATE payments SET stripe_status = 'succeeded' WHERE id IN ('c32d0000-0000-4000-8000-0000000000d1', 'c32d0000-0000-4000-8000-0000000000d4');
+UPDATE payments SET stripe_status = 'failed' WHERE id = 'c32d0000-0000-4000-8000-0000000000d2';
+DO $$ BEGIN
+  PERFORM pg_temp.eq('H4 history rows', (SELECT count(*) FROM payment_status_history WHERE payment_id = 'c32d0000-0000-4000-8000-0000000000d4'), 4);
+  PERFORM pg_temp.eq('H1 counted (dispute won)', (SELECT counted::int FROM gl_ar_tieout_source('c3200000-0000-4000-8000-0000000000ab', '2026-09-30') WHERE source_id = 'c32d0000-0000-4000-8000-0000000000d1'), 1);
+  PERFORM pg_temp.eq('H2 counted (dispute lost)', (SELECT counted::int FROM gl_ar_tieout_source('c3200000-0000-4000-8000-0000000000ab', '2026-09-30') WHERE source_id = 'c32d0000-0000-4000-8000-0000000000d2'), 1);
+  PERFORM pg_temp.eq('H3 not counted', (SELECT counted::int FROM gl_ar_tieout_source('c3200000-0000-4000-8000-0000000000ab', '2026-09-30') WHERE source_id = 'c32d0000-0000-4000-8000-0000000000d3'), 0);
+  PERFORM pg_temp.eq('H4 counted (settled 09-08, dispute won later)', (SELECT counted::int FROM gl_ar_tieout_source('c3200000-0000-4000-8000-0000000000ab', '2026-09-30') WHERE source_id = 'c32d0000-0000-4000-8000-0000000000d4'), 1);
+  PERFORM gl_post_opening_balance('c3200000-0000-4000-8000-0000000000ab', '2026-10-01',
+    '[{"account_id":"c32a0000-0000-4000-8000-0000000ab002","debit_cents":120000},{"account_id":"c32a0000-0000-4000-8000-0000000ab006","credit_cents":120000}]', 'tester');
+  SET CONSTRAINTS ALL IMMEDIATE;
+  PERFORM pg_temp.eq('AH tie-out = QuickBooks', gl_confirm_ar_tieout('c3200000-0000-4000-8000-0000000000ab', 'tester'), 120000);
+  SET CONSTRAINTS ALL IMMEDIATE;
+  -- H2's loss posts later as its own return; H1 and H4 post nothing more.
+  PERFORM gl_post_ar_batch('c3200000-0000-4000-8000-0000000000ab', gl_today(), '[{"kind":"payment_return_pre","source_id":"c32d0000-0000-4000-8000-0000000000d2"}]', 'tester');
+  SET CONSTRAINTS ALL IMMEDIATE;
+  PERFORM pg_temp.eq('H2 return posted to AR', pg_temp.bal('c3200000-0000-4000-8000-0000000000ab', '1100'), 220000);
+  PERFORM gl_check_ar_tieout('c3200000-0000-4000-8000-0000000000ab');
+  RAISE NOTICE 'ok: REFUTE-10 C1-C3 forwards count the payments they measured; history decides the rest; unsettled ACH blocks the import';
+END $$;
+
+-- G1: re-saving the existing balance_forward mapping on tied-out cash CB2 (an upsert) is accepted;
+-- changing it is still refused.
+DO $$ BEGIN
+  INSERT INTO gl_ar_accounts (entity_id, role, account_id, updated_by)
+    VALUES ('c3200000-0000-4000-8000-0000000000c2', 'balance_forward', 'c32a0000-0000-4000-8000-0000000c2008', 'tester')
+    ON CONFLICT (entity_id, role) DO UPDATE SET account_id = EXCLUDED.account_id, updated_by = EXCLUDED.updated_by;
+  PERFORM pg_temp.expect_error($q$INSERT INTO gl_ar_accounts (entity_id, role, account_id, updated_by)
+    VALUES ('c3200000-0000-4000-8000-0000000000c2', 'balance_forward', 'c32a0000-0000-4000-8000-0000000c2007', 'tester')
+    ON CONFLICT (entity_id, role) DO UPDATE SET account_id = EXCLUDED.account_id$q$, 'balance_forward account is fixed once the AR tie-out');
+  RAISE NOTICE 'ok: REFUTE-10 G1 an unchanged mapping re-saves; a change stays refused';
+END $$;
+
 -- REFUTE-9 re-check: adding a forward or moving into an LLC needs READ COMMITTED.
 BEGIN ISOLATION LEVEL REPEATABLE READ;
 SELECT pg_temp.expect_error($q$INSERT INTO balance_forwards (lease_id, as_of, qb_balance, app_balance, amount, created_by)
