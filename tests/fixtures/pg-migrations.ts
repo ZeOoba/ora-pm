@@ -49,6 +49,7 @@ export const MIGRATIONS_DIR = join(__dirname, '../../supabase/migrations')
 export const PG_MEM_SKIP: RegExp[] = [
   /^ALTER TABLE\s+\S+\s+ENABLE ROW LEVEL SECURITY$/i,
   /^CREATE POLICY\b/i,
+  /^DROP POLICY IF EXISTS\b/i,
   /^CREATE OR REPLACE VIEW\b/i,
   /^DELETE FROM payments a\s+USING\b/i,
   /^DROP VIEW IF EXISTS\b/i,

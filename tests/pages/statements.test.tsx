@@ -9,7 +9,7 @@ const data = (over: Partial<LeaseStatement['statement']> = {}): LeaseStatement =
   property_id: 'p1', property_name: 'Test Park', property_address: '100 Main St, Columbus, OH 43215', suite: 'B2',
   entity_llc: 'Test Park Holdings LLC', blockers: [],
   statement: {
-    start: '2026-10-01', end: '2026-10-31', openingCents: 0, chargesCents: 128456, paymentsCents: 100000, closingCents: 28456,
+    start: '2026-10-01', end: '2026-10-31', openingCents: 0, chargesCents: 128456, paymentsCents: 100000, forwardCents: 0, closingCents: 28456,
     lines: [
       { date: '2026-10-01', kind: 'charge', id: 'c1', label: 'Base rent', amountCents: 123456, balanceCents: 123456 },
       { date: '2026-10-06', kind: 'charge', id: 'c2', label: 'Late fee', amountCents: 5000, balanceCents: 128456 },

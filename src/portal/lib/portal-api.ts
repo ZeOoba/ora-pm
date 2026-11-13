@@ -62,6 +62,8 @@ export interface TenantMe {
     auth_user_id: string
   }
   total_balance: number
+  /** Part of total_balance brought over from the prior system (QuickBooks), across the tenant's leases. */
+  balance_forward?: { amount: number; as_of: string } | null
 }
 
 export interface Charge extends DBCharge {
@@ -73,7 +75,8 @@ export interface Payment {
   lease_id: string
   amount: number
   payment_date: string
-  stripe_status: string
+  /** NULL for check/wire/other payments recorded by the admin (0002); only ACH rows carry one. */
+  stripe_status: string | null
   notes: string | null
 }
 

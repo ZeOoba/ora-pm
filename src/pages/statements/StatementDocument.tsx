@@ -1,6 +1,6 @@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../../components/ui/table'
 import { formatCurrency, formatDate } from '../../lib/format'
-import { AGING_COLUMNS, toDollars, type LeaseStatement } from './statement-view'
+import { AGING_COLUMNS, lineEffectCents, toDollars, type LeaseStatement } from './statement-view'
 
 // The printable statement. Issued in the name of the property LLC (ORA Voice Register), never the
 // firm; the app shell is hidden in print by the `data-statement-print` rule in src/index.css.
@@ -28,12 +28,13 @@ export function StatementDocument({ data }: { data: LeaseStatement }) {
       </section>
 
       <section className="mb-6 grid grid-cols-2 gap-x-8 gap-y-1 text-sm sm:grid-cols-4">
-        {[
+        {([
           ['Opening balance', s.openingCents],
           ['Charges', s.chargesCents],
           ['Payments received', -s.paymentsCents],
+          ...(s.forwardCents ? [['Balance forward from prior system', s.forwardCents]] : []),
           ['Closing balance', s.closingCents],
-        ].map(([label, cents]) => (
+        ] as [string, number][]).map(([label, cents]) => (
           <div key={label as string}>
             <p className="text-xs uppercase text-status-neutral">{label}</p>
             <p className="font-mono text-base">{money(cents as number)}</p>
@@ -61,7 +62,7 @@ export function StatementDocument({ data }: { data: LeaseStatement }) {
             <TableRow key={`${l.kind}-${l.id}`}>
               <TableCell>{formatDate(l.date)}</TableCell>
               <TableCell>{l.label}</TableCell>
-              <TableCell className="text-right font-mono">{l.kind === 'payment' ? `(${money(l.amountCents)})` : money(l.amountCents)}</TableCell>
+              <TableCell className="text-right font-mono">{lineEffectCents(l) < 0 ? `(${money(-lineEffectCents(l))})` : money(lineEffectCents(l))}</TableCell>
               <TableCell className="text-right font-mono">{money(l.balanceCents)}</TableCell>
             </TableRow>
           ))}

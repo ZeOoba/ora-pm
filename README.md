@@ -5,7 +5,7 @@
 [![CI](https://github.com/ZeOoba/ora-pm/actions/workflows/ci.yml/badge.svg)](https://github.com/ZeOoba/ora-pm/actions/workflows/ci.yml)
 [![Migration numbers](https://github.com/ZeOoba/ora-pm/actions/workflows/migration-numbers.yml/badge.svg)](https://github.com/ZeOoba/ora-pm/actions/workflows/migration-numbers.yml)
 
-One Vite/React build serves two front ends. The **admin console** covers properties, units, tenants, leases (with AI-assisted lease intake), billing, AR and collections, payments, CAM reconciliation, expenses, budgets, renewals, insurance certificates, critical dates, tenant statements, reports, a native general ledger (chart of accounts, opening balances, and AR posting for accrual- and cash-basis LLCs), and QuickBooks Desktop IIF export. The **tenant portal** (`/portal/*`) lets tenants view their lease, charges, payments and documents, pay by ACH and upload insurance certificates. Both call one Hono API running as Cloudflare Pages Functions over Supabase Postgres. Monthly billing, autopay, critical-date alerts and late fees run as HTTP cron endpoints, because Cloudflare Pages has no native cron.
+One Vite/React build serves two front ends. The **admin console** covers properties, units, tenants, leases (with AI-assisted lease intake), billing, AR and collections, payments, CAM reconciliation, expenses, budgets, renewals, insurance certificates, critical dates, tenant statements, reports, a native general ledger (chart of accounts, opening balances, and AR posting for accrual- and cash-basis LLCs), per-lease balance forwards from QuickBooks, and QuickBooks Desktop IIF export. The **tenant portal** (`/portal/*`) lets tenants view their lease, charges, payments and documents, pay by ACH and upload insurance certificates. Both call one Hono API running as Cloudflare Pages Functions over Supabase Postgres. Monthly billing, autopay, critical-date alerts and late fees run as HTTP cron endpoints, because Cloudflare Pages has no native cron.
 
 ## Contents
 
@@ -77,6 +77,7 @@ flowchart LR
 | `/api/reports` | `reports.ts` | `ar-aging`, `cash-activity`, `financials`, `income-statement-12mo`, `rent-roll`, `critical-dates`, `actuals` |
 | `/api/statements` | `statements.ts` | Per-lease statement, batch, Outlook draft packet |
 | `/api/gl` | `gl.ts` | GL entities, chart of accounts (incl. QuickBooks IIF account import), opening balances, AR posting (account roles, tie-out, preview + post run), journal + reversal, trial balance, period lock |
+| `/api/balance-forwards` | `balance-forwards.ts` | Per-LLC balance forward from the QuickBooks A/R Aging Summary (preview + apply with plan hash), list, void |
 | `/api/exports` | `exports.ts` | `GET /qb-iif`: QuickBooks Desktop IIF export |
 | `/api/intake` | `intake.ts` | `POST /lease`: AI lease extraction (see [Security](#security-and-operational-notes)) |
 | `/api/search` | `search.ts` | Global search |
@@ -120,8 +121,8 @@ flowchart LR
 │   ├── components/              App shell, data table, charts, forms, shadcn ui/ primitives
 │   └── lib/                     Admin Supabase client, API wrapper, formatting, validation
 ├── supabase/
-│   ├── migrations/              0001–0029 SQL migrations: the schema source of truth (read its README)
-│   ├── tests/                   GL SQL suites (core, opening balance, accrual and cash AR posting) on real Postgres
+│   ├── migrations/              0001–0030 SQL migrations: the schema source of truth (read its README)
+│   ├── tests/                   GL SQL suites (core, opening balance, accrual and cash AR posting, balance forwards) on real Postgres
 │   └── config.toml              Supabase CLI local config
 ├── tests/                       Vitest suites: components, config, db, evals, lib, middleware, pages,
 │                                portal, routes, scripts, unit (+ fixtures/, setup.ts)
@@ -252,7 +253,7 @@ The API CORS allowlist in `server/index.ts` names both hosts and `ora-pm.pages.d
 
 ## Database and migrations
 
-`supabase/migrations/` (0001–0029) is the schema source of truth; each migration has a row in its README. Read [`supabase/migrations/README.md`](supabase/migrations/README.md) before changing a migration or relying on an RLS policy.
+`supabase/migrations/` (0001–0030) is the schema source of truth; each migration has a row in its README. Read [`supabase/migrations/README.md`](supabase/migrations/README.md) before changing a migration or relying on an RLS policy.
 
 - Migrations reach production through the manual **DB Migrate** workflow ([`db-migrate.yml`](.github/workflows/db-migrate.yml)): `workflow_dispatch` only, runs only from `main`, and `dry_run` defaults to true. The Supabase CLI is pinned to the same version in `ci.yml` and `db-migrate.yml`; bump both together.
 - A Dashboard-paste fallback is scripted in `scripts/prepare-migration-for-dashboard.mjs`.

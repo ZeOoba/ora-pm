@@ -108,7 +108,7 @@ tenantsRouter.get('/:id/portal-preview', async (c) => {
   }
   if (!balance.ok || !charges.ok || !payments.ok || !leases.ok || !aging.ok) return c.json({ error: 'unreachable' }, 500)
   return c.json({
-    me: { tenant, total_balance: balance.data },
+    me: { tenant, total_balance: balance.data.total, balance_forward: balance.data.forward },
     charges: { data: charges.data },
     payments: { data: payments.data },
     lease: { data: leases.data },

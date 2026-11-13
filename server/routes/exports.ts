@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { getDb } from '../db/client'
-import { buildPropertyJournalEntry, generateIIF } from '../lib/iif-export'
+import { buildPropertyJournalEntry, generateIIF, UnmappedChargeTypeError } from '../lib/iif-export'
 import { endOfMonth, format } from 'date-fns'
 import { dbError } from '../lib/api-error'
 import { fetchChunked, fetchAllPages, POSTGREST_MAX_ROWS } from '../lib/postgrest-paging'
@@ -55,19 +55,21 @@ exportsRouter.get('/qb-iif', async (c) => {
   }, (u) => u.id)
   if (unitErr) return dbError(c, unitErr, 'Failed to load units')
 
+  // Every lease on the property, whatever its CURRENT status (audit 2026-11-12 #3): this journals a
+  // past period by charge_date, and a lease that has since expired or terminated billed in it.
+  // Filtering on today's status made a re-export of a closed month drop those charges. The
+  // voided_at and charge_date filters below are what scope the rows.
   const { data: leaseRows, error: leaseErr } = await fetchChunked(unitRows.map(u => u.id), BULK_QUERY_CHUNK_SIZE, (chunk) =>
     fetchAllPages<{ id: string }>((after) => {
-      let q = db.from('leases').select('id').eq('status', 'active').in('unit_id', chunk)
+      let q = db.from('leases').select('id').in('unit_id', chunk)
       if (after !== null) q = q.gt('id', after)
       return q.order('id').limit(POSTGREST_MAX_ROWS)
     }, (l) => l.id),
     { maxRows: Infinity })
   if (leaseErr) return dbError(c, leaseErr, 'Failed to load leases')
 
-  // Sum charges posted for this property in this period (accrual basis). OI-278 / migration 0016:
+  // Charges posted for this property in this period (accrual basis). OI-278 / migration 0016:
   // voided charges never reach the journal — this file is what gets imported into QuickBooks.
-  const totals = { rent: 0, cam: 0, utility: 0, fees: 0 }
-
   const { data: charges, error: chargeErr } = await fetchChunked(leaseRows.map(l => l.id), BULK_QUERY_CHUNK_SIZE, (chunk) =>
     fetchAllPages<{ id: string; amount: number; type: string }>((after) => {
       let q = db.from('charges').select('id, amount, type')
@@ -81,28 +83,22 @@ exportsRouter.get('/qb-iif', async (c) => {
     { maxRows: Infinity })
   if (chargeErr) return dbError(c, chargeErr, 'Failed to load charges')
 
-  for (const charge of charges) {
-    if (charge.type === 'rent')                                    totals.rent    += charge.amount
-    else if (['cam_estimate','cam_true_up'].includes(charge.type)) totals.cam     += charge.amount
-    else if (charge.type.startsWith('utility'))                    totals.utility += charge.amount
-    else if (charge.type === 'late_fee')                           totals.fees    += charge.amount
+  // Every charge type is mapped to an account (IIF_CHARGE_ACCOUNTS); one without a mapping refuses
+  // the export rather than silently leaving it out of a balanced entry (audit 2026-11-12 #2).
+  let entry
+  try {
+    entry = buildPropertyJournalEntry({
+      propertyName: (property as { name: string } | null)?.name ?? 'Unknown',
+      periodStart,
+      charges,
+    })
+  } catch (err) {
+    // Our own message built from the type names only (no DB text), so nothing raw reaches the client.
+    if (err instanceof UnmappedChargeTypeError) {
+      return c.json({ error: `No QuickBooks account mapping for charge type(s): ${err.types.join(', ')} — export refused rather than dropping them` }, 500)
+    }
+    throw err
   }
-
-  const entry = buildPropertyJournalEntry({
-    propertyName: (property as { name: string; entity_llc: string | null } | null)?.name ?? 'Unknown',
-    entityLLC:    (property as { name: string; entity_llc: string | null } | null)?.entity_llc ?? '',
-    periodStart,
-    periodEnd,
-    baseRentCollected: totals.rent,
-    camCollected:      totals.cam,
-    utilityCollected:  totals.utility,
-    lateFeeCollected:  totals.fees,
-    arAccountName:      'Accounts Receivable',
-    incomeAccountBase: 'Rental Income:Base Rent',
-    incomeAccountCAM:  'Rental Income:CAM',
-    incomeAccountUtil: 'Rental Income:Utilities',
-    incomeAccountFees: 'Rental Income:Late Fees',
-  })
 
   const iifContent = generateIIF([entry])
   const propSlug   = ((property as { name: string } | null)?.name ?? 'property').replace(/\s+/g, '-').slice(0, 30)

@@ -27,7 +27,7 @@
 // show both must show the difference as a credit, never hide it.
 import type { getDb } from '../db/client'
 import { fetchChunked, fetchAllPages, POSTGREST_MAX_ROWS } from './postgrest-paging'
-import { allocateOldestFirst, emptyBucketsCents, toCents, AGING_BUCKET_KEYS, type AgingBucketsCents, type AllocationCharge, findChargeTotalMismatch, type ChargeTotalMismatch } from './ar-aging'
+import { allocateOldestFirst, balanceForwardAgingCharge, emptyBucketsCents, toCents, AGING_BUCKET_KEYS, type AgingBucketsCents, type AllocationCharge, findChargeTotalMismatch, type ChargeTotalMismatch } from './ar-aging'
 
 type Db = ReturnType<typeof getDb>
 
@@ -83,6 +83,22 @@ async function readArAging(db: Db, filter: AgingFilter): Promise<AgingRead & { m
     byLease.set(ch.lease_id, list)
   }
   const mismatch = findChargeTotalMismatch(data, byLease) ?? undefined
+  // 0030: a positive balance forward ages as a charge due on its as_of date (after the
+  // total_charged cross-check, which counts charges only). Same ledger row, so same snapshot.
+  for (const row of data) {
+    const bfCents = toCents(row.balance_forward ?? 0)
+    if (bfCents === null) {
+      return { ok: false, error: { message: `non-numeric ar_ledger.balance_forward for lease ${row.lease_id}` }, publicMsg: 'Failed to load AR aging report' }
+    }
+    if (bfCents > 0) {
+      if (typeof row.balance_forward_as_of !== 'string') {
+        return { ok: false, error: { message: `balance forward without a date for lease ${row.lease_id}` }, publicMsg: 'Failed to load AR aging report' }
+      }
+      const list = byLease.get(row.lease_id) ?? []
+      list.push(balanceForwardAgingCharge({ id: row.lease_id, as_of: row.balance_forward_as_of, amountCents: bfCents }))
+      byLease.set(row.lease_id, list)
+    }
+  }
   return { ok: true, data, byLease, mismatch }
 }
 

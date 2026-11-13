@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+import Stripe from 'stripe'
 import { getDb } from '../db/client'
 import { getStripe } from '../lib/stripe'
 import { buildMonthlyCharges, leaseTermStatusForPeriod } from '../lib/billing'
@@ -75,11 +76,17 @@ cronRouter.use('/*', async (c, next) => {
 //     lease as zero-debit and report `remaining: 0`, i.e. "nothing left to do," when the whole
 //     portfolio was actually still outstanding).
 //   - `remaining` must equal every eligible lease that did NOT get either resolved-as-zero-debit
-//     or a debit attempt this invocation — a failed pre-check, a failed debit-input lookup, the
-//     batch-limit slice, or a deferred-by-chargesBulkFailed run all count. `trigger-billing.ps1`
+//     or a debit attempt this invocation — a failed pre-check, a failed debit-input lookup, a
+//     failed reserve_autopay_payment call (0031), the batch-limit slice, or a
+//     deferred-by-chargesBulkFailed run all count. `trigger-billing.ps1`
 //     loops on this; an undercount there is silent, permanent revenue under-collection, not a retry.
 //   - `chargesBulkFailed` / `voidRecheckFailed` / `priorAutopayCheckFailed` / `debitInputsBulkFailed`
 //     are whole-batch failures ("never debit blind") and return HTTP 500 — never look like a normal 200.
+//     `reservationFailed` (a per-lease reservation RPC failure: unknown state) returns 500 too.
+//   - Audit 2026-11-12 #1 / migration 0031: the debit amount is decided and the payments row is
+//     written BEFORE the Stripe call, by reserve_autopay_payment() under the same per-lease lock
+//     as the portal's reserve_payment_intent() (0014), netting in-flight ACH. The Stripe
+//     idempotency key is per reservation; the reservation row is the per-period guard.
 //   - `voidedSkipped` (PR #42 review follow-up): a charge-upsert skip can mean "already posted and
 //     fine" OR "the existing row was voided" (migration 0016 never clears idempotency_key on void).
 //     Every skipped key is re-checked and a voided match is flagged, NOT auto-reposted — this
@@ -94,8 +101,9 @@ cronRouter.use('/*', async (c, next) => {
 //     prior-check chunks + the three debit-input chunk sets — the same `2 + …` as before until the
 //     portfolio reaches 1000 active leases and a real skip batch appears), plus 2 more if
 //     RATE_LIMIT_KV is ever provisioned (currently commented out in wrangler.toml, costs 0 today).
-//     Each Stripe call is 1-2 subrequests (`maxNetworkRetries: 1` in
-//     server/lib/stripe.ts) plus 1 for the payments insert. Raising the limit means recomputing
+//     Each debited lease costs 1 for the reserve_autopay_payment RPC (migration 0031), 1-2 for
+//     the Stripe call (`maxNetworkRetries: 1` in server/lib/stripe.ts) and 1 for the write-back
+//     (or release). Raising the limit means recomputing
 //     that formula against the actual Cloudflare plan's ceiling (Free=50, Paid=1000 —
 //     UNVERIFIED from this repo, confirm in the dashboard), not eyeballing a smaller number.
 //     AUTOPAY_BATCH_LIMIT × trigger-billing.ps1's MAX_INVOCATIONS is also a hard per-run debit
@@ -205,7 +213,7 @@ cronRouter.post('/monthly-billing', async (c) => {
   let voidRecheckFailed = false
 
   // --- Step 1: charge posting — one bulk upsert for the whole portfolio, not one insert/charge. ---
-  const allCharges = inTermLeases.flatMap((lease) =>
+  const builtCharges = inTermLeases.flatMap((lease) =>
     buildMonthlyCharges({
       leaseId: lease.id,
       baseRentMonthly: lease.base_rent_monthly,
@@ -218,6 +226,51 @@ cronRouter.post('/monthly-billing', async (c) => {
   )
 
   let voidedSkipped = 0
+
+  // --- Step 1a: balance forwards from QuickBooks (migration 0030). A lease's charges dated on or
+  // before its live balance forward's as_of are frozen in the database (that history is inside the
+  // QuickBooks figure), and the bulk upsert is ONE statement: a single refused row would fail it
+  // for the whole portfolio. So such charges never enter the batch. Ones already posted are the
+  // normal re-run case (counted as skipped); a genuinely new one (its idempotency key not found) is
+  // never posted and counts as a chargeErrors entry, so trigger-billing.ps1 prints it. If the
+  // balance-forward read fails, the batch goes out unfiltered (the database guard still refuses any
+  // frozen row, so the worst case is the old whole-batch failure, never a wrong charge) and autopay
+  // is deferred this run. A voided frozen charge is no longer re-checked (voidedSkipped): that
+  // period is QuickBooks' figure.
+  let frozenByBalanceForward = 0
+  let allCharges = builtCharges
+  let bfLookupFailed = false
+  const bfCutoff = new Map<string, string>()
+  const bfRes = inTermLeases.length === 0 ? { data: [], error: null }
+    : await fetchChunked<{ lease_id: string; as_of: string }>(inTermLeases.map((l) => l.id), BULK_QUERY_CHUNK_SIZE, (chunk) =>
+      db.from('balance_forwards').select('lease_id, as_of').in('lease_id', chunk).is('voided_at', null),
+      { maxRows: POSTGREST_MAX_ROWS })
+  if (bfRes.error) {
+    bfLookupFailed = true
+    chargeErrors += 1
+    errorMessages.push(`balance-forward lookup failed; charges sent unfiltered (the database still refuses any dated on or before a QuickBooks cut-off) and autopay deferred: ${bfRes.error.message}`)
+  } else if (bfRes.data.length > 0) {
+    for (const b of bfRes.data) bfCutoff.set(b.lease_id, b.as_of)
+    const frozen = builtCharges.filter((ch) => { const cut = bfCutoff.get(ch.lease_id); return cut !== undefined && ch.charge_date <= cut })
+    if (frozen.length > 0) {
+      allCharges = builtCharges.filter((ch) => !frozen.includes(ch))
+      frozenByBalanceForward = frozen.length
+      const existing = await fetchChunked<{ idempotency_key: string }>(frozen.map((ch) => ch.idempotency_key), IDEMPOTENCY_KEY_CHUNK_SIZE, (chunk) =>
+        db.from('charges').select('idempotency_key').in('idempotency_key', chunk), { maxRows: POSTGREST_MAX_ROWS })
+      if (existing.error) {
+        chargeErrors += frozen.length
+        errorMessages.push(`${frozen.length} charge(s) dated on or before a lease's QuickBooks cut-off were not posted; could not check whether they already exist: ${existing.error.message}`)
+      } else {
+        const have = new Set(existing.data.map((r) => r.idempotency_key))
+        const missing = frozen.filter((ch) => !have.has(ch.idempotency_key))
+        skipped += frozen.length - missing.length
+        chargeErrors += missing.length
+        if (missing.length > 0) {
+          errorMessages.push(`${missing.length} new charge(s) dated on or before a lease's balance forward from QuickBooks were NOT posted (leases: ${[...new Set(missing.map((ch) => ch.lease_id))].join(', ')}) — that period is QuickBooks' figure; void the balance forward and re-import if it should change.`)
+        }
+      }
+    }
+  }
 
   if (allCharges.length > 0) {
     const { data: insertedCharges, error: chargesErr } = await db
@@ -285,8 +338,13 @@ cronRouter.post('/monthly-billing', async (c) => {
   // --- Step 2: autopay eligibility + prior-period pre-check (bulk, one query for all eligible). ---
   // In-term leases only: an excluded lease (past end / not started / invalid dates) has no charge
   // this period and must never reach a Stripe debit, even via arrears headroom.
+  // 0030: a lease whose balance forward from QuickBooks covers this billing month (as_of on or after
+  // its first day) is not autopay-debited for it: the app cannot see what was paid for that month in
+  // QuickBooks, so the debit would really sweep older arrears.
   const eligibleLeases = inTermLeases.filter((lease) => {
     const tenant = Array.isArray(lease.tenants) ? lease.tenants[0] : lease.tenants
+    const cut = bfCutoff.get(lease.id)
+    if (cut !== undefined && cut >= periodStartStr) return false
     return Boolean(lease.autopay_enabled && lease.autopay_payment_method_id && tenant?.stripe_customer_id)
   })
 
@@ -333,7 +391,7 @@ cronRouter.post('/monthly-billing', async (c) => {
   }
 
   // --- Step 3: autopay debit processing. ---
-  const autopayDeferred = priorAutopayCheckFailed || chargesBulkFailed
+  const autopayDeferred = priorAutopayCheckFailed || chargesBulkFailed || bfLookupFailed
   const notYetCollected = autopayDeferred
     ? []
     : eligibleLeases.filter((l) => !alreadyCollected.has(l.id))
@@ -342,6 +400,7 @@ cronRouter.post('/monthly-billing', async (c) => {
   }
   let remaining = autopayDeferred ? eligibleLeases.length : 0
   let debitInputsBulkFailed = false
+  let reservationFailed = false
 
   if (notYetCollected.length > 0) {
     const ids = notYetCollected.map((l) => l.id)
@@ -376,7 +435,7 @@ cronRouter.post('/monthly-billing', async (c) => {
       // older, unrelated arrears via an automated ACH debit the tenant didn't specifically
       // authorize for that purpose.
       fetchChunked(ids, BULK_QUERY_CHUNK_SIZE, (chunk) =>
-        db.from('payments').select('lease_id, amount, method, stripe_status').in('lease_id', chunk).gte('payment_date', periodStartStr).lte('payment_date', periodEndStr),
+        db.from('payments').select('lease_id, amount, method, stripe_status, autopay_period').in('lease_id', chunk).gte('payment_date', periodStartStr).lte('payment_date', periodEndStr),
         { maxRows: POSTGREST_MAX_ROWS }),
       // Lifetime cap: never debit more than the lease's true outstanding AR balance — however
       // period-scoping above is what prevents re-debiting a tenant who already paid THIS period
@@ -402,10 +461,20 @@ cronRouter.post('/monthly-billing', async (c) => {
       for (const row of openChargesRes.data as { lease_id: string; amount: number }[]) {
         chargesByLease.set(row.lease_id, (chargesByLease.get(row.lease_id) ?? 0) + row.amount)
       }
+      // Audit 2026-11-12 #1: an in-period ach_stripe row still 'pending'/'processing' (typically a
+      // portal payment) is money already moving and reduces what autopay may take, exactly as in
+      // the reservation below. This in-memory figure is only the PRE-FILTER that lets a lease the
+      // tenant already paid resolve without an RPC; the authoritative amount (which also nets
+      // in-flight rows dated outside the period off the balance cap) is computed under the
+      // per-lease lock by reserve_autopay_payment().
+      // A row stamped for ANOTHER autopay_period (last month's catch-up debit, dated this month)
+      // pays that period, not this one — counting it here would skip this period's rent.
       const paidByLease = new Map<string, number>()
-      for (const p of periodPaymentsRes.data as { lease_id: string; amount: number; method: string; stripe_status?: string }[]) {
+      for (const p of periodPaymentsRes.data as { lease_id: string; amount: number; method: string; stripe_status?: string; autopay_period?: string | null }[]) {
+        if (p.autopay_period != null && p.autopay_period !== periodStartStr) continue
         const counts = (p.method === 'ach_stripe' && p.stripe_status === 'succeeded') || ['check', 'wire', 'other'].includes(p.method)
-        if (counts) paidByLease.set(p.lease_id, (paidByLease.get(p.lease_id) ?? 0) + p.amount)
+        const inFlight = p.method === 'ach_stripe' && (p.stripe_status === 'pending' || p.stripe_status === 'processing')
+        if (counts || inFlight) paidByLease.set(p.lease_id, (paidByLease.get(p.lease_id) ?? 0) + Number(p.amount))
       }
       const balanceByLease = new Map<string, number>()
       for (const row of arRes.data as { lease_id: string; balance: number }[]) {
@@ -415,7 +484,6 @@ cronRouter.post('/monthly-billing', async (c) => {
       // Resolve EVERY not-yet-collected lease's debit amount now (cheap, in-memory) so
       // zero-debit leases are settled this run regardless of batch position — only leases that
       // actually need a real Stripe call are subject to AUTOPAY_BATCH_LIMIT.
-      const debitAmountByLease = new Map<string, number>()
       const needsDebit: typeof notYetCollected = []
       for (const lease of notYetCollected) {
         const periodChargeTotal = chargesByLease.get(lease.id) ?? 0
@@ -423,7 +491,6 @@ cronRouter.post('/monthly-billing', async (c) => {
         const periodOutstanding = Math.max(0, periodChargeTotal - periodPaid)
         const outstandingBalance = balanceByLease.get(lease.id) ?? 0
         const debitAmount = Math.min(periodOutstanding, outstandingBalance)
-        debitAmountByLease.set(lease.id, debitAmount)
         if (debitAmount <= 0) {
           skipped++ // nothing outstanding to collect for this period — resolved now, not deferred
         } else {
@@ -438,50 +505,132 @@ cronRouter.post('/monthly-billing', async (c) => {
 
       for (const lease of toProcess) {
         const tenant = Array.isArray(lease.tenants) ? lease.tenants[0] : lease.tenants
-        const debitAmount = debitAmountByLease.get(lease.id) as number
+        const notes = `Autopay — ${periodStartStr}`
 
+        // Audit 2026-11-12 #1 / migration 0031: reserve the payments row BEFORE the Stripe call,
+        // under the same per-lease advisory lock reserve_payment_intent() (portal ACH) takes. The
+        // RPC recomputes the amount from committed state — period charges minus period paid minus
+        // in-period in-flight ACH, capped at ar_ledger.balance minus ALL in-flight ACH — so a
+        // portal payment still processing is never debited a second time, and a portal payment
+        // made while this debit is in flight sees this reservation as in flight. PostgREST runs
+        // each RPC in its own transaction, which is why the lock, the read and the insert live in
+        // one function. An RPC failure means the state is unknown: never call Stripe.
+        const { data: reservationData, error: reserveErr } = await db.rpc('reserve_autopay_payment', {
+          p_lease_id: lease.id,
+          p_period_start: periodStartStr,
+          p_period_end: periodEndStr,
+          p_payment_date: new Date().toISOString().slice(0, 10),
+          p_notes: notes,
+        })
+        if (reserveErr || !reservationData) {
+          // No debit attempt was made: the lease is still outstanding (`remaining`), and an
+          // unknown-state failure answers 500, never a normal 200 (e.g. 0031 not yet applied).
+          reservationFailed = true
+          autopayErrors++
+          remaining++
+          errorMessages.push(`autopay lease ${lease.id}: reservation failed, not debited: ${reserveErr?.message ?? 'reserve_autopay_payment returned no result'}`)
+          continue
+        }
+        const reservation = reservationData as AutopayReservation
+        if (reservation.outcome === 'existing' || reservation.outcome === 'nothing_due') {
+          // existing: a concurrent or earlier run reserved this period after the bulk pre-check.
+          // nothing_due: in-flight ACH, or a payment committed since the bulk read, covers it.
+          skipped++
+          continue
+        }
+        const amountCents = reservation.amount_cents
+        if (reservation.outcome !== 'reserved' || !reservation.payment_id || !reservation.client_request_id
+            || typeof amountCents !== 'number' || !Number.isSafeInteger(amountCents) || amountCents <= 0) {
+          reservationFailed = true
+          autopayErrors++
+          remaining++
+          errorMessages.push(`autopay lease ${lease.id}: reserve_autopay_payment returned an unusable result, not debited: ${JSON.stringify(reservation)}`)
+          continue
+        }
+        const paymentId = reservation.payment_id
+
+        let pi: Stripe.PaymentIntent
         try {
-          const pi = await stripe.paymentIntents.create({
-            amount: Math.round(debitAmount * 100),
+          pi = await stripe.paymentIntents.create({
+            amount: amountCents,
             currency: 'usd',
             customer: tenant.stripe_customer_id,
             payment_method: lease.autopay_payment_method_id,
             payment_method_types: ['us_bank_account'],
             confirm: true,
             off_session: true,
-            description: `Autopay — ${periodStartStr}`,
-            metadata: { lease_id: lease.id, tenant_id: tenant.id },
+            description: notes,
+            // client_request_id lets the webhook (server/lib/stripe-events.ts, OI-233 fallback)
+            // find and complete the reservation row if the write-back below never lands.
+            metadata: { lease_id: lease.id, tenant_id: tenant.id, client_request_id: reservation.client_request_id, payment_id: paymentId },
           }, {
-            // Deterministic per lease+period: a re-run inside Stripe's idempotency window (~24h)
-            // returns the original PaymentIntent instead of debiting again. Beyond that window,
-            // alreadyCollected (this run's or a future run's) is the only guard — which is why
-            // this phase is intentionally batch-limited: a wide-open, unbounded loop risks the
-            // subrequest budget running out AFTER this call but BEFORE the payments insert below
-            // records it, leaving no alreadyCollected row once the Stripe key also expires.
-            idempotencyKey: `autopay:${lease.id}:${periodStartStr}`,
+            // Per RESERVATION (lease + period + the reservation's client_request_id): stripe-node's
+            // own retry (maxNetworkRetries) of THIS request replays it instead of debiting twice.
+            // Not per period: the reservation row is what stops a second run debiting the period,
+            // and a key shared across reservations would make the reservation that follows a
+            // released one replay the old failure, or be rejected for changed params
+            // (StripeIdempotencyError → indeterminate → a stuck pending row). A new key is only
+            // ever minted after a DEFINITIVE failure released the previous reservation, so it
+            // cannot duplicate a debit.
+            idempotencyKey: `autopay:${lease.id}:${periodStartStr}:${reservation.client_request_id}`,
           })
-          const { error: payErr } = await db.from('payments').insert({
-            lease_id: lease.id,
-            payment_date: new Date().toISOString().slice(0, 10),
-            amount: debitAmount,
-            method: 'ach_stripe',
-            stripe_payment_intent_id: pi.id,
-            stripe_status: pi.status,
-            notes: `Autopay — ${periodStartStr}`,
-            autopay_period: periodStartStr,
-          })
-          if (payErr) {
-            if (payErr.code === '23505') {
-              skipped++ // concurrent run recorded this period first (idempotent)
-            } else {
-              // Real insert failure — the debit happened but wasn't recorded; surface loudly.
-              autopayErrors++
-              errorMessages.push(`autopay lease ${lease.id}: payment ${pi.id} created but not recorded: ${payErr.message}`)
-            }
-          }
         } catch (err) {
           autopayErrors++
-          errorMessages.push(`autopay lease ${lease.id}: ${(err as Error).message}`)
+          // A "definitive" class is trusted only if the PaymentIntent it carries (if any) is not
+          // moving money: with a per-reservation key, Stripe idempotency no longer backs up this
+          // classification, so a released row next to a live debit would let a later run debit again.
+          const errPiStatus = (err as { payment_intent?: { status?: string } }).payment_intent?.status
+          const definitive = DEFINITIVE_STRIPE_FAILURES.some((cls) => err instanceof cls)
+            && !(errPiStatus && ['processing', 'succeeded', 'requires_capture'].includes(errPiStatus))
+          if (!definitive) {
+            // Connection / 5xx / idempotency conflict / non-Stripe error: the debit MAY exist.
+            // The reservation stays 'pending' with autopay_period set, so it keeps counting as in
+            // flight (portal cap) and blocks every later run for this period (alreadyCollected)
+            // until the webhook completes it or a human reconciles it (query in 0031). Refusing a
+            // possible double debit is the correct failure direction.
+            errorMessages.push(`autopay lease ${lease.id}: ${(err as Error).message} — reservation ${paymentId} left pending for reconciliation (debit may exist)`)
+            continue
+          }
+          // Definitive rejection: nothing was debited. Release the reservation: 'failed' (no
+          // longer in flight, never counts as paid) and autopay_period cleared so a later run can
+          // reserve this period again, as this route did before 0031 (no row on a thrown create).
+          // Keep a PaymentIntent id Stripe returns with the error for the audit trail. Guarded to
+          // 'pending' so a webhook that already resolved the row wins.
+          const stripeErr = err as InstanceType<typeof Stripe.errors.StripeError>
+          const piFromError = (stripeErr as { payment_intent?: { id?: string } }).payment_intent?.id ?? null
+          const release = (piId: string | null) => db.from('payments')
+            .update({ stripe_status: 'failed', stripe_payment_intent_id: piId, autopay_period: null, notes: `${notes} — Stripe ${stripeErr.type}: ${stripeErr.message}` })
+            .eq('id', paymentId)
+            .in('stripe_status', ['pending'])
+            .select('id')
+          let { data: released, error: releaseErr } = await release(piFromError)
+          // The PI id is audit detail only; if another row already holds it
+          // (payments_stripe_pi_uniq), release without it rather than leave the row stuck.
+          if (releaseErr?.code === '23505' && piFromError) ({ data: released, error: releaseErr } = await release(null))
+          if (releaseErr) {
+            errorMessages.push(`autopay lease ${lease.id}: ${stripeErr.message} — reservation ${paymentId} could not be released (${releaseErr.message}); it stays pending and blocks this period until reconciled`)
+          } else if (!released || released.length === 0) {
+            // Nothing pending to release: the webhook already resolved the row (and owns it now).
+            errorMessages.push(`autopay lease ${lease.id}: ${stripeErr.message} — reservation ${paymentId} was already resolved by a webhook; left as is`)
+          } else {
+            errorMessages.push(`autopay lease ${lease.id}: ${stripeErr.message}`)
+          }
+          continue
+        }
+
+        // Write the PI id + status back onto the reservation. Guarded to rows still
+        // pending/processing so a webhook that already advanced the row is never regressed.
+        const { error: writeErr } = await db.from('payments')
+          .update({ stripe_payment_intent_id: pi.id, stripe_status: pi.status })
+          .eq('id', paymentId)
+          .in('stripe_status', ['pending', 'processing'])
+          .select('id')
+        if (writeErr) {
+          // The debit is real. The reservation (pending, correct lease/amount/period, its
+          // client_request_id in the PI metadata) is the recoverable trace: the webhook completes
+          // it, and meanwhile it blocks a second debit. Surface loudly.
+          autopayErrors++
+          errorMessages.push(`autopay lease ${lease.id}: payment ${pi.id} created but not written back to reservation ${paymentId}: ${writeErr.message}`)
         }
       }
     }
@@ -492,9 +641,31 @@ cronRouter.post('/monthly-billing', async (c) => {
   // must not look like a normal 200 (OI-162/#1 review round 2 finding #2, round 3 finding #7):
   // the charge-bulk-upsert failing means the ENTIRE portfolio got zero charges this run; a failed
   // autopay pre-check or debit-input lookup means that whole batch got zero debit attempts.
-  const status = (chargesBulkFailed || voidRecheckFailed || priorAutopayCheckFailed || debitInputsBulkFailed) ? 500 : 200
-  return c.json({ posted, skipped, errors, chargeErrors, autopayErrors, errorMessages, remaining, year, month, voidedSkipped, notStarted, expiredUnbilled, leaseExceptions }, status)
+  // reservationFailed (0031): a reserve_autopay_payment call failed or returned garbage, so that
+  // lease's state is unknown and it got no debit attempt — the same "never debit blind" class.
+  const status = (chargesBulkFailed || voidRecheckFailed || priorAutopayCheckFailed || debitInputsBulkFailed || reservationFailed) ? 500 : 200
+  return c.json({ posted, skipped, errors, chargeErrors, autopayErrors, errorMessages, remaining, year, month, voidedSkipped, notStarted, expiredUnbilled, leaseExceptions, frozenByBalanceForward }, status)
 })
+
+// Shape returned by reserve_autopay_payment() (supabase/migrations/0031_autopay_reservation.sql).
+interface AutopayReservation {
+  outcome: 'reserved' | 'existing' | 'nothing_due'
+  payment_id?: string
+  client_request_id?: string
+  amount_cents?: number
+}
+
+// Stripe error classes that mean the create was rejected WITHOUT a (charging) PaymentIntent;
+// everything else is indeterminate. server/routes/stripe.ts (portal ACH) also treats
+// StripeRateLimitError as definitive; here it is NOT: stripe-node retries a connection error once
+// (maxNetworkRetries), so a 429 on that retry can follow a first attempt Stripe did execute, and
+// releasing the reservation then would leave a live debit with no row that counts it.
+const DEFINITIVE_STRIPE_FAILURES = [
+  Stripe.errors.StripeInvalidRequestError,
+  Stripe.errors.StripeCardError,
+  Stripe.errors.StripeAuthenticationError,
+  Stripe.errors.StripePermissionError,
+]
 
 // OI-047: the recipients only scope the sent_notifications dedup-key set — they do not control
 // who receives mail. The actual send recipient is $script:EmailTo in ping-crons-lib.ps1 on the
@@ -761,7 +932,7 @@ cronRouter.post('/delinquency-check', async (c) => {
   if (arErr) return c.json({ error: arErr.message }, 500)
   if (!arRows || arRows.length === 0) return c.json({ late_fees_posted: 0, delinquent_count: 0, payments_feed_absent: paymentsFeedAbsent, late_fees_enabled: !lateFeesDisabled, email: buildEmail([], 0) })
 
-  type ARRow = { lease_id: string; tenant_id: string; tenant_name: string; property_name: string | null; suite: string | null; balance: number }
+  type ARRow = { lease_id: string; tenant_id: string; tenant_name: string; property_name: string | null; suite: string | null; balance: number; balance_forward?: number | string | null; balance_forward_as_of?: string | null }
 
   // GRACE_DAYS cutoff is the same for every row — compute once.
   const cutoffDate = new Date()
@@ -836,6 +1007,17 @@ cronRouter.post('/delinquency-check', async (c) => {
     recentByLease.set(r.lease_id, (recentByLease.get(r.lease_id) ?? 0) + amt)
   }
   const existingFeeLeaseIds = new Set((existingFeeRes.data as { lease_id: string }[]).map((r) => r.lease_id))
+
+  // 0030: ar_ledger.balance includes the lease's balance forward from QuickBooks. A positive one is
+  // owed as of its as_of date, like a charge due then: when that date is inside the grace window it
+  // is "recent" too. (A negative one is a credit and simply lowers the balance.)
+  for (const ar of arRows as ARRow[]) {
+    const bf = Number(ar.balance_forward ?? 0)
+    if (!Number.isFinite(bf)) return c.json({ error: `non-numeric ar_ledger.balance_forward for lease ${ar.lease_id}` }, 500)
+    if (bf > 0 && typeof ar.balance_forward_as_of === 'string' && ar.balance_forward_as_of > cutoffStr) {
+      recentByLease.set(ar.lease_id, (recentByLease.get(ar.lease_id) ?? 0) + bf)
+    }
+  }
 
   // Half-cent tolerance: balances and amounts are 2dp NUMERIC in Postgres but arrive as IEEE
   // doubles, and the subtraction can leave ~1e-13 of noise — never fine a tenant over noise.

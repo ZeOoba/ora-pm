@@ -8,13 +8,18 @@
 //     (Gabriel ruling 2026-11-09). Anything else (failed, returned, canceled, unknown) is excluded.
 //     Status is today's status — the schema keeps no status history.
 //   * no credits: charges.amount is CHECK (>= 0) and there is no credit table.
+//   * balance forward (0030): the lease's one live opening-balance adjustment from QuickBooks
+//     (signed; ar_ledger.balance_forward) counts on its as_of date. Before `start` it is part of
+//     the opening balance; inside the period it is a line, "Balance forward from prior system",
+//     after that day's charges and payments (it is the balance at the end of as_of). For aging, a
+//     positive one is owed as of its date like a charge due then; a negative one is a credit.
 //
 // Period membership is by posting date: charges.charge_date, payments.payment_date.
 //   opening = Σ charges before start − Σ counted payments before start
 //   closing = opening + Σ period charges − Σ period counted payments   (the balance as of `end`)
 // Aging is as of `end`, oldest-first (OI-234) via allocateOldestFirst over the charges posted on
 // or before `end`, so the closing balance sits on the newest charges and the buckets sum to it.
-import { allocateOldestFirst, daysPastDue, type AgingBucketsCents } from './ar-aging'
+import { allocateOldestFirst, balanceForwardAgingCharge, daysPastDue, type AgingBucketsCents } from './ar-aging'
 
 export interface StatementCharge {
   id: string
@@ -45,14 +50,29 @@ export function classifyPayment(p: { method: string; stripe_status: string | nul
   return 'excluded'
 }
 
+export interface StatementBalanceForward {
+  id: string
+  as_of: string
+  amountCents: number // signed: positive = owed, negative = credit
+}
+
+export const BALANCE_FORWARD_LABEL = 'Balance forward from prior system'
+
 export interface StatementLine {
   date: string
-  kind: 'charge' | 'payment'
+  kind: 'charge' | 'payment' | 'balance_forward'
   id: string
   label: string
-  amountCents: number
+  amountCents: number // charges and payments: positive; balance_forward: signed
   balanceCents: number
 }
+
+/** What a line does to the balance, signed. */
+export function lineEffectCents(l: Pick<StatementLine, 'kind' | 'amountCents'>): number {
+  return l.kind === 'payment' ? -l.amountCents : l.amountCents
+}
+
+const KIND_ORDER: Record<StatementLine['kind'], number> = { charge: 0, payment: 1, balance_forward: 2 }
 
 export interface PendingLine {
   date: string
@@ -66,6 +86,7 @@ export interface Statement {
   openingCents: number
   chargesCents: number
   paymentsCents: number
+  forwardCents: number // the balance forward when it falls inside the period (0 otherwise)
   closingCents: number
   lines: StatementLine[]
   pending: PendingLine[]
@@ -108,10 +129,12 @@ function assertDate(label: string, d: string): void {
 export function buildStatement(input: {
   charges: readonly StatementCharge[]
   payments: readonly StatementPayment[]
+  balanceForward?: StatementBalanceForward | null
   start: string
   end: string
 }): Statement {
   const { charges, payments, start, end } = input
+  const bf = input.balanceForward ?? null
   assertDate('start', start)
   assertDate('end', end)
   if (start > end) throw new Error(`invalid statement range: start ${start} is after end ${end}`)
@@ -123,6 +146,10 @@ export function buildStatement(input: {
   for (const p of payments) {
     if (!Number.isInteger(p.amountCents) || p.amountCents <= 0) throw new Error(`payment ${p.id}: amount is not positive integer cents: ${p.amountCents}`)
     assertDate(`payment ${p.id} payment_date`, p.payment_date)
+  }
+  if (bf) {
+    if (!Number.isInteger(bf.amountCents) || bf.amountCents === 0) throw new Error(`balance forward ${bf.id}: amount is not non-zero integer cents: ${bf.amountCents}`)
+    assertDate(`balance forward ${bf.id} as_of`, bf.as_of)
   }
 
   let openingCents = 0
@@ -152,29 +179,36 @@ export function buildStatement(input: {
     }
   }
 
-  // Date ascending; on the same day charges before payments; then id (stable, deterministic).
+  let forwardCents = 0
+  if (bf) {
+    if (bf.as_of < start) openingCents += bf.amountCents
+    else if (bf.as_of <= end) {
+      forwardCents = bf.amountCents
+      period.push({ date: bf.as_of, kind: 'balance_forward', id: bf.id, label: BALANCE_FORWARD_LABEL, amountCents: bf.amountCents })
+    }
+  }
+
+  // Date ascending; on the same day charges, then payments, then the balance forward; then id.
   period.sort((a, b) =>
     a.date !== b.date ? (a.date < b.date ? -1 : 1)
-      : a.kind !== b.kind ? (a.kind === 'charge' ? -1 : 1)
+      : a.kind !== b.kind ? KIND_ORDER[a.kind] - KIND_ORDER[b.kind]
         : a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
 
   let running = openingCents
   const lines: StatementLine[] = period.map(l => {
-    running += l.kind === 'charge' ? l.amountCents : -l.amountCents
+    running += lineEffectCents(l)
     return { ...l, balanceCents: running }
   })
-  const closingCents = openingCents + chargesCents - paymentsCents
+  const closingCents = openingCents + chargesCents - paymentsCents + forwardCents
   if (running !== closingCents) throw new Error(`statement does not foot: running ${running} != closing ${closingCents}`)
 
   pending.sort((a, b) => (a.date !== b.date ? (a.date < b.date ? -1 : 1) : a.id < b.id ? -1 : 1))
-  const aging = allocateOldestFirst(
-    closingCents,
-    charges.filter(c => c.charge_date <= end).map(c => ({ id: c.id, due_date: c.due_date, amountCents: c.amountCents })),
-    end,
-  )
+  const agingCharges = charges.filter(c => c.charge_date <= end).map(c => ({ id: c.id, due_date: c.due_date, amountCents: c.amountCents }))
+  if (bf && bf.amountCents > 0 && bf.as_of <= end) agingCharges.push(balanceForwardAgingCharge(bf))
+  const aging = allocateOldestFirst(closingCents, agingCharges, end)
 
   return {
-    start, end, openingCents, chargesCents, paymentsCents, closingCents, lines,
+    start, end, openingCents, chargesCents, paymentsCents, forwardCents, closingCents, lines,
     pending, pendingCents: pending.reduce((a, p) => a + p.amountCents, 0), aging,
   }
 }
