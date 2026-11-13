@@ -590,11 +590,14 @@ BEGIN
     v_old := OLD.gl_entity_id;
   ELSIF TG_TABLE_NAME = 'units' THEN
     IF NEW.property_id IS NOT DISTINCT FROM OLD.property_id THEN RETURN NEW; END IF;
-    SELECT p.gl_entity_id INTO v_entity FROM properties p WHERE p.id = NEW.property_id;
+    -- REFUTE-9 re-check (move vs move): lock the target property, so a concurrent move of that
+    -- property to another LLC either commits first (and its new LLC is read here) or waits for this.
+    SELECT p.gl_entity_id INTO v_entity FROM properties p WHERE p.id = NEW.property_id FOR SHARE;
     SELECT p.gl_entity_id INTO v_old FROM properties p WHERE p.id = OLD.property_id;
   ELSE
     IF NEW.unit_id IS NOT DISTINCT FROM OLD.unit_id THEN RETURN NEW; END IF;
-    SELECT p.gl_entity_id INTO v_entity FROM units u JOIN properties p ON p.id = u.property_id WHERE u.id = NEW.unit_id;
+    -- REFUTE-9 re-check (move vs move): lock the target unit and its property (see the units branch).
+    SELECT p.gl_entity_id INTO v_entity FROM units u JOIN properties p ON p.id = u.property_id WHERE u.id = NEW.unit_id FOR SHARE OF u, p;
     SELECT p.gl_entity_id INTO v_old FROM units u JOIN properties p ON p.id = u.property_id WHERE u.id = OLD.unit_id;
   END IF;
   -- REFUTE-9 F6: lock both entities (id order) so a move never interleaves with either one's tie-out

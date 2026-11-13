@@ -70,6 +70,9 @@ describe('migration 0032 — balance forwards in the ledger (textual pins)', () 
     const move = sql.slice(sql.indexOf('CREATE OR REPLACE FUNCTION balance_forward_entity_move()'))
     expect(move.slice(0, move.indexOf('END $$;'))).toMatch(/WHERE id IN \(v_entity, v_old\) ORDER BY id FOR SHARE/)
     expect(sql).toMatch(/CREATE TRIGGER balance_forwards_insert_guard BEFORE INSERT ON balance_forwards/)
+    // Move vs move: a unit/lease move locks its target property/unit before reading its LLC.
+    expect(move).toMatch(/FROM properties p WHERE p\.id = NEW\.property_id FOR SHARE;/)
+    expect(move).toMatch(/WHERE u\.id = NEW\.unit_id FOR SHARE OF u, p;/)
   })
 
   it('REFUTE-9 F1: inside a live forward, items count by their current state', () => {
