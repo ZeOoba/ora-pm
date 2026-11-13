@@ -79,8 +79,10 @@ while ($remaining -gt 0 -and $invocation -lt $MAX_INVOCATIONS) {
     $remaining = if ($null -ne $response.remaining) { $response.remaining } else { 0 }
 
     Write-Host "Billing triggered (call $invocation): posted=$($response.posted) skipped=$($response.skipped) errors=$($response.errors) chargeErrors=$($response.chargeErrors) autopayErrors=$($response.autopayErrors) remaining=$remaining"
-    if ($response.errors -gt 0) {
-      Write-Warning "Errors: $($response.errorMessages -join ', ')"
+    # Print every message, not only when errors > 0: some (e.g. a balance-forward lookup warning)
+    # are reported without counting as errors and were invisible here.
+    if ($response.errorMessages -and $response.errorMessages.Count -gt 0) {
+      Write-Warning "Messages: $($response.errorMessages -join ', ')"
     }
     # Lease-term exceptions (past end_date / invalid dates) are not errors - those leases were
     # deliberately NOT billed and need a human holdover/date decision - but they must be visible.
