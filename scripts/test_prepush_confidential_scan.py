@@ -841,6 +841,15 @@ class Units(unittest.TestCase):
         self.assertTrue(scan.sniff(b"junk prefix\n" + pdf).startswith("pdf"))   # prefixed PDF
         late_obj = b"x\n%PDF-1.7\n" + b" " * 2000 + b"7 0 obj<<>>"
         self.assertTrue(scan.sniff(late_obj).startswith("pdf"))
+        # No indirect object at all: the whole document inline in the trailer, term as a hex
+        # string, header past offset 0 (REFUTE e1f8114, C2 -- pypdf extracts the term).
+        hexterm = TERM.encode().hex().encode()
+        trailer_only = (b"readme\n%PDF-1.7\nxref\n0 1\n0000000000 65535 f \ntrailer\n"
+                        b"<< /Size 1 /Info << /Title <" + hexterm + b"> >> /Root << /Type "
+                        b"/Catalog /Pages << /Type /Pages /Count 1 /Kids [] >> >> >>\n%%EOF\n")
+        self.assertTrue(scan.sniff(trailer_only).startswith("pdf"))
+        for tok in (b"trailer", b"xref", b"startxref"):
+            self.assertTrue(scan.sniff(b"x\n%PDF-1.7\n" + tok + b"\n").startswith("pdf"), tok)
         # A text file that merely mentions the header near its top is plain content.
         self.assertIsNone(scan.sniff(b"# Notes\nA PDF starts with %PDF- then a version.\n"))
         self.assertIsNone(scan.sniff(b"See %PDF-1.4 headers; the objects are listed below.\n"))
