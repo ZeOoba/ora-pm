@@ -26,7 +26,11 @@ CREATE TABLE properties (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), name TEX
 -- Minimal app tables 0028 (AR posting) reads: lease → unit → property, charges, payments, with the
 -- columns and checks the ledger relies on (amounts in NUMERIC dollars, as in 0002/0016).
 CREATE TABLE units (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), property_id UUID NOT NULL REFERENCES properties(id), suite TEXT);
-CREATE TABLE leases (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), unit_id UUID NOT NULL REFERENCES units(id));
+-- tenants + leases.tenant_id + auth.uid(): 0030 (balance forwards) recreates ar_ledger and a tenant-own policy.
+CREATE TABLE tenants (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), name TEXT NOT NULL DEFAULT 'Tenant', auth_user_id UUID);
+CREATE SCHEMA IF NOT EXISTS auth;
+CREATE OR REPLACE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql STABLE AS $$ SELECT NULL::uuid $$;
+CREATE TABLE leases (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), unit_id UUID NOT NULL REFERENCES units(id), tenant_id UUID REFERENCES tenants(id));
 CREATE TABLE charges (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(), lease_id UUID NOT NULL REFERENCES leases(id),
   charge_date DATE NOT NULL, due_date DATE NOT NULL DEFAULT CURRENT_DATE,
@@ -44,7 +48,7 @@ ALTER ROLE service_role BYPASSRLS;
 SQL
 
 # Apply twice: the migration must be re-runnable.
-for m in supabase/migrations/0023_gl_core.sql supabase/migrations/0025_gl_qb_account_type.sql supabase/migrations/0027_gl_opening_balance.sql supabase/migrations/0028_gl_ar_posting.sql supabase/migrations/0029_gl_ar_cash_posting.sql; do
+for m in supabase/migrations/0023_gl_core.sql supabase/migrations/0025_gl_qb_account_type.sql supabase/migrations/0027_gl_opening_balance.sql supabase/migrations/0028_gl_ar_posting.sql supabase/migrations/0029_gl_ar_cash_posting.sql supabase/migrations/0030_balance_forwards.sql; do
   psql "$GL_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f "$m"
   psql "$GL_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f "$m"
 done
@@ -55,4 +59,5 @@ psql "$GL_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f supabase/tests/gl_shadow_f
 psql "$GL_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f supabase/tests/gl_opening_balance.test.sql
 psql "$GL_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f supabase/tests/gl_ar_posting.test.sql
 psql "$GL_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f supabase/tests/gl_ar_cash_posting.test.sql
+psql "$GL_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f supabase/tests/balance_forwards.test.sql
 echo "verify-gl-sql: all GL SQL checks passed"
