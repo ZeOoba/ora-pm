@@ -472,7 +472,7 @@ describe('POST /api/cron/monthly-billing — balance forwards from QuickBooks (0
     const res = await postBilling()
     const body = await res.json() as { posted: number; errors: number; chargeErrors: number; errorMessages: string[] }
     expect(body.posted).toBe(0)
-    // Counted as an error so trigger-billing.ps1 prints errorMessages (REFUTE: it only prints when errors > 0).
+    // Counted as an error too, so it shows in the run's error count (trigger-billing.ps1 prints every message).
     expect(body.chargeErrors).toBe(1)
     expect(body.errors).toBe(1)
     expect(state.charges.filter(c => c.lease_id === 'lease_a')).toEqual([])

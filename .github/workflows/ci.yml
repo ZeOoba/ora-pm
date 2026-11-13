@@ -20,6 +20,10 @@ concurrency:
 jobs:
   ci:
     runs-on: ubuntu-latest
+    # issues: write is for the deploy-failure alert (last step); everything else only reads.
+    permissions:
+      contents: read
+      issues: write
     # Throwaway Postgres for the GL money-rule suite (scripts/verify-gl-sql.sh). pg-mem cannot run
     # the plpgsql triggers that enforce balance, immutability and period locks, so this is the
     # only place CI executes them. Test-only credentials; the container dies with the job.
@@ -194,14 +198,34 @@ jobs:
 
       - name: Check Cloudflare Pages production env
         if: github.ref == 'refs/heads/main' && github.event_name == 'push' && steps.tip.outputs.deploy == 'true'
-        run: node scripts/check-deploy-env.mjs pages
+        # Retries only on a transient Cloudflare failure (5xx / non-JSON reply); a missing variable fails at once.
+        run: scripts/retry-transient.sh node scripts/check-deploy-env.mjs pages
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
 
       - name: Deploy to Cloudflare Pages
         if: github.ref == 'refs/heads/main' && github.event_name == 'push' && steps.tip.outputs.deploy == 'true'
-        run: npx wrangler pages deploy ./dist --project-name ora-pm --commit-dirty=true
+        # A re-upload is idempotent (wrangler skips files already uploaded); retried only on a transient Cloudflare failure.
+        run: scripts/retry-transient.sh npx wrangler pages deploy ./dist --project-name ora-pm --commit-dirty=true
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      # A failed run on main means production did not get this commit. Nobody watches CI, so open
+      # (or comment on) one "Production deploy failed" issue; GitHub notifies the repo owner. The
+      # issue says only which commit and run failed (the repo is public): no logs, no env.
+      - name: Alert on a failed production deploy
+        if: failure() && github.ref == 'refs/heads/main' && github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          body="Production did not get \`${GITHUB_SHA::7}\` (run attempt ${GITHUB_RUN_ATTEMPT}): ${run_url}. Fix or re-run the failed job; close this issue once main deploys."
+          existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search 'in:title "Production deploy failed"' --json number --jq '.[0].number // empty')"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "Production deploy failed" --body "$body"
+          fi
