@@ -40,6 +40,14 @@ const render = (node: React.ReactElement) => renderToStaticMarkup(
 )
 
 describe('Portal home', () => {
+  it('says how much of the balance was carried forward from the prior system (0030), or nothing when none', () => {
+    results.current = { ...data(18412.51), 'portal-me': ok({ tenant: { name: 'KC Brewing Supply' }, total_balance: 18412.51, balance_forward: { amount: -250, as_of: '2026-11-12' } }) }
+    const html = render(createElement(PortalDashboard))
+    expect(html).toMatch(/Includes a credit of \$250\.00 carried forward from our previous accounting system as of/)
+    results.current = data(18412.51)
+    expect(render(createElement(PortalDashboard))).not.toContain('carried forward')
+  })
+
   it('leads with the balance and routes payment through the existing Pay Now page', () => {
     results.current = data(18412.51)
     const html = render(createElement(PortalDashboard))
