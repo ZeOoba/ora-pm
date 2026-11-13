@@ -84,14 +84,14 @@ SET search_path = public, pg_temp
 AS $$
 BEGIN
   IF TG_OP = 'DELETE' OR TG_OP = 'TRUNCATE' THEN
-    RAISE EXCEPTION 'balance forwards cannot be deleted; void it instead' USING ERRCODE = 'check_violation';
+    RAISE EXCEPTION 'bf: balance forwards cannot be deleted; void it instead' USING ERRCODE = 'check_violation';
   END IF;
   IF OLD.voided_at IS NOT NULL THEN
-    RAISE EXCEPTION 'balance forward % is already voided', OLD.id USING ERRCODE = 'check_violation';
+    RAISE EXCEPTION 'bf: balance forward % is already voided', OLD.id USING ERRCODE = 'check_violation';
   END IF;
   IF (NEW.id, NEW.lease_id, NEW.as_of, NEW.qb_balance, NEW.app_balance, NEW.amount, NEW.qb_customer, NEW.source, NEW.source_ref, NEW.created_by, NEW.created_at)
      IS DISTINCT FROM (OLD.id, OLD.lease_id, OLD.as_of, OLD.qb_balance, OLD.app_balance, OLD.amount, OLD.qb_customer, OLD.source, OLD.source_ref, OLD.created_by, OLD.created_at) THEN
-    RAISE EXCEPTION 'a balance forward can only be voided, not changed' USING ERRCODE = 'check_violation';
+    RAISE EXCEPTION 'bf: a balance forward can only be voided, not changed' USING ERRCODE = 'check_violation';
   END IF;
   RETURN NEW;
 END $$;
@@ -135,16 +135,16 @@ DECLARE
   v_seen UUID[] := '{}';
 BEGIN
   IF pg_catalog.current_setting('transaction_isolation') <> 'read committed' THEN
-    RAISE EXCEPTION 'apply_balance_forwards must run in READ COMMITTED' USING ERRCODE = 'invalid_transaction_state';
+    RAISE EXCEPTION 'bf: apply_balance_forwards must run in READ COMMITTED' USING ERRCODE = 'invalid_transaction_state';
   END IF;
   IF p_as_of IS NULL OR p_as_of > (pg_catalog.now() AT TIME ZONE 'America/Chicago')::date THEN
-    RAISE EXCEPTION 'balance forward date % is missing or in the future', p_as_of USING ERRCODE = 'check_violation';
+    RAISE EXCEPTION 'bf: balance forward date % is missing or in the future', p_as_of USING ERRCODE = 'check_violation';
   END IF;
   IF p_actor IS NULL OR btrim(p_actor) = '' THEN
-    RAISE EXCEPTION 'balance forwards need the importing user' USING ERRCODE = 'check_violation';
+    RAISE EXCEPTION 'bf: balance forwards need the importing user' USING ERRCODE = 'check_violation';
   END IF;
   IF p_rows IS NULL OR pg_catalog.jsonb_typeof(p_rows) <> 'array' OR pg_catalog.jsonb_array_length(p_rows) = 0 THEN
-    RAISE EXCEPTION 'no balance forward rows given' USING ERRCODE = 'check_violation';
+    RAISE EXCEPTION 'bf: no balance forward rows given' USING ERRCODE = 'check_violation';
   END IF;
 
   FOR r IN SELECT * FROM pg_catalog.jsonb_array_elements(p_rows) LOOP
@@ -152,36 +152,36 @@ BEGIN
     v_qb := (r->>'qb_balance')::numeric;
     v_expected := (r->>'expected_app_balance')::numeric;
     IF v_lease IS NULL OR v_qb IS NULL OR v_expected IS NULL THEN
-      RAISE EXCEPTION 'each row needs lease_id, qb_balance and expected_app_balance' USING ERRCODE = 'check_violation';
+      RAISE EXCEPTION 'bf: each row needs lease_id, qb_balance and expected_app_balance' USING ERRCODE = 'check_violation';
     END IF;
     IF v_qb <> pg_catalog.round(v_qb, 2) OR v_expected <> pg_catalog.round(v_expected, 2) THEN
-      RAISE EXCEPTION 'lease %: amounts must be whole cents', v_lease USING ERRCODE = 'check_violation';
+      RAISE EXCEPTION 'bf: lease %: amounts must be whole cents', v_lease USING ERRCODE = 'check_violation';
     END IF;
     IF v_lease = ANY (v_seen) THEN
-      RAISE EXCEPTION 'lease % appears twice', v_lease USING ERRCODE = 'check_violation';
+      RAISE EXCEPTION 'bf: lease % appears twice', v_lease USING ERRCODE = 'check_violation';
     END IF;
     v_seen := v_seen || v_lease;
 
     PERFORM 1 FROM leases WHERE id = v_lease FOR UPDATE;
     IF NOT FOUND THEN
-      RAISE EXCEPTION 'lease % does not exist', v_lease USING ERRCODE = 'foreign_key_violation';
+      RAISE EXCEPTION 'bf: lease % does not exist', v_lease USING ERRCODE = 'foreign_key_violation';
     END IF;
     IF EXISTS (SELECT 1 FROM balance_forwards b WHERE b.lease_id = v_lease AND b.voided_at IS NULL) THEN
-      RAISE EXCEPTION 'lease % already has a balance forward; void it first', v_lease USING ERRCODE = 'unique_violation';
+      RAISE EXCEPTION 'bf: lease % already has a balance forward; void it first', v_lease USING ERRCODE = 'unique_violation';
     END IF;
     v_entity := gl_lease_entity(v_lease);
     IF v_entity IS NOT NULL AND EXISTS (SELECT 1 FROM gl_ar_tieouts t WHERE t.entity_id = v_entity) THEN
-      RAISE EXCEPTION 'lease %: its LLC is already tied out in the ledger, which does not count balance forwards yet', v_lease
+      RAISE EXCEPTION 'bf: lease %: its LLC is already tied out in the ledger, which does not count balance forwards yet', v_lease
         USING ERRCODE = 'check_violation';
     END IF;
     IF EXISTS (SELECT 1 FROM payments p WHERE p.lease_id = v_lease AND p.payment_date <= p_as_of
                  AND p.method = 'ach_stripe' AND p.stripe_status IN ('pending', 'processing')) THEN
-      RAISE EXCEPTION 'lease % has an ACH payment still pending on or before %; wait for it to settle', v_lease, p_as_of
+      RAISE EXCEPTION 'bf: lease % has an ACH payment still pending on or before %; wait for it to settle', v_lease, p_as_of
         USING ERRCODE = 'check_violation';
     END IF;
     v_app := balance_forward_app_cents(v_lease, p_as_of);
     IF v_app <> pg_catalog.round(v_expected * 100) THEN
-      RAISE EXCEPTION 'lease %: the app balance as of % is now %, not % as previewed; preview again',
+      RAISE EXCEPTION 'bf: lease %: the app balance as of % is now %, not % as previewed; preview again',
         v_lease, p_as_of, (v_app::numeric / 100), v_expected USING ERRCODE = 'serialization_failure';
     END IF;
     CONTINUE WHEN pg_catalog.round(v_qb * 100) = v_app;
@@ -206,7 +206,7 @@ BEGIN
     WHERE id = p_id AND voided_at IS NULL
     RETURNING * INTO v_row;
   IF NOT FOUND THEN
-    RAISE EXCEPTION 'balance forward % does not exist or is already voided', p_id USING ERRCODE = 'no_data_found';
+    RAISE EXCEPTION 'bf: balance forward % does not exist or is already voided', p_id USING ERRCODE = 'no_data_found';
   END IF;
   RETURN v_row;
 END $$;
@@ -239,7 +239,7 @@ BEGIN
     END IF;
   END IF;
   IF pg_catalog.current_setting('transaction_isolation') <> 'read committed' THEN
-    RAISE EXCEPTION 'changes to charges and payments must run in READ COMMITTED (balance forward guard)'
+    RAISE EXCEPTION 'bf: changes to charges and payments must run in READ COMMITTED (balance forward guard)'
       USING ERRCODE = 'invalid_transaction_state';
   END IF;
   -- Wait out a concurrent import on the same lease, then read what it committed.
@@ -249,7 +249,7 @@ BEGIN
       JOIN balance_forwards b ON b.lease_id = x.lease AND b.voided_at IS NULL
      WHERE x.d <= b.as_of
   LOOP
-    RAISE EXCEPTION 'lease % has a balance forward from QuickBooks as of %; its % dated on or before then (%) cannot change. Void the balance forward first, then import again.',
+    RAISE EXCEPTION 'bf: lease % has a balance forward from QuickBooks as of %; its % dated on or before then (%) cannot change. Void the balance forward first, then import again.',
       v_old_lease, v_cut, TG_TABLE_NAME, v_old_date USING ERRCODE = 'check_violation';
   END LOOP;
   RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;

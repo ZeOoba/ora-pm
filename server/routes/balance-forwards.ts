@@ -2,7 +2,7 @@
 // opening-balance adjustment. Per LLC (properties.entity_llc) and cut-off date: preview from the
 // QuickBooks A/R Aging Summary CSV (plus manual figures), then apply with the preview's plan hash.
 // The planning rules are in server/lib/balance-forward-import.ts; the money rules in the migration.
-import { Hono, type Context } from 'hono'
+import { Hono } from 'hono'
 import { getDb } from '../db/client'
 import { dbError } from '../lib/api-error'
 import { fetchAllPages, fetchChunked, POSTGREST_MAX_ROWS } from '../lib/postgrest-paging'
@@ -11,7 +11,6 @@ import { ledgerToday } from '../lib/gl'
 import { MAX_AGING_CHARS, parseAgingSummary, planBalanceForwards, type BfLease, type BfPlan } from '../lib/balance-forward-import'
 
 type Env = { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string }
-type Ctx = Context<{ Bindings: Env }>
 type Db = ReturnType<typeof getDb>
 
 export const balanceForwardsRouter = new Hono<{ Bindings: Env }>()
@@ -20,12 +19,6 @@ const CHUNK = 100
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
-// The database's own refusals (0030) are for the admin to read; they never carry other tenants' data.
-function writeError(c: Ctx, err: { message: string; code?: string }, publicMsg: string) {
-  if (err.code === '40001' || err.code === '23505') return c.json({ error: err.message }, 409)
-  if (err.code === '23514' || err.code === '23503' || err.code === 'P0002' || err.code === '25000') return c.json({ error: err.message }, 422)
-  return dbError(c, err, publicMsg)
-}
 
 /** The LLC names on properties, with how many properties each has. */
 balanceForwardsRouter.get('/llcs', async (c) => {
@@ -170,7 +163,7 @@ balanceForwardsRouter.post('/plan', async (c) => {
     p_actor: by,
     p_rows: rows,
   })
-  if (error) return writeError(c, error, 'Failed to apply the balance forwards')
+  if (error) return dbError(c, error, 'Failed to apply the balance forwards') // 'bf: ' refusals reach the admin as written
   return c.json({ data: { ...result, applied: true, written: data ?? [] } }, 201)
 })
 
@@ -201,6 +194,6 @@ balanceForwardsRouter.post('/:id/void', async (c) => {
   const by = c.get('adminEmail')
   if (!by) return c.json({ error: 'Voiding requires an identified admin' }, 403)
   const { data, error } = await getDb(c.env).rpc('void_balance_forward', { p_id: id, p_actor: by, p_reason: reason.slice(0, 500) })
-  if (error) return writeError(c, error, 'Failed to void the balance forward')
+  if (error) return dbError(c, error, 'Failed to void the balance forward')
   return c.json({ data })
 })

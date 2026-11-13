@@ -133,12 +133,17 @@ describe('POST /api/balance-forwards/plan', () => {
 
   it('maps the database’s refusals: a moved balance → 409, a rule → 422', async () => {
     const { data } = await (await post({ llc: LLC, as_of: '2026-11-12', csv })).json() as { data: Plan }
-    mockRpc.mockResolvedValueOnce({ data: null, error: { code: '40001', message: 'lease x: the app balance as of 2026-11-12 is now 1700, not 1600 as previewed; preview again' } })
+    mockRpc.mockResolvedValueOnce({ data: null, error: { code: '40001', message: 'bf: lease x: the app balance as of 2026-11-12 is now 1700, not 1600 as previewed; preview again' } })
     const moved = await post({ llc: LLC, as_of: '2026-11-12', csv, apply: true, expected_plan_hash: data.plan_hash })
     expect(moved.status).toBe(409)
-    expect(((await moved.json()) as { error: string }).error).toMatch(/preview again/)
-    mockRpc.mockResolvedValueOnce({ data: null, error: { code: '23514', message: 'lease x: its LLC is already tied out in the ledger' } })
+    expect(((await moved.json()) as { error: string }).error).toBe('lease x: the app balance as of 2026-11-12 is now 1700, not 1600 as previewed; preview again')
+    mockRpc.mockResolvedValueOnce({ data: null, error: { code: '23514', message: 'bf: lease x: its LLC is already tied out in the ledger' } })
     expect((await post({ llc: LLC, as_of: '2026-11-12', csv, apply: true, expected_plan_hash: data.plan_hash })).status).toBe(422)
+    // Anything not written for the user stays generic.
+    mockRpc.mockResolvedValueOnce({ data: null, error: { code: '23514', message: 'new row violates check constraint "balance_forwards_amount_nonzero"' } })
+    const raw = await post({ llc: LLC, as_of: '2026-11-12', csv, apply: true, expected_plan_hash: data.plan_hash })
+    expect(raw.status).toBe(500)
+    expect(((await raw.json()) as { error: string }).error).toBe('Failed to apply the balance forwards')
   })
 
   it.each([
