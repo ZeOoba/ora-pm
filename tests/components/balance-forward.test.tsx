@@ -49,3 +49,12 @@ describe('Balance forward page', () => {
     expect(flatNavItems().some((i) => i.to === '/books/balance-forward' && i.label === 'Balance forward')).toBe(true)
   })
 })
+
+describe('dayBefore', () => {
+  it('is the latest allowed cut-off (before today), across month and year ends', async () => {
+    const { dayBefore } = await import('../../src/pages/books/balance-forward-helpers')
+    expect(dayBefore('2026-11-13')).toBe('2026-11-12')
+    expect(dayBefore('2027-01-01')).toBe('2026-12-31')
+    expect(dayBefore('2028-03-01')).toBe('2028-02-29')
+  })
+})

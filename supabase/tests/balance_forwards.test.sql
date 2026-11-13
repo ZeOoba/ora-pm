@@ -36,8 +36,9 @@ INSERT INTO charges (id, lease_id, charge_date, due_date, type, amount) VALUES
   ('b0c00000-0000-4000-8000-000000000003', 'b0300000-0000-4000-8000-000000000001', '2026-07-01', '2026-07-01', 'rent', 1000);
 INSERT INTO payments (id, lease_id, payment_date, amount, method, stripe_status) VALUES
   ('b0d00000-0000-4000-8000-000000000001', 'b0300000-0000-4000-8000-000000000001', '2026-05-10', 800, 'check', NULL),
--- L2: an ACH dated before the cut-off, still processing.
-  ('b0d00000-0000-4000-8000-000000000002', 'b0300000-0000-4000-8000-000000000002', '2026-06-20', 50, 'ach_stripe', 'processing');
+-- L2: an ACH dated before the cut-off, still processing; another awaiting action (REFUTE-8 R5).
+  ('b0d00000-0000-4000-8000-000000000002', 'b0300000-0000-4000-8000-000000000002', '2026-06-20', 50, 'ach_stripe', 'processing'),
+  ('b0d00000-0000-4000-8000-000000000003', 'b0300000-0000-4000-8000-000000000002', '2026-06-21', 50, 'ach_stripe', 'requires_action');
 
 SELECT pg_temp.eq('app cents as of', balance_forward_app_cents('b0300000-0000-4000-8000-000000000001', '2026-06-30'), 120000);
 
@@ -47,7 +48,10 @@ SELECT pg_temp.expect_error($$SELECT * FROM apply_balance_forwards('2026-06-30',
 SELECT pg_temp.expect_error($$SELECT * FROM apply_balance_forwards('2026-06-30', 'qb_ar_aging', NULL, 'tester',
   '[{"lease_id":"b0300000-0000-4000-8000-000000000001","qb_balance":1500.005,"expected_app_balance":1200}]')$$, 'whole cents');
 SELECT pg_temp.expect_error($$SELECT * FROM apply_balance_forwards('2099-01-01', 'qb_ar_aging', NULL, 'tester',
-  '[{"lease_id":"b0300000-0000-4000-8000-000000000001","qb_balance":1500,"expected_app_balance":1200}]')$$, 'in the future');
+  '[{"lease_id":"b0300000-0000-4000-8000-000000000001","qb_balance":1500,"expected_app_balance":1200}]')$$, 'must be before today');
+-- REFUTE-8 R2: today itself is refused too (same-day activity must stay open).
+SELECT pg_temp.expect_error(pg_catalog.format($q$SELECT * FROM apply_balance_forwards(%L, 'qb_ar_aging', NULL, 'tester',
+  '[{"lease_id":"b0300000-0000-4000-8000-000000000003","qb_balance":1,"expected_app_balance":0}]')$q$, (now() AT TIME ZONE 'America/Chicago')::date), 'must be before today');
 SELECT pg_temp.expect_error($$SELECT * FROM apply_balance_forwards('2026-06-30', 'qb_ar_aging', NULL, 'tester', '[]')$$, 'no balance forward rows');
 SELECT pg_temp.expect_error($$SELECT * FROM apply_balance_forwards('2026-06-30', 'qb_ar_aging', NULL, ' ',
   '[{"lease_id":"b0300000-0000-4000-8000-000000000001","qb_balance":1500,"expected_app_balance":1200}]')$$, 'importing user');
@@ -91,6 +95,19 @@ SELECT pg_temp.expect_error($$DELETE FROM payments WHERE id = 'b0d00000-0000-400
 SELECT pg_temp.expect_error($$UPDATE payments SET method = 'wire' WHERE id = 'b0d00000-0000-4000-8000-000000000001'$$, 'cannot change');
 -- Moving a pre-cut-off charge to another lease is a change on the old lease too.
 SELECT pg_temp.expect_error($$UPDATE charges SET lease_id = 'b0300000-0000-4000-8000-000000000003' WHERE id = 'b0c00000-0000-4000-8000-000000000002'$$, 'cannot change');
+-- REFUTE-8 R1: a billing re-run re-sending an existing charge (same idempotency key) is not refused.
+UPDATE charges SET idempotency_key = 'rent_L1_2026_06' WHERE id = 'b0c00000-0000-4000-8000-000000000002';
+INSERT INTO charges (lease_id, charge_date, due_date, type, amount, idempotency_key)
+  VALUES ('b0300000-0000-4000-8000-000000000001', '2026-06-01', '2026-06-01', 'rent', 1000, 'rent_L1_2026_06') ON CONFLICT (idempotency_key) DO NOTHING;
+SELECT pg_temp.expect_error($$INSERT INTO charges (lease_id, charge_date, due_date, type, amount, idempotency_key)
+  VALUES ('b0300000-0000-4000-8000-000000000001', '2026-06-01', '2026-06-01', 'rent', 1000, 'rent_L1_2026_06_new') ON CONFLICT (idempotency_key) DO NOTHING$$, 'cannot change');
+-- … and ON CONFLICT DO UPDATE of a frozen row is still checked.
+SELECT pg_temp.expect_error($$INSERT INTO charges (lease_id, charge_date, due_date, type, amount, idempotency_key)
+  VALUES ('b0300000-0000-4000-8000-000000000001', '2026-06-01', '2026-06-01', 'rent', 1, 'rent_L1_2026_06') ON CONFLICT (idempotency_key) DO UPDATE SET amount = EXCLUDED.amount$$, 'cannot change');
+SELECT pg_temp.eq('June rent unchanged', (SELECT amount FROM charges WHERE idempotency_key = 'rent_L1_2026_06'), 1000);
+-- R4: TRUNCATE is refused while a balance forward is live.
+SELECT pg_temp.expect_error($$TRUNCATE charges CASCADE$$, 'cannot be truncated');
+SELECT pg_temp.expect_error($$TRUNCATE payments$$, 'cannot be truncated');
 -- Allowed: non-money edits to frozen rows, and anything dated after as_of, and other leases.
 UPDATE charges SET description = 'May rent', due_date = '2026-05-05' WHERE id = 'b0c00000-0000-4000-8000-000000000001';
 INSERT INTO charges (lease_id, charge_date, due_date, type, amount) VALUES ('b0300000-0000-4000-8000-000000000001', '2026-07-15', '2026-07-15', 'other', 5);
@@ -135,6 +152,18 @@ INSERT INTO gl_entities (id, name, accounting_basis) VALUES ('b0e00000-0000-4000
 UPDATE properties SET gl_entity_id = 'b0e00000-0000-4000-8000-000000000001' WHERE id = 'b0100000-0000-4000-8000-000000000001';
 SELECT pg_temp.expect_error($$INSERT INTO gl_ar_tieouts (entity_id, as_of, app_ar_cents, gl_ar_cents, opening_entry_id, confirmed_by)
   VALUES ('b0e00000-0000-4000-8000-000000000001', '2026-06-30', 0, 0, gen_random_uuid(), 'tester')$$, 'AR tie-out does not count');
+-- REFUTE-8 R3: a lease with a live balance forward cannot be moved into a tied-out LLC — by its
+-- property, its unit, or the lease itself.
+DO $$
+DECLARE v_ent UUID; v_unit UUID;
+BEGIN
+  SELECT t.entity_id INTO v_ent FROM gl_ar_tieouts t LIMIT 1;
+  SELECT u.id INTO v_unit FROM units u JOIN properties p ON p.id = u.property_id WHERE p.gl_entity_id = v_ent LIMIT 1;
+  IF v_ent IS NULL OR v_unit IS NULL THEN RAISE EXCEPTION 'fixture missing: no tied-out LLC unit'; END IF;
+  PERFORM pg_temp.expect_error(pg_catalog.format($q$UPDATE properties SET gl_entity_id = %L WHERE id = 'b0100000-0000-4000-8000-000000000001'$q$, v_ent), 'cannot move into an LLC already tied out');
+  PERFORM pg_temp.expect_error(pg_catalog.format($q$UPDATE leases SET unit_id = %L WHERE id = 'b0300000-0000-4000-8000-000000000001'$q$, v_unit), 'cannot move into an LLC already tied out');
+  PERFORM pg_temp.expect_error(pg_catalog.format($q$UPDATE units SET property_id = (SELECT property_id FROM units WHERE id = %L) WHERE id = 'b0200000-0000-4000-8000-000000000001'$q$, v_unit), 'cannot move into an LLC already tied out');
+END $$;
 -- …and an LLC already tied out (fixtures from gl_ar_posting.test.sql) refuses a new balance forward.
 DO $$
 DECLARE v_lease UUID; v_app NUMERIC;

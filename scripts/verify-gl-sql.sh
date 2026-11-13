@@ -35,11 +35,13 @@ CREATE TABLE charges (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(), lease_id UUID NOT NULL REFERENCES leases(id),
   charge_date DATE NOT NULL, due_date DATE NOT NULL DEFAULT CURRENT_DATE,
   type TEXT NOT NULL CHECK (type IN ('rent','cam_estimate','cam_true_up','late_fee','security_deposit','utility_water','utility_gas','utility_electric','utility_other','percentage_rent','other')),
-  amount NUMERIC NOT NULL CHECK (amount >= 0), description TEXT, voided_at TIMESTAMPTZ, void_reason TEXT);
+  amount NUMERIC NOT NULL CHECK (amount >= 0), description TEXT, voided_at TIMESTAMPTZ, void_reason TEXT,
+  idempotency_key TEXT UNIQUE);
 CREATE TABLE payments (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(), lease_id UUID NOT NULL REFERENCES leases(id),
   payment_date DATE NOT NULL, amount NUMERIC NOT NULL CHECK (amount > 0),
-  method TEXT NOT NULL CHECK (method IN ('ach_stripe','check','wire','other')), stripe_status TEXT);
+  method TEXT NOT NULL CHECK (method IN ('ach_stripe','check','wire','other')), stripe_status TEXT,
+  idempotency_key TEXT UNIQUE);
 -- Supabase's defaults: every new public table is GRANT ALL to the API roles, and service_role
 -- bypasses RLS. The adversarial tests run as service_role against exactly those privileges.
 GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;

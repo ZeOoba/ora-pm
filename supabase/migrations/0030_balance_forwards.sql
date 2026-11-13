@@ -27,9 +27,24 @@
 --       and runs in READ COMMITTED, so a charge or payment racing an import is either seen by the
 --       import's recomputation or refused by the guard.
 --
+-- REFUTE-8 (adversarial pass on this PR) added:
+--   R1  the B3 guard lets an INSERT through when its idempotency_key already exists: the row will
+--       not land (ON CONFLICT DO NOTHING / the unique index), so a monthly-billing re-run that
+--       re-sends a whole month's charges is not refused because one lease has a balance forward.
+--   R2  as_of must be before today (US Central): same-day activity (late fees, ACH reservations,
+--       checks keyed in today) is never frozen by an import done the same day.
+--   R3  B4 without write skew: apply locks the lease's ledger entity row FOR SHARE before checking
+--       for a tie-out, and a tie-out insert locks it FOR UPDATE before checking for balance
+--       forwards; a property, unit or lease moved into a tied-out entity is refused while it
+--       carries a live balance forward.
+--   R4  TRUNCATE of charges or payments is refused while any balance forward is live.
+--   R5  an ACH in requires_action on or before as_of also blocks an import (as pending/processing).
+--
 -- Rollback (nothing else depends on these objects):
 --   DROP TRIGGER IF EXISTS balance_forward_guard ON charges; DROP TRIGGER IF EXISTS balance_forward_guard ON payments;
 --   DROP TRIGGER IF EXISTS gl_ar_tieouts_no_balance_forward ON gl_ar_tieouts;
+--   DROP TRIGGER IF EXISTS balance_forward_no_truncate ON charges; ... ON payments;
+--   DROP TRIGGER IF EXISTS balance_forward_entity_move ON properties; ... ON units; ... ON leases;
 --   then re-run the ar_ledger definition from 0016_charges_void.sql, then DROP TABLE balance_forwards CASCADE
 --   and DROP FUNCTION apply_balance_forwards, void_balance_forward, balance_forward_app_cents,
 --   balance_forward_guard, balance_forward_immutable, gl_ar_tieout_no_balance_forward.
@@ -137,8 +152,8 @@ BEGIN
   IF pg_catalog.current_setting('transaction_isolation') <> 'read committed' THEN
     RAISE EXCEPTION 'bf: apply_balance_forwards must run in READ COMMITTED' USING ERRCODE = 'invalid_transaction_state';
   END IF;
-  IF p_as_of IS NULL OR p_as_of > (pg_catalog.now() AT TIME ZONE 'America/Chicago')::date THEN
-    RAISE EXCEPTION 'bf: balance forward date % is missing or in the future', p_as_of USING ERRCODE = 'check_violation';
+  IF p_as_of IS NULL OR p_as_of >= (pg_catalog.now() AT TIME ZONE 'America/Chicago')::date THEN
+    RAISE EXCEPTION 'bf: the balance forward date % must be before today', p_as_of USING ERRCODE = 'check_violation';
   END IF;
   IF p_actor IS NULL OR btrim(p_actor) = '' THEN
     RAISE EXCEPTION 'bf: balance forwards need the importing user' USING ERRCODE = 'check_violation';
@@ -170,12 +185,14 @@ BEGIN
       RAISE EXCEPTION 'bf: lease % already has a balance forward; void it first', v_lease USING ERRCODE = 'unique_violation';
     END IF;
     v_entity := gl_lease_entity(v_lease);
+    -- R3: serialize with a tie-out of the same entity (gl_confirm_ar_tieout locks it FOR UPDATE).
+    IF v_entity IS NOT NULL THEN PERFORM 1 FROM gl_entities WHERE id = v_entity FOR SHARE; END IF;
     IF v_entity IS NOT NULL AND EXISTS (SELECT 1 FROM gl_ar_tieouts t WHERE t.entity_id = v_entity) THEN
       RAISE EXCEPTION 'bf: lease %: its LLC is already tied out in the ledger, which does not count balance forwards yet', v_lease
         USING ERRCODE = 'check_violation';
     END IF;
     IF EXISTS (SELECT 1 FROM payments p WHERE p.lease_id = v_lease AND p.payment_date <= p_as_of
-                 AND p.method = 'ach_stripe' AND p.stripe_status IN ('pending', 'processing')) THEN
+                 AND p.method = 'ach_stripe' AND p.stripe_status IN ('pending', 'processing', 'requires_action')) THEN
       RAISE EXCEPTION 'bf: lease % has an ACH payment still pending on or before %; wait for it to settle', v_lease, p_as_of
         USING ERRCODE = 'check_violation';
     END IF;
@@ -223,6 +240,13 @@ DECLARE
   v_new_date DATE;
   v_cut DATE;
 BEGIN
+  -- R1: an insert whose idempotency key is already taken never lands (ON CONFLICT DO NOTHING, or a
+  -- unique violation); a billing re-run must not be refused for it. (ON CONFLICT DO UPDATE would
+  -- update the existing row, and that UPDATE is checked below.)
+  IF TG_OP = 'INSERT' AND NEW.idempotency_key IS NOT NULL THEN
+    IF TG_TABLE_NAME = 'charges' AND EXISTS (SELECT 1 FROM charges c WHERE c.idempotency_key = NEW.idempotency_key) THEN RETURN NEW; END IF;
+    IF TG_TABLE_NAME = 'payments' AND EXISTS (SELECT 1 FROM payments p WHERE p.idempotency_key = NEW.idempotency_key) THEN RETURN NEW; END IF;
+  END IF;
   IF TG_TABLE_NAME = 'charges' THEN
     IF TG_OP <> 'INSERT' THEN v_old_lease := OLD.lease_id; v_old_date := OLD.charge_date; END IF;
     IF TG_OP <> 'DELETE' THEN v_new_lease := NEW.lease_id; v_new_date := NEW.charge_date; END IF;
@@ -261,12 +285,30 @@ DROP TRIGGER IF EXISTS balance_forward_guard ON payments;
 CREATE TRIGGER balance_forward_guard BEFORE INSERT OR UPDATE OR DELETE ON payments
   FOR EACH ROW EXECUTE FUNCTION balance_forward_guard();
 
+-- R4: TRUNCATE skips row triggers.
+CREATE OR REPLACE FUNCTION balance_forward_no_truncate() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM balance_forwards b WHERE b.voided_at IS NULL) THEN
+    RAISE EXCEPTION 'bf: % cannot be truncated while balance forwards from QuickBooks are live', TG_TABLE_NAME USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NULL;
+END $$;
+DROP TRIGGER IF EXISTS balance_forward_no_truncate ON charges;
+CREATE TRIGGER balance_forward_no_truncate BEFORE TRUNCATE ON charges FOR EACH STATEMENT EXECUTE FUNCTION balance_forward_no_truncate();
+DROP TRIGGER IF EXISTS balance_forward_no_truncate ON payments;
+CREATE TRIGGER balance_forward_no_truncate BEFORE TRUNCATE ON payments FOR EACH STATEMENT EXECUTE FUNCTION balance_forward_no_truncate();
+
 -- B4: no AR tie-out while an LLC lease carries a live balance forward.
 CREATE OR REPLACE FUNCTION gl_ar_tieout_no_balance_forward() RETURNS trigger
 LANGUAGE plpgsql
 SET search_path = public, pg_temp
 AS $$
 BEGIN
+  -- R3: serialize with apply_balance_forwards, which locks this row FOR SHARE.
+  PERFORM 1 FROM gl_entities WHERE id = NEW.entity_id FOR UPDATE;
   IF EXISTS (SELECT 1 FROM balance_forwards b WHERE b.voided_at IS NULL AND gl_lease_entity(b.lease_id) = NEW.entity_id) THEN
     RAISE EXCEPTION 'gl: this LLC has leases with a balance forward from QuickBooks, which the AR tie-out does not count yet'
       USING ERRCODE = 'check_violation';
@@ -277,6 +319,48 @@ DROP TRIGGER IF EXISTS gl_ar_tieouts_no_balance_forward ON gl_ar_tieouts;
 CREATE TRIGGER gl_ar_tieouts_no_balance_forward BEFORE INSERT ON gl_ar_tieouts
   FOR EACH ROW EXECUTE FUNCTION gl_ar_tieout_no_balance_forward();
 
+-- R3: a lease carrying a live balance forward cannot be moved into a tied-out entity (by moving
+-- its property to another entity, its unit to another property, or the lease to another unit).
+CREATE OR REPLACE FUNCTION balance_forward_entity_move() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_entity UUID;
+  v_lease UUID;
+BEGIN
+  IF TG_TABLE_NAME = 'properties' THEN
+    IF NEW.gl_entity_id IS NOT DISTINCT FROM OLD.gl_entity_id THEN RETURN NEW; END IF;
+    v_entity := NEW.gl_entity_id;
+  ELSIF TG_TABLE_NAME = 'units' THEN
+    IF NEW.property_id IS NOT DISTINCT FROM OLD.property_id THEN RETURN NEW; END IF;
+    SELECT p.gl_entity_id INTO v_entity FROM properties p WHERE p.id = NEW.property_id;
+  ELSE
+    IF NEW.unit_id IS NOT DISTINCT FROM OLD.unit_id THEN RETURN NEW; END IF;
+    SELECT p.gl_entity_id INTO v_entity FROM units u JOIN properties p ON p.id = u.property_id WHERE u.id = NEW.unit_id;
+  END IF;
+  IF v_entity IS NULL THEN RETURN NEW; END IF;
+  PERFORM 1 FROM gl_entities WHERE id = v_entity FOR SHARE;
+  IF NOT EXISTS (SELECT 1 FROM gl_ar_tieouts t WHERE t.entity_id = v_entity) THEN RETURN NEW; END IF;
+  SELECT b.lease_id INTO v_lease FROM balance_forwards b JOIN leases l ON l.id = b.lease_id JOIN units u ON u.id = l.unit_id
+   WHERE b.voided_at IS NULL
+     AND CASE TG_TABLE_NAME WHEN 'properties' THEN u.property_id = NEW.id WHEN 'units' THEN u.id = NEW.id ELSE l.id = NEW.id END
+   LIMIT 1;
+  IF v_lease IS NOT NULL THEN
+    RAISE EXCEPTION 'bf: lease % has a balance forward from QuickBooks and cannot move into an LLC already tied out in the ledger', v_lease
+      USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS balance_forward_entity_move ON properties;
+CREATE TRIGGER balance_forward_entity_move BEFORE UPDATE OF gl_entity_id ON properties FOR EACH ROW EXECUTE FUNCTION balance_forward_entity_move();
+DROP TRIGGER IF EXISTS balance_forward_entity_move ON units;
+CREATE TRIGGER balance_forward_entity_move BEFORE UPDATE OF property_id ON units FOR EACH ROW EXECUTE FUNCTION balance_forward_entity_move();
+DROP TRIGGER IF EXISTS balance_forward_entity_move ON leases;
+CREATE TRIGGER balance_forward_entity_move BEFORE UPDATE OF unit_id ON leases FOR EACH ROW EXECUTE FUNCTION balance_forward_entity_move();
+
+REVOKE EXECUTE ON FUNCTION balance_forward_no_truncate() FROM PUBLIC, anon, authenticated;
+REVOKE EXECUTE ON FUNCTION balance_forward_entity_move() FROM PUBLIC, anon, authenticated;
 REVOKE EXECUTE ON FUNCTION apply_balance_forwards(DATE, TEXT, TEXT, TEXT, JSONB) FROM PUBLIC, anon, authenticated;
 REVOKE EXECUTE ON FUNCTION void_balance_forward(UUID, TEXT, TEXT) FROM PUBLIC, anon, authenticated;
 REVOKE EXECUTE ON FUNCTION balance_forward_app_cents(UUID, DATE) FROM PUBLIC, anon, authenticated;

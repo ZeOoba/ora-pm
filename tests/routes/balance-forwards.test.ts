@@ -34,7 +34,7 @@ function world(over: { charges?: Row[]; payments?: Row[]; ledger?: Row[] } = {})
     lease_id, tenant_name, suite: 'A', property_id, property_name: property_id === 'p1' ? '100 Example Dr' : 'Other Park', balance_forward: 0, balance_forward_as_of: null, ...extra,
   })
   tables = {
-    properties: pgTable([{ id: 'p1', entity_llc: LLC }, { id: 'p2', entity_llc: 'Other LLC' }, { id: 'p3', entity_llc: null }]),
+    properties: pgTable([{ id: 'p1', entity_llc: LLC }, { id: 'p2', entity_llc: 'Other LLC' }, { id: 'p3', entity_llc: null }, { id: 'p4', entity_llc: `${LLC} ` }, { id: 'p5', entity_llc: '  ' }]),
     ar_ledger: pgTable(over.ledger ?? [ledgerRow(L1, 'Pool Supply Co', 'p1'), ledgerRow(L2, 'Quiet Tenant', 'p1'), ledgerRow(L3, 'Elsewhere Inc', 'p2')]),
     leases: pgTable([{ id: L1, status: 'active' }, { id: L2, status: 'expired' }, { id: L3, status: 'active' }]),
     charges: pgTable(over.charges ?? [
@@ -70,9 +70,9 @@ afterEach(() => { vi.useRealTimers() })
 type Plan = { rows: { lease_id: string; qb_cents: number; app_cents: number; adjustment_cents: number; status: string; qb_source: string }[]; errors: string[]; warnings: string[]; plan_hash: string; adjust_count: number; applied: boolean }
 
 describe('GET /api/balance-forwards/llcs', () => {
-  it('lists the LLC names on properties with their property counts', async () => {
+  it('lists the exact LLC names on properties with their property counts (a stray space shows as its own entry)', async () => {
     const res = await app.request('/api/balance-forwards/llcs', {}, env)
-    expect(await res.json()).toEqual({ data: [{ name: LLC, properties: 1 }, { name: 'Other LLC', properties: 1 }] })
+    expect(await res.json()).toEqual({ data: [{ name: LLC, properties: 1 }, { name: `${LLC} `, properties: 1 }, { name: 'Other LLC', properties: 1 }] })
   })
 })
 
@@ -120,8 +120,8 @@ describe('POST /api/balance-forwards/plan', () => {
     expect(a.plan_hash).not.toBe(b.plan_hash)
   })
 
-  it('refuses to apply a plan with errors (a pending ACH before the cut-off) and never calls the RPC', async () => {
-    world({ payments: [{ id: 'y3', lease_id: L1, amount: '10.00', payment_date: '2026-11-01', method: 'ach_stripe', stripe_status: 'processing' }] })
+  it.each(['processing', 'requires_action'])('refuses to apply a plan with errors (an ACH %s before the cut-off) and never calls the RPC', async (status) => {
+    world({ payments: [{ id: 'y3', lease_id: L1, amount: '10.00', payment_date: '2026-11-01', method: 'ach_stripe', stripe_status: status }] })
     const preview = await post({ llc: LLC, as_of: '2026-11-12', csv })
     expect(preview.status).toBe(422)
     const { data } = await preview.json() as { data: Plan }

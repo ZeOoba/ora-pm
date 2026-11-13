@@ -28,10 +28,12 @@ balanceForwardsRouter.get('/llcs', async (c) => {
     return q.order('id').limit(POSTGREST_MAX_ROWS)
   }, (r) => r.id)
   if (error) return dbError(c, error, 'Failed to load LLCs')
+  // Exact names (the plan reads properties by exact entity_llc), so stray whitespace shows up as its
+  // own entry instead of silently dropping a property.
   const counts = new Map<string, number>()
   for (const p of data) {
-    const name = p.entity_llc?.trim()
-    if (name) counts.set(name, (counts.get(name) ?? 0) + 1)
+    const name = p.entity_llc
+    if (name && name.trim()) counts.set(name, (counts.get(name) ?? 0) + 1)
   }
   return c.json({ data: [...counts].map(([name, properties]) => ({ name, properties })).sort((a, b) => a.name.localeCompare(b.name)) })
 })
@@ -91,7 +93,7 @@ async function loadLeases(db: Db, llc: string, asOf: string): Promise<Loaded> {
     if (cents === null || cents <= 0) return { ok: false, error: { message: `non-numeric or non-positive payments.amount on payment ${p.id}` }, publicMsg: 'Failed to load payments' }
     const counted = p.method === 'check' || p.method === 'wire' || p.method === 'other' || (p.method === 'ach_stripe' && p.stripe_status === 'succeeded')
     if (counted) app.set(p.lease_id, (app.get(p.lease_id) ?? 0) - cents)
-    else if (p.method === 'ach_stripe' && (p.stripe_status === 'pending' || p.stripe_status === 'processing')) pending.add(p.lease_id)
+    else if (p.method === 'ach_stripe' && (p.stripe_status === 'pending' || p.stripe_status === 'processing' || p.stripe_status === 'requires_action')) pending.add(p.lease_id)
   }
   const statusBy = new Map(statuses.data.map((l) => [l.id, l.status]))
   const leases: BfLease[] = []
@@ -129,7 +131,7 @@ balanceForwardsRouter.post('/plan', async (c) => {
   const body = await c.req.json().catch(() => null) as Record<string, unknown> | null
   if (!body) return c.json({ error: 'expected a JSON body' }, 400)
   const { llc, as_of: asOf, csv, file_name: fileName, assign, manual, apply, expected_plan_hash: expected } = body
-  if (typeof llc !== 'string' || llc.trim() === '') return c.json({ error: 'llc is required' }, 422)
+  if (typeof llc !== 'string' || llc === '') return c.json({ error: 'llc is required' }, 422)
   if (typeof asOf !== 'string' || !ISO_DATE.test(asOf)) return c.json({ error: 'as_of must be YYYY-MM-DD' }, 422)
   if (csv !== undefined && csv !== null && (typeof csv !== 'string' || csv.length > MAX_AGING_CHARS)) return c.json({ error: 'csv must be text under the size limit' }, 422)
   if (fileName !== undefined && fileName !== null && typeof fileName !== 'string') return c.json({ error: 'file_name must be text' }, 422)
@@ -137,14 +139,14 @@ balanceForwardsRouter.post('/plan', async (c) => {
   if (!isCentsMap(manual)) return c.json({ error: 'manual must map lease ids to cents' }, 422)
 
   const db = getDb(c.env)
-  const loaded = await loadLeases(db, llc.trim(), asOf)
+  const loaded = await loadLeases(db, llc, asOf)
   if (!loaded.ok) return dbError(c, loaded.error, loaded.publicMsg)
   const plan = planBalanceForwards({
     as_of: asOf, today: ledgerToday(), leases: loaded.leases,
     aging: typeof csv === 'string' && csv.trim() !== '' ? parseAgingSummary(csv) : null,
     assign: assign as Record<string, string> | undefined, manual: manual as Record<string, number> | undefined,
   })
-  const result = { ...plan, llc: llc.trim(), plan_hash: await planHash(llc.trim(), plan), applied: false, written: [] as unknown[] }
+  const result = { ...plan, llc: llc, plan_hash: await planHash(llc, plan), applied: false, written: [] as unknown[] }
   if (apply !== true) return c.json({ data: result }, plan.errors.length ? 422 : 200)
 
   if (plan.errors.length) return c.json({ error: 'The balance forwards cannot be applied', data: result }, 422)
@@ -169,8 +171,8 @@ balanceForwardsRouter.post('/plan', async (c) => {
 
 /** Live and voided balance forwards for the LLC's leases (newest first). */
 balanceForwardsRouter.get('/', async (c) => {
-  const llc = c.req.query('llc')?.trim()
-  if (!llc) return c.json({ error: 'llc is required' }, 422)
+  const llc = c.req.query('llc')
+  if (!llc || !llc.trim()) return c.json({ error: 'llc is required' }, 422)
   const db = getDb(c.env)
   const loaded = await loadLeases(db, llc, ledgerToday())
   if (!loaded.ok) return dbError(c, loaded.error, loaded.publicMsg)

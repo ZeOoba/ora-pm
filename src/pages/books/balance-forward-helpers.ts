@@ -85,6 +85,13 @@ export function parseDollarsInput(raw: string): number | null {
   return Number.isSafeInteger(cents) ? sign * cents : null
 }
 
+/** The day before a YYYY-MM-DD date: the latest allowed cut-off (it must be before today). */
+export function dayBefore(iso: string): string {
+  const d = new Date(`${iso}T00:00:00Z`)
+  d.setUTCDate(d.getUTCDate() - 1)
+  return d.toISOString().slice(0, 10)
+}
+
 export const BF_FILE_MAX_BYTES = 1024 * 1024
 
 export function agingFileProblem(file: { name: string; size: number }): string | null {

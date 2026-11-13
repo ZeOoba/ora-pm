@@ -13,7 +13,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '.
 import { decodeIif } from './iif-file'
 import { centralToday, signedDollars } from './ar-posting-helpers'
 import {
-  BF_FILE_MAX_BYTES, SOURCE_LABELS, STATUS_LABELS, agingFileProblem, parseDollarsInput,
+  BF_FILE_MAX_BYTES, SOURCE_LABELS, STATUS_LABELS, agingFileProblem, dayBefore, parseDollarsInput,
   type BalanceForwardRecord, type BfPlan,
 } from './balance-forward-helpers'
 
@@ -23,7 +23,7 @@ export function BalanceForward() {
   const qc = useQueryClient()
   const llcs = useQuery({ queryKey: ['balance-forwards', 'llcs'], queryFn: () => api.get<{ data: { name: string; properties: number }[] }>('/balance-forwards/llcs') })
   const [llc, setLlc] = useState('')
-  const [asOf, setAsOf] = useState(() => centralToday())
+  const [asOf, setAsOf] = useState(() => dayBefore(centralToday()))
   const [file, setFile] = useState<{ name: string; text: string } | null>(null)
   const [assign, setAssign] = useState<Record<string, string>>({})
   const [manualText, setManualText] = useState<Record<string, string>>({})
@@ -112,7 +112,7 @@ export function BalanceForward() {
           </div>
           <div>
             <label className="block text-sm font-medium text-foreground" htmlFor="bf-asof">QuickBooks balance as of</label>
-            <input id="bf-asof" type="date" value={asOf} max={centralToday()} onChange={(e) => { setAsOf(e.target.value); reset() }}
+            <input id="bf-asof" type="date" value={asOf} max={dayBefore(centralToday())} onChange={(e) => { setAsOf(e.target.value); reset() }}
               className="rounded-md border border-border px-3 py-2 text-sm" />
           </div>
         </div>
@@ -206,9 +206,15 @@ export function BalanceForward() {
                     <div key={cu.customer} className="flex flex-wrap items-center gap-3 text-sm">
                       <span className="min-w-48">{cu.customer}</span>
                       <span className="font-mono">{signedDollars(cu.cents)}</span>
-                      <select aria-label={`Lease for ${cu.customer}`} value={assign[cu.customer] ?? cu.lease_id ?? ''}
-                        onChange={(e) => { setAssign({ ...assign, [cu.customer]: e.target.value }); reset() }}
+                      <select aria-label={`Lease for ${cu.customer}`} value={assign[cu.customer] ?? cu.lease_id ?? '__choose'}
+                        onChange={(e) => {
+                          const next = { ...assign }
+                          if (e.target.value === '__choose') delete next[cu.customer]
+                          else next[cu.customer] = e.target.value
+                          setAssign(next); reset()
+                        }}
                         className="rounded-md border border-border px-2 py-1 text-sm">
+                        <option value="__choose">Choose a lease…</option>
                         <option value="">Not in the app (leave out)</option>
                         {leaseOptions.map((l) => <option key={l.lease_id} value={l.lease_id}>{l.tenant_name}{l.suite ? `, suite ${l.suite}` : ''} — {l.property_name}</option>)}
                       </select>

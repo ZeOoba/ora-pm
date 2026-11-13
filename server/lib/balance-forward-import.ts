@@ -121,16 +121,28 @@ export function parseAgingSummary(text: string): ParsedAging {
   const totalCol = header.findIndex((c) => c.toUpperCase() === 'TOTAL')
   const firstAmountCol = header.findIndex((c) => c !== '')
   const seen = new Map<string, number>()
+  // QuickBooks indents a customer's jobs one column right of the customer, under a header row with
+  // no amounts and above a "Total <customer>" row. A job is named "<customer>:<job>" (QuickBooks'
+  // own full name), so it matches its customer's tenant.
+  const parents: { col: number; name: string }[] = []
+  const popTo = (col: number) => { while (parents.length && parents[parents.length - 1].col >= col) parents.pop() }
   for (let i = headerIdx + 1; i < rows.length; i++) {
     const r = rows[i]
-    const label = r.slice(0, firstAmountCol).map((c) => c.trim()).find((c) => c !== '') ?? ''
+    const labelCol = r.slice(0, firstAmountCol).findIndex((c) => c.trim() !== '')
+    const own = labelCol < 0 ? '' : r[labelCol].trim()
     const totalRaw = (r[totalCol] ?? '').trim()
-    if (totalRaw === '') continue // a parent customer's header row, a blank line, a footer
+    if (totalRaw === '') {
+      // A customer header (its jobs follow), a blank line or a footer.
+      if (own !== '' && !/^total(\s|$)/i.test(own)) { popTo(labelCol); parents.push({ col: labelCol, name: own }) }
+      continue
+    }
     const cents = parseSignedCents(totalRaw)
     if (cents === null) { out.errors.push(`row ${i + 1}: TOTAL "${totalRaw}" is not an amount`); continue }
-    if (label.toUpperCase() === 'TOTAL') { out.total_cents = cents; continue }
-    if (/^total\s/i.test(label)) continue
-    if (label === '') { out.errors.push(`row ${i + 1}: an amount with no customer name`); continue }
+    if (own.toUpperCase() === 'TOTAL') { out.total_cents = cents; continue }
+    if (/^total\s/i.test(own)) { popTo(labelCol); continue } // a customer's subtotal over its jobs
+    if (own === '') { out.errors.push(`row ${i + 1}: an amount with no customer name`); continue }
+    popTo(labelCol)
+    const label = [...parents.map((p) => p.name), own].join(':')
     const prev = seen.get(normalizeName(label))
     if (prev !== undefined) { out.errors.push(`row ${i + 1}: customer "${label}" appears twice (also row ${prev})`); continue }
     seen.set(normalizeName(label), i + 1)
@@ -166,13 +178,14 @@ export function planBalanceForwards(input: BfPlanInput): BfPlan {
   const manual = input.manual ?? {}
   const plan: BfPlan = { as_of, customers: [], file_total_cents: aging?.total_cents ?? null, unmatched_cents: 0, rows: [], adjust_count: 0, errors: [], warnings: [] }
   if (!/^\d{4}-\d{2}-\d{2}$/.test(as_of)) { plan.errors.push(`"${as_of}" is not a date`); return plan }
-  if (as_of > input.today) plan.errors.push(`the cut-off ${as_of} is in the future`)
+  // The cut-off is a closed day: same-day late fees, ACH reservations and checks stay open.
+  if (as_of >= input.today) plan.errors.push(`the cut-off ${as_of} must be before today (${input.today})`)
 
   const byLease = new Map(leases.map((l) => [l.lease_id, l]))
   if (aging) {
     plan.errors.push(...aging.errors)
-    if (aging.as_of_cell === null) plan.warnings.push(`the file does not show its report date; keep QuickBooks' title rows to have "As of" checked against ${as_of}`)
-    else if (aging.as_of === null) plan.warnings.push(`could not read the report date "${aging.as_of_cell}"; check it is ${as_of}`)
+    if (aging.as_of_cell === null) plan.errors.push(`the file does not show its report date; keep QuickBooks' title rows (the "As of" date is checked against ${as_of})`)
+    else if (aging.as_of === null) plan.errors.push(`could not read the report date "${aging.as_of_cell}"`)
     else if (aging.as_of !== as_of) plan.errors.push(`the report is "${aging.as_of_cell}" (${aging.as_of}) but the cut-off is ${as_of}`)
   }
   for (const [name, leaseId] of Object.entries(assign)) {
@@ -204,7 +217,13 @@ export function planBalanceForwards(input: BfPlanInput): BfPlan {
       else if (cands.length > 1 && c.cents !== 0) plan.errors.push(`customer "${c.customer}" matches ${cands.length} leases of the same tenant; assign it to one (and enter the other leases' balances by hand)`)
     }
     if (leaseId && byLease.has(leaseId)) customersByLease.set(leaseId, [...(customersByLease.get(leaseId) ?? []), c])
-    else { leaseId = null; how = 'unmatched'; plan.unmatched_cents += c.cents }
+    else {
+      leaseId = null; how = 'unmatched'; plan.unmatched_cents += c.cents
+      // An unmatched balance would silently leave a lease at $0; only an explicit "not in the app" passes.
+      if (c.cents !== 0 && assign[c.customer] !== '') {
+        plan.errors.push(`QuickBooks customer "${c.customer}" (${centsText(c.cents)}) is not matched to a lease; match it, or mark it "Not in the app"`)
+      }
+    }
     plan.customers.push({ ...c, lease_id: leaseId, how })
   }
   if (plan.unmatched_cents !== 0) {
@@ -242,6 +261,10 @@ export function planBalanceForwards(input: BfPlanInput): BfPlan {
   }
   plan.rows.sort((a, b) => a.property_name.localeCompare(b.property_name) || a.tenant_name.localeCompare(b.tenant_name) || a.lease_id.localeCompare(b.lease_id))
   plan.adjust_count = plan.rows.filter((r) => r.status === 'adjust').length
+  const zeroed = plan.rows.filter((r) => r.qb_source === 'absent_from_file' && r.status === 'adjust')
+  if (zeroed.length) {
+    plan.warnings.push(`${zeroed.length} lease${zeroed.length === 1 ? ' has' : 's have'} no QuickBooks customer and will be set to $0 (the app shows ${centsText(zeroed.reduce((a, r) => a + r.app_cents, 0))}); check each is truly paid up in QuickBooks`)
+  }
   if (plan.rows.length === 0 && plan.errors.length === 0) plan.errors.push('this LLC has no leases in the app')
   return plan
 }

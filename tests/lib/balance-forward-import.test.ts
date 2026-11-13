@@ -33,7 +33,7 @@ describe('normalizeName', () => {
 })
 
 describe('parseAgingSummary', () => {
-  it('customers, the TOTAL row and the As-of date; job subtotals and parent headers skipped', () => {
+  it('customers, the TOTAL row and the As-of date; a job is named "<customer>:<job>"; subtotals skipped', () => {
     const p = parseAgingSummary(csv([
       'Heritage Pool Supply,,"1,000.00",500.00,0.00,0.00,0.00,"1,500.00"',
       'Bigco,,,,,,,',
@@ -45,7 +45,7 @@ describe('parseAgingSummary', () => {
     expect(p.errors).toEqual([])
     expect(p.as_of).toBe('2026-11-12')
     expect(p.total_cents).toBe(135000)
-    expect(p.customers.map((c) => [c.customer, c.cents])).toEqual([['Heritage Pool Supply', 150000], ['Unit 4', 10000], ['Credit Tenant', -25000]])
+    expect(p.customers.map((c) => [c.customer, c.cents])).toEqual([['Heritage Pool Supply', 150000], ['Bigco:Unit 4', 10000], ['Credit Tenant', -25000]])
   })
 
   it('fails when the rows do not add to TOTAL, TOTAL is missing, a customer repeats, or there is no header', () => {
@@ -75,17 +75,31 @@ describe('planBalanceForwards', () => {
     expect(plan.unmatched_cents).toBe(0)
   })
 
-  it('a QuickBooks job ("Tenant:Job") matches its tenant', () => {
+  it('a QuickBooks job ("Tenant:Job", or indented under its customer) matches its tenant (REFUTE-8 H2)', () => {
     const plan = planBalanceForwards({ ...base, leases: [lease('l1', 'Acme', 0)], aging: parseAgingSummary(csv(['Acme:Suite 4,,1.00,0,0,0,0,1.00', 'TOTAL,,1,0,0,0,0,1.00'])) })
     expect(plan.rows[0]).toMatchObject({ qb_cents: 100, qb_customers: ['Acme:Suite 4'] })
+    const nested = planBalanceForwards({ ...base, leases: [lease('l1', 'Acme', 120000)], aging: parseAgingSummary(csv([
+      'Acme,,,,,,,', ',Suite 100,0,0,"1,200.00",0,0,"1,200.00"', 'Total Acme,,0,0,"1,200.00",0,0,"1,200.00"', 'TOTAL,,0,0,"1,200.00",0,0,"1,200.00"'])) })
+    expect(nested.errors).toEqual([])
+    expect(nested.rows[0]).toMatchObject({ qb_cents: 120000, qb_customers: ['Acme:Suite 100'], status: 'no_change' })
   })
 
-  it('an unmatched customer is a warning with its dollars; assign sends it to a lease, or "" leaves it out', () => {
+  it('a near-miss name is not auto-matched, and the plan refuses rather than zeroing the lease (REFUTE-8 H2)', () => {
+    const plan = planBalanceForwards({ ...base, leases: [lease('l1', 'Acme Widgets, Inc.', 500000)],
+      aging: parseAgingSummary(csv(['Acme Widget Inc,,"5,000.00",0,0,0,0,"5,000.00"', 'TOTAL,,"5,000.00",0,0,0,0,"5,000.00"'])) })
+    expect(plan.errors.join()).toMatch(/"Acme Widget Inc" \(\$5,000\.00\) is not matched/)
+    expect(plan.warnings.join()).toMatch(/1 lease has no QuickBooks customer and will be set to \$0 \(the app shows \$5,000\.00\)/)
+  })
+
+  it('an unmatched non-zero customer is an error until matched or explicitly left out (REFUTE-8 H2)', () => {
     const aging = parseAgingSummary(csv(['Former Tenant,,0,0,0,0,75.00,75.00', 'TOTAL,,0,0,0,0,75.00,75.00']))
     const leases = [lease('l1', 'Someone Else', 0)]
     const unmatched = planBalanceForwards({ ...base, leases, aging })
-    expect(unmatched.unmatched_cents).toBe(7500)
-    expect(unmatched.warnings.join()).toMatch(/\$75\.00 of the QuickBooks total is on customers not matched/)
+    expect(unmatched.errors.join()).toMatch(/"Former Tenant" \(\$75\.00\) is not matched to a lease/)
+    const left = planBalanceForwards({ ...base, leases, aging, assign: { 'Former Tenant': '' } })
+    expect(left.errors).toEqual([])
+    expect(left.unmatched_cents).toBe(7500)
+    expect(left.warnings.join()).toMatch(/\$75\.00 of the QuickBooks total is on customers not matched/)
     const assigned = planBalanceForwards({ ...base, leases, aging, assign: { 'Former Tenant': 'l1' } })
     expect(assigned.rows[0]).toMatchObject({ qb_cents: 7500, adjustment_cents: 7500 })
     expect(assigned.customers[0].how).toBe('assigned')
@@ -119,8 +133,12 @@ describe('planBalanceForwards', () => {
     expect(plan.errors.join('\n')).toMatch(/still processing/)
     expect(plan.rows.find((r) => r.lease_id === 'l2')).toMatchObject({ status: 'has_forward' })
     expect(plan.adjust_count).toBe(0)
-    expect(planBalanceForwards({ ...base, as_of: '2026-11-14', leases: [lease('l1', 'A', 0)], aging: null, manual: { l1: 1 } }).errors.join()).toMatch(/in the future/)
+    expect(planBalanceForwards({ ...base, as_of: '2026-11-14', leases: [lease('l1', 'A', 0)], aging: null, manual: { l1: 1 } }).errors.join()).toMatch(/must be before today/)
+    // REFUTE-8 R2: today itself is not a valid cut-off.
+    expect(planBalanceForwards({ ...base, as_of: '2026-11-13', leases: [lease('l1', 'A', 0)], aging: null, manual: { l1: 1 } }).errors.join()).toMatch(/must be before today \(2026-11-13\)/)
     const undated = planBalanceForwards({ ...base, leases: [lease('l1', 'A', 0)], aging: parseAgingSummary(csv(['A,,1,0,0,0,0,1.00', 'TOTAL,,1,0,0,0,0,1.00'], '')) })
-    expect(undated.warnings.join()).toMatch(/does not show its report date/)
+    expect(undated.errors.join()).toMatch(/does not show its report date/)
+    const unreadable = planBalanceForwards({ ...base, leases: [lease('l1', 'A', 0)], aging: parseAgingSummary(csv(['A,,1,0,0,0,0,1.00', 'TOTAL,,1,0,0,0,0,1.00'], 'As of the 12th')) })
+    expect(unreadable.errors.join()).toMatch(/could not read the report date/)
   })
 })
