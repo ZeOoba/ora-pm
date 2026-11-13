@@ -345,6 +345,55 @@ BEGIN ISOLATION LEVEL REPEATABLE READ;
 SELECT pg_temp.expect_error($q$SELECT void_balance_forward((SELECT id FROM balance_forwards WHERE lease_id = 'c3230000-0000-4000-8000-000000000008'), 't', 'x')$q$, 'must run in READ COMMITTED');
 ROLLBACK;
 
+-- ── REFUTE-9 re-check: an ACH the forward counted, returned before the tie-out ─────────────────
+-- Accrual AG. Rent 1,000 (09-01); ACH 1,000 dated 09-15, succeeded before the import; QB 100 → +100.
+-- The bank returns the ACH after the import, before the tie-out: the payment still counts (it had
+-- cleared when the forward was made), the tie-out ties at QuickBooks' 100, and the return posts later.
+INSERT INTO gl_entities (id, name, accounting_basis) VALUES ('c3200000-0000-4000-8000-0000000000a9', 'BF Returned LLC', 'accrual');
+INSERT INTO properties (id, name, gl_entity_id) VALUES ('c3210000-0000-4000-8000-0000000000a9', 'BF Returned Park', 'c3200000-0000-4000-8000-0000000000a9');
+INSERT INTO units (id, property_id, suite) VALUES ('c3220000-0000-4000-8000-0000000000a9', 'c3210000-0000-4000-8000-0000000000a9', 'A');
+INSERT INTO leases (id, unit_id, tenant_id) VALUES ('c3230000-0000-4000-8000-0000000000a9', 'c3220000-0000-4000-8000-0000000000a9', 'c3240000-0000-4000-8000-000000000001');
+INSERT INTO gl_accounts (id, entity_id, number, qb_name, account_type) VALUES
+  ('c32a0000-0000-4000-8000-0000000a9002', 'c3200000-0000-4000-8000-0000000000a9', '1100', 'Accounts Receivable', 'asset'),
+  ('c32a0000-0000-4000-8000-0000000a9003', 'c3200000-0000-4000-8000-0000000000a9', '1499', 'Undeposited Funds', 'asset'),
+  ('c32a0000-0000-4000-8000-0000000a9006', 'c3200000-0000-4000-8000-0000000000a9', '3000', 'Members'' Equity', 'equity'),
+  ('c32a0000-0000-4000-8000-0000000a9007', 'c3200000-0000-4000-8000-0000000000a9', '4000', 'Rental Income', 'income');
+INSERT INTO gl_ar_accounts (entity_id, role, account_id, updated_by) VALUES
+  ('c3200000-0000-4000-8000-0000000000a9', 'ar', 'c32a0000-0000-4000-8000-0000000a9002', 'tester'),
+  ('c3200000-0000-4000-8000-0000000000a9', 'undeposited_funds', 'c32a0000-0000-4000-8000-0000000a9003', 'tester'),
+  ('c3200000-0000-4000-8000-0000000000a9', 'rent', 'c32a0000-0000-4000-8000-0000000a9007', 'tester');
+INSERT INTO charges (id, lease_id, charge_date, due_date, type, amount) VALUES
+  ('c32c0000-0000-4000-8000-0000000000a9', 'c3230000-0000-4000-8000-0000000000a9', '2026-09-01', '2026-09-01', 'rent', 1000);
+INSERT INTO payments (id, lease_id, payment_date, amount, method, stripe_status) VALUES
+  ('c32d0000-0000-4000-8000-0000000000a9', 'c3230000-0000-4000-8000-0000000000a9', '2026-09-15', 1000, 'ach_stripe', 'processing');
+UPDATE payments SET stripe_status = 'succeeded' WHERE id = 'c32d0000-0000-4000-8000-0000000000a9';
+SELECT count(*) FROM apply_balance_forwards('2026-09-30', 'manual', NULL, 'tester',
+  '[{"lease_id":"c3230000-0000-4000-8000-0000000000a9","qb_balance":100,"expected_app_balance":0}]');
+UPDATE payments SET stripe_status = 'returned', status_changed_at = (SELECT created_at FROM balance_forwards WHERE lease_id = 'c3230000-0000-4000-8000-0000000000a9') + interval '1 second'
+ WHERE id = 'c32d0000-0000-4000-8000-0000000000a9';
+DO $$ BEGIN
+  PERFORM gl_post_opening_balance('c3200000-0000-4000-8000-0000000000a9', '2026-10-01',
+    '[{"account_id":"c32a0000-0000-4000-8000-0000000a9002","debit_cents":10000},{"account_id":"c32a0000-0000-4000-8000-0000000a9006","credit_cents":10000}]', 'tester');
+  SET CONSTRAINTS ALL IMMEDIATE;
+  PERFORM pg_temp.eq('returned ACH: tie-out = QuickBooks', gl_confirm_ar_tieout('c3200000-0000-4000-8000-0000000000a9', 'tester'), 10000);
+  SET CONSTRAINTS ALL IMMEDIATE;
+  PERFORM pg_temp.eq('returned ACH still counted', (SELECT counted::int FROM gl_ar_tieout_items WHERE source_id = 'c32d0000-0000-4000-8000-0000000000a9'), 1);
+  -- The return posts after the start date, as its own event.
+  PERFORM gl_post_ar_batch('c3200000-0000-4000-8000-0000000000a9', gl_today(), '[{"kind":"payment_return_pre","source_id":"c32d0000-0000-4000-8000-0000000000a9"}]', 'tester');
+  SET CONSTRAINTS ALL IMMEDIATE;
+  PERFORM pg_temp.eq('return posted to AR', pg_temp.bal('c3200000-0000-4000-8000-0000000000a9', '1100'), 110000);
+  -- The snapshot stays stable afterwards (a later re-check does not drift).
+  PERFORM gl_check_ar_tieout('c3200000-0000-4000-8000-0000000000a9');
+  RAISE NOTICE 'ok: REFUTE-9 re-check: a payment counted by the forward stays counted; its later return posts as its own event';
+END $$;
+
+-- REFUTE-9 re-check: adding a forward or moving into an LLC needs READ COMMITTED.
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT pg_temp.expect_error($q$INSERT INTO balance_forwards (lease_id, as_of, qb_balance, app_balance, amount, created_by)
+  VALUES ('c3230000-0000-4000-8000-0000000000a9', '2026-09-30', 10, 0, 10, 't')$q$, 'only be added in READ COMMITTED');
+SELECT pg_temp.expect_error($q$UPDATE properties SET gl_entity_id = 'c3200000-0000-4000-8000-0000000000ff' WHERE id = 'c3210000-0000-4000-8000-0000000000a9'$q$, 'must run in READ COMMITTED');
+ROLLBACK;
+
 -- ── Grants: the new function bodies keep the 0028–0030 privileges ──────────────────────────────
 DO $$ BEGIN
   IF has_function_privilege('authenticated', 'gl_ar_cash_alloc(uuid,bigint)', 'execute')

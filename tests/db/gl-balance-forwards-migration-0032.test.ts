@@ -78,7 +78,9 @@ describe('migration 0032 — balance forwards in the ledger (textual pins)', () 
   it('REFUTE-9 F1: inside a live forward, items count by their current state', () => {
     const src = fnBody('gl_ar_tieout_source')
     expect(src).toMatch(/c\.charge_date <= b\.as_of\)\s+THEN c\.voided_at IS NULL/)
-    expect(src).toMatch(/p\.payment_date <= b\.as_of\)\s+THEN gl_payment_counts\(p\.method, p\.stripe_status\)/)
+    // Payments: by their state when the forward was made (a later return still counts; it posts later).
+    expect(src).toMatch(/LEFT JOIN balance_forwards bf ON bf\.lease_id = p\.lease_id AND bf\.voided_at IS NULL AND p\.payment_date <= bf\.as_of/)
+    expect(src).toMatch(/p\.status_changed_at <= bf\.created_at THEN coalesce\(p\.stripe_status = 'succeeded', false\)/)
   })
 })
 

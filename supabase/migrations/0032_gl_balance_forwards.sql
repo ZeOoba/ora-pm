@@ -158,11 +158,18 @@ AS $$
               ELSE (c.voided_at IS NULL OR gl_central_date(c.voided_at) > p_as_of) END
     FROM charges c WHERE c.charge_date <= p_as_of AND gl_lease_entity(c.lease_id) = p_entity_id
   UNION ALL
+  -- Payments inside a forward count by their state when the forward was made (an ACH returned
+  -- afterwards had cleared: it counts, and its return posts later as its own event), the same
+  -- inference as gl_payment_counted_as_of, at the forward's own timestamp. 0030 B3 freezes
+  -- everything else about them, and the import refused any ACH still in flight.
   SELECT 'payment'::text, p.id, p.lease_id, gl_exact_cents(p.amount),
-         CASE WHEN EXISTS (SELECT 1 FROM balance_forwards b WHERE b.lease_id = p.lease_id AND b.voided_at IS NULL AND p.payment_date <= b.as_of)
-              THEN gl_payment_counts(p.method, p.stripe_status)
-              ELSE gl_payment_counted_as_of(p.method, p.stripe_status, p.status_changed_at, p_as_of) END
-    FROM payments p WHERE p.payment_date <= p_as_of AND gl_lease_entity(p.lease_id) = p_entity_id
+         CASE WHEN bf.created_at IS NULL THEN gl_payment_counted_as_of(p.method, p.stripe_status, p.status_changed_at, p_as_of)
+              WHEN p.method <> 'ach_stripe' THEN true
+              WHEN p.status_changed_at IS NULL OR p.status_changed_at <= bf.created_at THEN coalesce(p.stripe_status = 'succeeded', false)
+              ELSE coalesce(p.stripe_status IN ('returned', 'disputed'), false) END
+    FROM payments p
+    LEFT JOIN balance_forwards bf ON bf.lease_id = p.lease_id AND bf.voided_at IS NULL AND p.payment_date <= bf.as_of
+    WHERE p.payment_date <= p_as_of AND gl_lease_entity(p.lease_id) = p_entity_id
   UNION ALL
   -- BF1/BF4: live balance forwards dated on or before the tie-out date (a void is a correction, not
   -- an event, so a voided one is simply not there; BF6 keeps a counted one from being voided).
@@ -600,6 +607,10 @@ BEGIN
     SELECT p.gl_entity_id INTO v_entity FROM units u JOIN properties p ON p.id = u.property_id WHERE u.id = NEW.unit_id FOR SHARE OF u, p;
     SELECT p.gl_entity_id INTO v_old FROM units u JOIN properties p ON p.id = u.property_id WHERE u.id = OLD.unit_id;
   END IF;
+  -- A stale (REPEATABLE READ) snapshot would miss a tie-out or an import committed while this waited.
+  IF pg_catalog.current_setting('transaction_isolation') <> 'read committed' THEN
+    RAISE EXCEPTION 'bf: moving a property, unit or lease to another LLC must run in READ COMMITTED' USING ERRCODE = 'invalid_transaction_state';
+  END IF;
   -- REFUTE-9 F6: lock both entities (id order) so a move never interleaves with either one's tie-out
   -- (it holds its entity FOR UPDATE): the move waits and then meets the tie-out's items, or commits
   -- first and the tie-out reads the lease where it now is.
@@ -626,6 +637,10 @@ AS $$
 DECLARE
   v_entity UUID;
 BEGIN
+  -- A stale (REPEATABLE READ) snapshot would miss a tie-out committed while this waited.
+  IF pg_catalog.current_setting('transaction_isolation') <> 'read committed' THEN
+    RAISE EXCEPTION 'bf: balance forwards can only be added in READ COMMITTED' USING ERRCODE = 'invalid_transaction_state';
+  END IF;
   v_entity := gl_lease_entity(NEW.lease_id);
   IF v_entity IS NULL THEN RETURN NEW; END IF;
   PERFORM 1 FROM gl_entities WHERE id = v_entity FOR SHARE;
