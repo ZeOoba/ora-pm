@@ -30,7 +30,7 @@ beforeEach(() => {
 describe('POST /api/cron/critical-dates-alerts', () => {
   const RECIPIENT = 'admin@example.test'
   const critRow = (reference_id: string, over: Row = {}): Row => ({
-    date_type: 'lease_expiration', reference_id, tenant_name: 'Acme', property_name: '9050 Red Branch', suite: '101',
+    date_type: 'lease_expiration', reference_id, tenant_name: 'Acme', property_name: '100 Example', suite: '101',
     critical_date: '2026-07-01', days_until: 26, urgency: 'urgent', ...over,
   })
   // OI-321: dedup is per (reference_id, urgency tier, critical date) — alert_tier + alert_date
@@ -81,7 +81,7 @@ describe('POST /api/cron/critical-dates-alerts', () => {
     expect(sent.upsert).not.toHaveBeenCalled()
     expect(body.email!.subject).toContain('1 Critical Date')
     expect(body.email!.body).toContain('Acme')
-    expect(body.email!.body).toContain('9050 Red Branch')
+    expect(body.email!.body).toContain('100 Example')
     expect(JSON.parse(body.ack_token!)).toEqual({ v: 1, alerts: [['lease_1', 'urgent', '2026-07-01']] })
     // The token carries ids and tiers only, never tenant data.
     expect(body.ack_token).not.toContain('Acme')

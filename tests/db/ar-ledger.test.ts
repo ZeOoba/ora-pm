@@ -96,7 +96,7 @@ describe('ar_ledger view — balance arithmetic under multiple charges + payment
   beforeEach(() => {
     db = freshLedgerDb()
     db.none(`
-      INSERT INTO properties (id, name) VALUES ('${PROP}', '9050 Red Branch');
+      INSERT INTO properties (id, name) VALUES ('${PROP}', '100 Example');
       INSERT INTO units (id, property_id, suite) VALUES ('${UNIT}', '${PROP}', 'A1');
       INSERT INTO tenants (id, name) VALUES ('${TENANT}', 'Acme Co');
       INSERT INTO leases (id, tenant_id, unit_id) VALUES ('${LEASE}', '${TENANT}', '${UNIT}');
@@ -164,7 +164,7 @@ describe('ar_ledger view — balance arithmetic under multiple charges + payment
 
   it('returns the property name, not just property_id (cron.ts and reports.ts read ar.property_name)', () => {
     const [row] = db.many(`SELECT property_name FROM ar_ledger WHERE lease_id = '${LEASE}'`)
-    expect(row.property_name).toBe('9050 Red Branch')
+    expect(row.property_name).toBe('100 Example')
   })
 
   it('two leases with different charge/payment counts do not contaminate each other (the exact shape a fan-out regression would break)', () => {

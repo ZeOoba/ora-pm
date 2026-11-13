@@ -12,11 +12,11 @@ import {
 describe('PropertyInsertSchema', () => {
   it('accepts valid property', () => {
     const result = PropertyInsertSchema.safeParse({
-      name: '9050 Red Branch Rd',
-      address: '9050 Red Branch Rd',
+      name: '100 Example Rd',
+      address: '100 Example Rd',
       city: 'Columbia',
       state: 'MD',
-      zip: '21045',
+      zip: '00000',
       property_type: 'industrial',
     })
     expect(result.success).toBe(true)
@@ -30,7 +30,7 @@ describe('PropertyInsertSchema', () => {
 
   it('rejects invalid property_type', () => {
     const result = PropertyInsertSchema.safeParse({
-      name: 'X', address: 'Y', city: 'Z', state: 'MD', zip: '21045',
+      name: 'X', address: 'Y', city: 'Z', state: 'MD', zip: '00000',
       property_type: 'skyscraper',
     })
     expect(result.success).toBe(false)

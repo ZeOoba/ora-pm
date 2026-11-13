@@ -56,9 +56,9 @@ export class CAMTermsError extends Error {}
 //
 // A lease passes through a subset of the expense categories (expenses.category, 0002). NULL = every
 // recoverable expense — the pre-0026 behaviour every existing lease keeps until a human enters its
-// categories. The 2026-11-10 extraction found taxes-only (55 New Plant Ct) and CAM-without-taxes
-// (2008/2026 Zettler, 4595 E 5th: "Landlord shall pay all real estate taxes" plus a share of common
-// area maintenance and water/storm/sewer) leases that a whole-pool share overbills.
+// categories. The 2026-11-10 extraction found taxes-only leases and CAM-without-taxes leases (the
+// landlord pays the real estate taxes; the tenant shares common area maintenance and
+// water/storm/sewer) that a whole-pool share overbills.
 // ---------------------------------------------------------------------------
 
 /** expenses.category CHECK values (0002), in that order. */
@@ -581,8 +581,8 @@ export function calculateCAMTrueUp(input: CAMInput): CAMOutput {
   }
 
   // Annual cap (0026; ruling 2026-11-10), applied LAST — after rent type, expense stop and base
-  // year — because the lease caps what the tenant pays ("Taxes, Insurance, and CAM expense incurred
-  // by the tenant shall not exceed $15,000 annually", 29000 Information Lane 507).
+  // year — because some leases cap the tenant's combined taxes, insurance and CAM at a fixed annual
+  // amount.
   const uncapped = Math.round(owed * 100) / 100
   const { capApplied, warnings } = applyAnnualCap(input, uncapped)
   const actualCamOwed = capApplied ?? uncapped

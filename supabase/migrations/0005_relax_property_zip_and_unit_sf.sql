@@ -8,7 +8,7 @@ ALTER TABLE properties ALTER COLUMN zip DROP NOT NULL;
 
 -- 2) units.sf CHECK → allow zero.
 --    Zero-SF leases are legitimate in this portfolio: billboard/antenna/rooftop
---    licenses (e.g., Lamar Advantage at 3034 Westerville) carry rent but no SF.
+--    licenses (e.g., a billboard license at one of the portfolio properties) carry rent but no SF.
 --    The rent_roll view already guards $/SF with NULLIF(sf, 0), so zero is safe.
 ALTER TABLE units DROP CONSTRAINT IF EXISTS units_sf_check;
 ALTER TABLE units ADD CONSTRAINT units_sf_check CHECK (sf >= 0);

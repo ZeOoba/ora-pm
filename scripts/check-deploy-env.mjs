@@ -78,13 +78,16 @@ export function evaluateEnv(manifest, present) {
  * are never returned by the API, so their presence is all we can check.
  * @param {any} body Cloudflare "get Pages project" response
  */
+/** An error whose message this script composed from the API's structured `errors` array. */
+export class CloudflareApiError extends Error {}
+
 export function presentPagesVars(body) {
   if (!body || body.success !== true) {
     const msg = (body?.errors ?? []).map((e) => `${e.code}: ${e.message}`).join('; ') || 'unsuccessful response'
-    throw new Error(`Cloudflare API error: ${msg}`)
+    throw new CloudflareApiError(`Cloudflare API error: ${msg}`)
   }
   const production = body.result?.deployment_configs?.production
-  if (!production) throw new Error('Cloudflare API response has no production deployment config')
+  if (!production) throw new CloudflareApiError('Cloudflare API response has no production deployment config')
   const names = new Set()
   for (const [name, v] of Object.entries(production.env_vars ?? {})) {
     if (v?.type === 'secret_text') names.add(name)
@@ -125,7 +128,9 @@ export async function runPagesCheck({ env, fetchImpl = fetch, warnOnly = false, 
     )
     present = presentPagesVars(await res.json())
   } catch (err) {
-    return fail(/** @type {Error} */ (err).message)
+    // Only messages composed above are printed. A fetch or JSON-parse error can quote the response
+    // body (the CI log is public), so for those only the error's name is.
+    return fail(err instanceof CloudflareApiError ? err.message : `Cloudflare API request failed (${err instanceof Error ? err.name : 'error'})`)
   }
   return report(evaluateEnv(RUNTIME_ENV, present), `Cloudflare Pages "${PAGES_PROJECT}" production`, { warnOnly, log })
 }

@@ -4,12 +4,12 @@ import type { Property, Lease, Charge, ARLedgerRow, RentRollRow, CriticalDateRow
 describe('domain types', () => {
   it('Property type has required fields', () => {
     const p: Property = {
-      id: 'uuid', name: '9050 Red Branch', address: '9050 Red Branch Rd',
-      city: 'Columbia', state: 'MD', zip: '21045',
+      id: 'uuid', name: '100 Example', address: '100 Example Rd',
+      city: 'Columbia', state: 'MD', zip: '00000',
       total_sf: 20000, cam_denominator_rsf: null, property_type: 'industrial', entity_llc: 'ORA LLC',
       notes: null, created_at: '2026-01-01T00:00:00Z',
     }
-    expect(p.name).toBe('9050 Red Branch')
+    expect(p.name).toBe('100 Example')
   })
 
   it('Charge type enum includes all utility types', () => {
@@ -23,7 +23,7 @@ describe('domain types', () => {
   it('ARLedgerRow has balance, total_charged, total_paid', () => {
     const row: ARLedgerRow = {
       lease_id: 'l1', tenant_id: 't1', unit_id: 'u1',
-      tenant_name: 'Acme', property_id: 'p1', property_name: '9050 Red Branch', suite: 'A1',
+      tenant_name: 'Acme', property_id: 'p1', property_name: '100 Example', suite: 'A1',
       total_charged: 5000, total_paid: 4000, balance: 1000,
     }
     expect(row.balance).toBe(1000)
@@ -46,7 +46,7 @@ describe('domain types', () => {
 
   it('RentRollRow has rent and CAM fields', () => {
     const r: RentRollRow = {
-      property_id: 'p1', property_name: '9050 Red Branch', unit_id: 'u1',
+      property_id: 'p1', property_name: '100 Example', unit_id: 'u1',
       suite: 'A1', sf: 5000, unit_status: 'occupied',
       tenant_id: 't1', tenant_name: 'Acme',
       lease_id: 'l1', start_date: '2026-01-01', end_date: '2027-01-01',
@@ -60,7 +60,7 @@ describe('domain types', () => {
   it('CriticalDateRow has urgency and days_until fields', () => {
     const c: CriticalDateRow = {
       date_type: 'lease_expiration', reference_id: 'l1',
-      tenant_name: 'Acme', property_name: '9050 Red Branch', suite: 'A1',
+      tenant_name: 'Acme', property_name: '100 Example', suite: 'A1',
       critical_date: '2027-01-01', days_until: 90, urgency: 'notice',
     }
     expect(c.urgency).toBe('notice')
