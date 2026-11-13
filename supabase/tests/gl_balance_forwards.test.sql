@@ -482,6 +482,35 @@ DO $$ BEGIN
   RAISE NOTICE 'ok: REFUTE-10 G1 an unchanged mapping re-saves; a change stays refused';
 END $$;
 
+-- ── REFUTE-11 G2 / H1 / H2 (status history) ────────────────────────────────────────────────────
+-- A lease outside any LLC, so no tie-out sees this payment.
+INSERT INTO properties (id, name) VALUES ('c3210000-0000-4000-8000-0000000000e1', 'History Park');
+INSERT INTO units (id, property_id, suite) VALUES ('c3220000-0000-4000-8000-0000000000e1', 'c3210000-0000-4000-8000-0000000000e1', 'A');
+INSERT INTO leases (id, unit_id, tenant_id) VALUES ('c3230000-0000-4000-8000-0000000000e1', 'c3220000-0000-4000-8000-0000000000e1', 'c3240000-0000-4000-8000-000000000001');
+INSERT INTO payments (id, lease_id, payment_date, amount, method, stripe_status) VALUES
+  ('c32d0000-0000-4000-8000-0000000000e1', 'c3230000-0000-4000-8000-0000000000e1', '2026-09-20', 50, 'ach_stripe', 'succeeded');
+-- H1: a pre-0032 (backfilled) row from 10-15 reading 'succeeded': cleared by 09-30, or settled late?
+INSERT INTO payment_status_history (payment_id, stripe_status, changed_at, backfilled) VALUES
+  ('c32d0000-0000-4000-8000-0000000000e1', 'succeeded', '2026-10-15 12:00:00-05', true);
+DO $$ BEGIN
+  PERFORM pg_temp.expect_error($q$SELECT gl_payment_counted_on('c32d0000-0000-4000-8000-0000000000e1', 'ach_stripe', 'succeeded', now(), '2026-09-30')$q$,
+    'before the ledger kept a status history; whether it had cleared by then is unknown');
+  -- H2: a change never records an earlier time than the payment's last change.
+  INSERT INTO payment_status_history (payment_id, stripe_status, changed_at) VALUES
+    ('c32d0000-0000-4000-8000-0000000000e1', 'succeeded', now() + interval '1 day');
+  UPDATE payments SET stripe_status = 'disputed' WHERE id = 'c32d0000-0000-4000-8000-0000000000e1';
+  IF (SELECT changed_at FROM payment_status_history WHERE payment_id = 'c32d0000-0000-4000-8000-0000000000e1' ORDER BY id DESC LIMIT 1)
+     < now() + interval '1 day' THEN RAISE EXCEPTION 'H2: history went backwards'; END IF;
+  -- G2: service_role reads the history but cannot write it.
+  IF has_table_privilege('service_role', 'payment_status_history', 'INSERT')
+     OR has_table_privilege('service_role', 'payment_status_history', 'UPDATE')
+     OR has_table_privilege('service_role', 'payment_status_history', 'DELETE')
+     OR has_sequence_privilege('service_role', 'payment_status_history_id_seq', 'USAGE')
+     OR NOT has_table_privilege('service_role', 'payment_status_history', 'SELECT') THEN
+    RAISE EXCEPTION 'G2: service_role can write payment_status_history';
+  END IF;
+  RAISE NOTICE 'ok: REFUTE-11 legacy history refuses instead of guessing; history is monotonic; only the trigger writes it';
+END $$;
 -- REFUTE-9 re-check: adding a forward or moving into an LLC needs READ COMMITTED.
 BEGIN ISOLATION LEVEL REPEATABLE READ;
 SELECT pg_temp.expect_error($q$INSERT INTO balance_forwards (lease_id, as_of, qb_balance, app_balance, amount, created_by)

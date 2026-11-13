@@ -66,6 +66,16 @@
 --   G1  re-saving an existing balance_forward mapping on a tied-out cash LLC (an upsert) reaches the
 --       usual cash rule (refused only if the account changes); only a first mapping is refused.
 --
+-- REFUTE-11 (re-check of REFUTE-10) added:
+--   I1  the 0030 R1 idempotency-key shortcut locks the existing row instead of only seeing it, so a
+--       key freed by a concurrent delete cannot carry a new row into a forward's frozen window.
+--   G2  payment_status_history is written only by its trigger (service_role: SELECT only).
+--   H1  a pre-0032 (backfilled) status set after the tie-out date that reads succeeded or failed
+--       refuses the tie-out instead of guessing (production had no ACH payments when this shipped).
+--   H2  history timestamps never go backwards for one payment (writers are ordered by its row lock).
+--   D1  apply_balance_forwards locks all its leases in id order up front; billing sorts its bulk
+--       charge upsert by lease, so the two cannot deadlock.
+--
 -- ORDERING: requires 0028, 0029, 0030. Re-runnable. Every function pins search_path = public, pg_temp.
 
 -- ── BF1 / BF2: the new item kind and account role ──────────────────────────────────────────────
@@ -168,18 +178,21 @@ CREATE TABLE IF NOT EXISTS payment_status_history (
   payment_id UUID NOT NULL,
   stripe_status TEXT,
   changed_at TIMESTAMPTZ NOT NULL,
-  recorded_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  recorded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  backfilled BOOLEAN NOT NULL DEFAULT false
 );
 CREATE INDEX IF NOT EXISTS payment_status_history_payment_idx ON payment_status_history (payment_id, changed_at);
 ALTER TABLE payment_status_history ENABLE ROW LEVEL SECURITY;
-REVOKE ALL ON payment_status_history FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON payment_status_history FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON SEQUENCE payment_status_history_id_seq FROM PUBLIC, anon, authenticated, service_role;
+-- REFUTE-11 G2: the SECURITY DEFINER trigger is the only writer; service_role reads.
 GRANT SELECT ON payment_status_history TO service_role;
 
 -- Backfill once: one row per existing payment, its current status as of when it was set (a status
 -- set before 0028 stamped changes counts from the beginning of time, as 0028 treats it).
 DO $$ BEGIN
-  INSERT INTO payment_status_history (payment_id, stripe_status, changed_at)
-  SELECT p.id, p.stripe_status, coalesce(p.status_changed_at, '-infinity'::timestamptz) FROM payments p
+  INSERT INTO payment_status_history (payment_id, stripe_status, changed_at, backfilled)
+  SELECT p.id, p.stripe_status, coalesce(p.status_changed_at, '-infinity'::timestamptz), true FROM payments p
    WHERE NOT EXISTS (SELECT 1 FROM payment_status_history h WHERE h.payment_id = p.id);
 END $$;
 
@@ -188,10 +201,15 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $$
+DECLARE
+  v_prev TIMESTAMPTZ;
 BEGIN
   IF TG_OP = 'INSERT' OR NEW.stripe_status IS DISTINCT FROM OLD.stripe_status THEN
+    -- REFUTE-11 H2: now() is the writer's transaction START; two writers of one payment are ordered
+    -- by its row lock, so keep the history in that order (never earlier than the previous change).
+    SELECT max(h.changed_at) INTO v_prev FROM payment_status_history h WHERE h.payment_id = NEW.id;
     INSERT INTO payment_status_history (payment_id, stripe_status, changed_at)
-      VALUES (NEW.id, NEW.stripe_status, coalesce(NEW.status_changed_at, pg_catalog.now()));
+      VALUES (NEW.id, NEW.stripe_status, GREATEST(coalesce(NEW.status_changed_at, pg_catalog.now()), coalesce(v_prev, '-infinity'::timestamptz)));
   END IF;
   RETURN NULL;
 END $$;
@@ -225,14 +243,21 @@ SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_status TEXT;
+  v_backfilled BOOLEAN;
 BEGIN
   IF p_method <> 'ach_stripe' THEN RETURN true; END IF;
   SELECT h.stripe_status INTO v_status FROM payment_status_history h
    WHERE h.payment_id = p_id AND gl_central_date(h.changed_at) <= p_as_of
    ORDER BY h.changed_at DESC, h.id DESC LIMIT 1;
   IF FOUND THEN RETURN coalesce(v_status = 'succeeded', false); END IF;
-  SELECT h.stripe_status INTO v_status FROM payment_status_history h
+  SELECT h.stripe_status, h.backfilled INTO v_status, v_backfilled FROM payment_status_history h
    WHERE h.payment_id = p_id ORDER BY h.changed_at, h.id LIMIT 1;
+  -- REFUTE-11 H1: a backfilled row set after p_as_of that reads succeeded or failed cannot say
+  -- whether the ACH had cleared by then (settled late, or a dispute won/lost); refuse, never guess.
+  IF FOUND AND v_backfilled AND v_status IN ('succeeded', 'failed') THEN
+    RAISE EXCEPTION 'gl: ACH payment % changed to "%" after %, before the ledger kept a status history; whether it had cleared by then is unknown. Confirm it in Stripe and post a manual journal entry, or contact support',
+      p_id, v_status, p_as_of USING ERRCODE = 'check_violation';
+  END IF;
   IF FOUND THEN RETURN coalesce(v_status IN ('returned', 'disputed'), false); END IF;
   RETURN gl_payment_counted_as_of(p_method, p_status, p_changed_at, p_as_of);
 END $$;
@@ -654,6 +679,9 @@ BEGIN
     RAISE EXCEPTION 'bf: no balance forward rows given' USING ERRCODE = 'check_violation';
   END IF;
 
+  -- REFUTE-11 D1: take every lease in one global (id) order before the loop, as billing's bulk
+  -- upsert does (cron sorts by lease), so the two never deadlock.
+  PERFORM 1 FROM leases l WHERE l.id IN (SELECT (e->>'lease_id')::uuid FROM pg_catalog.jsonb_array_elements(p_rows) e) ORDER BY l.id FOR UPDATE;
   FOR r IN SELECT * FROM pg_catalog.jsonb_array_elements(p_rows) LOOP
     v_lease := (r->>'lease_id')::uuid;
     v_qb := (r->>'qb_balance')::numeric;
@@ -846,9 +874,17 @@ BEGIN
   -- R1: an insert whose idempotency key is already taken never lands (ON CONFLICT DO NOTHING, or a
   -- unique violation); a billing re-run must not be refused for it. (ON CONFLICT DO UPDATE would
   -- update the existing row, and that UPDATE is checked below.)
+  -- REFUTE-11 I1: the key's row is LOCKED, not merely seen: a delete in flight is waited out (then
+  -- nothing is found and the insert is checked like any other); a row found locked cannot vanish
+  -- before this insert meets it, so the insert never lands.
   IF TG_OP = 'INSERT' AND NEW.idempotency_key IS NOT NULL THEN
-    IF TG_TABLE_NAME = 'charges' AND EXISTS (SELECT 1 FROM charges c WHERE c.idempotency_key = NEW.idempotency_key) THEN RETURN NEW; END IF;
-    IF TG_TABLE_NAME = 'payments' AND EXISTS (SELECT 1 FROM payments p WHERE p.idempotency_key = NEW.idempotency_key) THEN RETURN NEW; END IF;
+    IF TG_TABLE_NAME = 'charges' THEN
+      PERFORM 1 FROM charges c WHERE c.idempotency_key = NEW.idempotency_key FOR SHARE;
+      IF FOUND THEN RETURN NEW; END IF;
+    ELSE
+      PERFORM 1 FROM payments p WHERE p.idempotency_key = NEW.idempotency_key FOR SHARE;
+      IF FOUND THEN RETURN NEW; END IF;
+    END IF;
   END IF;
   IF TG_TABLE_NAME = 'charges' THEN
     IF TG_OP <> 'INSERT' THEN v_old_lease := OLD.lease_id; v_old_date := OLD.charge_date; END IF;

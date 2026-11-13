@@ -103,6 +103,17 @@ describe('migration 0032 — balance forwards in the ledger (textual pins)', () 
     expect(sql).toMatch(/CREATE TRIGGER payment_status_history_record AFTER INSERT OR UPDATE OF stripe_status ON payments/)
     expect(sql).toMatch(/CREATE TRIGGER payment_status_history_immutable BEFORE UPDATE OR DELETE ON payment_status_history/)
     expect(sql).toMatch(/ALTER TABLE balance_forwards ALTER COLUMN counted_payment_ids SET NOT NULL;/)
+    // REFUTE-11: the idempotency shortcut locks the existing row; service_role only reads the history;
+    // legacy history refuses; the history is monotonic; apply locks its leases in id order up front.
+    const guard = sql.slice(sql.lastIndexOf('CREATE OR REPLACE FUNCTION balance_forward_guard()'))
+    expect(guard).toMatch(/PERFORM 1 FROM charges c WHERE c\.idempotency_key = NEW\.idempotency_key FOR SHARE;\s+IF FOUND THEN RETURN NEW; END IF;/)
+    expect(guard).toMatch(/PERFORM 1 FROM payments p WHERE p\.idempotency_key = NEW\.idempotency_key FOR SHARE;\s+IF FOUND THEN RETURN NEW; END IF;/)
+    expect(guard).not.toMatch(/AND EXISTS \(SELECT 1 FROM (charges|payments) \w WHERE \w\.idempotency_key = NEW\.idempotency_key\) THEN RETURN NEW/)
+    expect(sql).toMatch(/REVOKE ALL ON payment_status_history FROM PUBLIC, anon, authenticated, service_role;/)
+    expect(sql).toMatch(/REVOKE ALL ON SEQUENCE payment_status_history_id_seq FROM PUBLIC, anon, authenticated, service_role;/)
+    expect(fnBody('gl_payment_counted_on')).toMatch(/IF FOUND AND v_backfilled AND v_status IN \('succeeded', 'failed'\) THEN\s+RAISE EXCEPTION/)
+    expect(fnBody('payment_status_history_record')).toMatch(/GREATEST\(coalesce\(NEW\.status_changed_at, pg_catalog\.now\(\)\), coalesce\(v_prev, /)
+    expect(fnBody('apply_balance_forwards')).toMatch(/jsonb_array_elements\(p_rows\) e\) ORDER BY l\.id FOR UPDATE;\s+FOR r IN/)
     // G1: only a first balance_forward mapping is refused after a cash tie-out.
     expect(fnBody('gl_guard_ar_account')).toMatch(/AND NOT EXISTS \(SELECT 1 FROM gl_ar_accounts a WHERE a\.entity_id = NEW\.entity_id AND a\.role = 'balance_forward'\)/)
   })
