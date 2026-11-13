@@ -32,7 +32,7 @@ type Db = ReturnType<typeof getDb>
 
 export const statementsRouter = new Hono<{ Bindings: Env }>()
 
-type LedgerRow = { lease_id: string; tenant_id: string; tenant_name: string; property_id: string; property_name: string; suite: string; total_charged: unknown; total_paid: unknown }
+type LedgerRow = { lease_id: string; tenant_id: string; tenant_name: string; property_id: string; property_name: string; suite: string; total_charged: unknown; total_paid: unknown; balance_forward: unknown; balance_forward_as_of: string | null }
 type PropertyRow = { id: string; name: string; address: string | null; city: string | null; state: string | null; zip: string | null; entity_llc: string | null }
 type TenantRow = { id: string; name: string; contact_name: string | null; contact_email: string | null }
 type ChargeRow = { id: string; lease_id: string; charge_date: string; due_date: string; type: string; description: string | null; amount: unknown }
@@ -58,7 +58,7 @@ export interface LeaseStatement {
 type ReadFail = { ok: false; error: { message: string; code?: string }; publicMsg: string }
 type ReadOk = { ok: true; rows: LeaseStatement[]; mismatch: string | null }
 
-const LEDGER_COLS = 'lease_id, tenant_id, tenant_name, property_id, property_name, suite, total_charged, total_paid'
+const LEDGER_COLS = 'lease_id, tenant_id, tenant_name, property_id, property_name, suite, total_charged, total_paid, balance_forward, balance_forward_as_of'
 const fail = (message: string, publicMsg = 'Failed to build statement'): ReadFail => ({ ok: false, error: { message }, publicMsg })
 const emailOk = (v: string) => z.string().email().safeParse(v).success
 
@@ -159,9 +159,15 @@ async function readStatements(db: Db, leaseId: string | null, start: string, end
     if (ledgerPaid === null || ledgerPaid !== fetchedPaid) failed.push('counted payments vs ar_ledger.total_paid')
     if (failed.length > 0) return { ok: true, rows: [], mismatch: `lease ${led.lease_id}: ${failed.join(', ')} do not tie` }
 
+    // 0030: the live balance forward comes from the same ledger row (same snapshot).
+    const bfCents = toCents(led.balance_forward ?? 0)
+    if (bfCents === null) return fail(`non-numeric ar_ledger.balance_forward for lease ${led.lease_id}`)
+    if (bfCents !== 0 && typeof led.balance_forward_as_of !== 'string') return fail(`balance forward without a date for lease ${led.lease_id}`)
+    const balanceForward = bfCents === 0 ? null : { id: led.lease_id, as_of: led.balance_forward_as_of as string, amountCents: bfCents }
+
     let statement: Statement
     try {
-      statement = buildStatement({ charges: lc, payments: lp, start, end })
+      statement = buildStatement({ charges: lc, payments: lp, balanceForward, start, end })
     } catch (e) {
       // buildStatement's own message can carry amounts, so log only which check failed.
       return fail(`statement build failed for lease ${led.lease_id}: ${buildErrorKind((e as Error).message)}`)

@@ -79,6 +79,11 @@ export function PortalHomeView({ data, preview = false }: { data: PortalHomeData
               Pay now
             </PortalLink>
           )}
+          {data.me.balance_forward && (
+            <p className="text-sm text-muted-foreground">
+              Includes {data.me.balance_forward.amount < 0 ? 'a credit of ' : ''}{formatCurrency(Math.abs(data.me.balance_forward.amount))} carried forward from our previous accounting system as of {formatDate(data.me.balance_forward.as_of)}.
+            </p>
+          )}
         </div>
 
         {totals && reconciles && totals.balance > 0 && (

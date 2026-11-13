@@ -99,13 +99,18 @@ export const FINANCIAL_SOURCE_PATHS: ReadonlySet<string> = new Set([
   // B8 slice 3: AR posting planner — chooses which charges, payments, voids and returns post when.
   'server/lib/gl-ar-posting.ts',
   'server/lib/gl-ar-cash-posting.ts',
+  // Balance forward from QuickBooks (0030): each lease's starting balance — the CSV parse, the
+  // customer-to-lease matching and the per-lease adjustment, and the route that applies them.
+  'server/lib/balance-forward-import.ts',
+  'server/routes/balance-forwards.ts',
 ])
 
 // Tables whose schema/view/index changes are financial: charges (what tenants owe), payments
 // (what was collected / debited), ar_ledger (the balance view the autopay debit and delinquency
 // sweep read).
 // gl_* (B8): the native general ledger's accounts, periods and journal.
-export const FINANCIAL_TABLES: readonly string[] = ['charges', 'payments', 'ar_ledger', 'gl_accounts', 'gl_periods', 'gl_journal_entries', 'gl_journal_lines']
+// balance_forwards (0030): the opening-balance adjustment inside ar_ledger.balance.
+export const FINANCIAL_TABLES: readonly string[] = ['charges', 'payments', 'ar_ledger', 'balance_forwards', 'gl_accounts', 'gl_periods', 'gl_journal_entries', 'gl_journal_lines']
 
 const MIGRATION_RE = /^supabase\/migrations\/[^/]+\.sql$/
 

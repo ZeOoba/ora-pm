@@ -4,11 +4,16 @@ export type StatementBlocker = 'missing_entity_llc' | 'missing_contact_email' | 
 
 export interface StatementLine {
   date: string
-  kind: 'charge' | 'payment'
+  kind: 'charge' | 'payment' | 'balance_forward'
   id: string
   label: string
-  amountCents: number
+  amountCents: number // charges and payments: positive; balance_forward (from QuickBooks): signed
   balanceCents: number
+}
+
+/** What a line does to the balance, signed (mirrors server/lib/statement.ts). */
+export function lineEffectCents(l: Pick<StatementLine, 'kind' | 'amountCents'>): number {
+  return l.kind === 'payment' ? -l.amountCents : l.amountCents
 }
 
 export interface StatementAging {
@@ -26,6 +31,7 @@ export interface Statement {
   openingCents: number
   chargesCents: number
   paymentsCents: number
+  forwardCents: number
   closingCents: number
   lines: StatementLine[]
   pending: { date: string; id: string; amountCents: number }[]

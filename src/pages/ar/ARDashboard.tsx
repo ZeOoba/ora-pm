@@ -33,6 +33,9 @@ export function ARDashboard() {
 
   const totalCharged = rows.reduce((s, r) => s + r.total_charged, 0)
   const totalPaid = rows.reduce((s, r) => s + r.total_paid, 0)
+  // 0030: balance = charged − paid + the balance forward from QuickBooks; shown only when one exists.
+  const totalForward = rows.reduce((s, r) => s + Number(r.balance_forward ?? 0), 0)
+  const showForward = rows.some((r) => Number(r.balance_forward ?? 0) !== 0)
   const showUnallocated = hasUnallocated(totals)
   const bucketCols = showUnallocated ? [...AGING_COLUMNS, UNALLOCATED_COLUMN] : AGING_COLUMNS
 
@@ -107,6 +110,7 @@ export function ARDashboard() {
                     <TableHead>Suite</TableHead>
                     <TableHead className="text-right">Total Charged</TableHead>
                     <TableHead className="text-right">Total Paid</TableHead>
+                    {showForward && <TableHead className="text-right" title="Opening balance adjustment from QuickBooks">Bal. forward</TableHead>}
                     {bucketCols.map((c) => <TableHead key={c.key} className="text-right">{c.label}</TableHead>)}
                     <TableHead className="text-right">Balance</TableHead>
                   </TableRow>
@@ -119,6 +123,7 @@ export function ARDashboard() {
                       <TableCell className="text-status-neutral">{row.suite}</TableCell>
                       <TableCell className="text-right font-mono">{formatCurrency(row.total_charged)}</TableCell>
                       <TableCell className="text-right font-mono">{formatCurrency(row.total_paid)}</TableCell>
+                      {showForward && <TableCell className="text-right font-mono">{formatCurrency(Number(row.balance_forward ?? 0))}</TableCell>}
                       {bucketCols.map((c) => (
                         <TableCell key={c.key} className={`text-right font-mono ${row.buckets[c.key] === 0 ? 'text-status-neutral/60' : ''}`}>
                           {formatCurrency(row.buckets[c.key])}
@@ -133,6 +138,7 @@ export function ARDashboard() {
                     <TableCell colSpan={3} className="font-medium">Portfolio total</TableCell>
                     <TableCell className="text-right font-mono">{formatCurrency(totalCharged)}</TableCell>
                     <TableCell className="text-right font-mono">{formatCurrency(totalPaid)}</TableCell>
+                    {showForward && <TableCell className="text-right font-mono">{formatCurrency(totalForward)}</TableCell>}
                     {bucketCols.map((c) => (
                       <TableCell key={c.key} className="text-right font-mono">{formatCurrency(totals[c.key])}</TableCell>
                     ))}

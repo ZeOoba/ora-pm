@@ -105,6 +105,31 @@ describe('GET /api/reports/ar-aging — buckets', () => {
     expect(bucketSumCents(body.totals!)).toBe(cents(body.totals!.balance))
   })
 
+  // 0030: ar_ledger.balance includes the balance forward from QuickBooks. A positive one ages as a
+  // charge due on its as_of date; a credit only lowers the balance. total_charged excludes both.
+  it('ages a positive balance forward from its date, behind newer charges', async () => {
+    const a = ledger(1300, { total_charged: 1000, total_paid: 0, balance_forward: 300, balance_forward_as_of: daysAgo(100) })
+    world([a], [charge(a.lease_id, 0, 500), charge(a.lease_id, 40, 500)])
+    const row = (await (await get()).json() as Body).data![0]
+    expect(row.buckets).toEqual({ current: 500, d1_30: 0, d31_60: 500, d61_90: 0, d90_plus: 300, unallocated: 0 })
+  })
+
+  it('a balance-forward credit lowers the balance; the rest sits on the newest charges', async () => {
+    const a = ledger(600, { total_charged: 1000, total_paid: 0, balance_forward: -400, balance_forward_as_of: daysAgo(50) })
+    world([a], [charge(a.lease_id, 0, 500), charge(a.lease_id, 40, 500)])
+    const row = (await (await get()).json() as Body).data![0]
+    expect(row.buckets).toEqual({ current: 500, d1_30: 0, d31_60: 100, d61_90: 0, d90_plus: 0, unallocated: 0 })
+  })
+
+  it('fails closed on a non-numeric balance forward or one without a date', async () => {
+    const a = ledger(600, { balance_forward: 'abc', balance_forward_as_of: daysAgo(5) })
+    world([a], [charge(a.lease_id, 0, 600)])
+    expect((await get()).status).toBe(500)
+    const b = ledger(900, { balance_forward: 300, balance_forward_as_of: null })
+    world([b], [charge(b.lease_id, 0, 600)])
+    expect((await get()).status).toBe(500)
+  })
+
   it('keeps every existing ar_ledger field on each row unchanged', async () => {
     const a = ledger(100, { total_charged: 300, total_paid: 200 })
     world([a], [charge(a.lease_id, 5, 300)])

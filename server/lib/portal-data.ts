@@ -40,21 +40,37 @@ export const PORTAL_LEASE_SELECT = [
   'lease_amendments(id, effective_date, description)',
 ].join(', ')
 
+export interface PortalBalance {
+  total: number
+  /** The part of `total` brought over from QuickBooks (0030), summed over the tenant's leases; null when none. */
+  forward: { amount: number; as_of: string } | null
+}
+
 /**
- * Signed sum of every ar_ledger row for the tenant (credits included). Fails closed: a failed
- * read used to report a $0 balance, indistinguishable from "paid up" (B13 fix).
+ * Signed sum of every ar_ledger row for the tenant (credits included), and how much of it is a
+ * balance forward from the prior system (so the portal can say why the charges and payments listed
+ * do not add up to it). Fails closed: a failed read used to report a $0 balance, indistinguishable
+ * from "paid up" (B13 fix).
  */
-export async function portalBalance(d: Db, tenantId: string): Promise<PortalResult<number>> {
-  const { data, error } = await d.from('ar_ledger').select('balance').eq('tenant_id', tenantId)
+export async function portalBalance(d: Db, tenantId: string): Promise<PortalResult<PortalBalance>> {
+  const { data, error } = await d.from('ar_ledger').select('balance, balance_forward, balance_forward_as_of').eq('tenant_id', tenantId)
   if (error) return db(error, 'Failed to load balance')
   // Integer cents: NUMERIC can arrive as a string, and float dollar sums drift.
   let cents = 0
-  for (const r of (data ?? []) as { balance: number | string | null }[]) {
+  let forwardCents = 0
+  let forwardAsOf: string | null = null
+  for (const r of (data ?? []) as { balance: number | string | null; balance_forward?: number | string | null; balance_forward_as_of?: string | null }[]) {
     const n = Number(r.balance ?? 0)
-    if (!Number.isFinite(n)) return db({ message: `non-numeric ar_ledger.balance for tenant ${tenantId}` }, 'Failed to load balance')
+    const f = Number(r.balance_forward ?? 0)
+    if (!Number.isFinite(n) || !Number.isFinite(f)) return db({ message: `non-numeric ar_ledger balance for tenant ${tenantId}` }, 'Failed to load balance')
     cents += Math.round(n * 100)
+    if (f !== 0) {
+      forwardCents += Math.round(f * 100)
+      if (r.balance_forward_as_of && (forwardAsOf === null || r.balance_forward_as_of > forwardAsOf)) forwardAsOf = r.balance_forward_as_of
+    }
   }
-  return { ok: true, data: cents / 100 }
+  const forward = forwardCents !== 0 && forwardAsOf ? { amount: forwardCents / 100, as_of: forwardAsOf } : null
+  return { ok: true, data: { total: cents / 100, forward } }
 }
 
 async function leaseIds(d: Db, tenantId: string, activeOnly: boolean): Promise<PortalResult<string[]>> {

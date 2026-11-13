@@ -30,6 +30,7 @@ const QBExport = lazy(() => import('./pages/exports/QBExport').then((m) => ({ de
 const ChartOfAccounts = lazy(() => import('./pages/books/ChartOfAccounts').then((m) => ({ default: m.ChartOfAccounts })))
 const ArPosting = lazy(() => import('./pages/books/ArPosting').then((m) => ({ default: m.ArPosting })))
 const OpeningBalances = lazy(() => import('./pages/books/OpeningBalances').then((m) => ({ default: m.OpeningBalances })))
+const BalanceForward = lazy(() => import('./pages/books/BalanceForward').then((m) => ({ default: m.BalanceForward })))
 const RenewalsPipeline = lazy(() => import('./pages/renewals/RenewalsPipeline').then((m) => ({ default: m.RenewalsPipeline })))
 const PortalApp = lazy(() => import('./portal/PortalApp').then((m) => ({ default: m.PortalApp })))
 const UnitsPage = lazy(() => import('./pages/units/UnitsPage').then((m) => ({ default: m.UnitsPage })))
@@ -87,6 +88,7 @@ export const router = createBrowserRouter([
   { path: '/books/chart-of-accounts', errorElement: <RouteError />, element: <Layout><ChartOfAccounts /></Layout> },
   { path: '/books/opening-balances', errorElement: <RouteError />, element: <Layout><OpeningBalances /></Layout> },
   { path: '/books/ar-posting', errorElement: <RouteError />, element: <Layout><ArPosting /></Layout> },
+  { path: '/books/balance-forward', errorElement: <RouteError />, element: <Layout><BalanceForward /></Layout> },
   { path: '/payments',  errorElement: <RouteError />, element: <Layout><PaymentsList /></Layout> },
   { path: '/cam',       errorElement: <RouteError />, element: <Layout><CAMList /></Layout> },
   { path: '/expenses',  errorElement: <RouteError />, element: <Layout><ExpensesList /></Layout> },
