@@ -590,6 +590,16 @@ class PushGate(unittest.TestCase):
         self.sb.commit("notes.md", "clean\n")
         self.assertBlocked(*self.sb.push())
 
+    def test_duplicate_deal_key_roster_blocks_in_either_order(self):
+        # json.load keeps the LAST value for a repeated key: a trailing inactive copy would
+        # silently drop the deal's terms (REFUTE wf_df157e64-c52). Both orders must block.
+        live = '{"active": true, "always": ["%s"]}' % TERM
+        dead = '{"active": false}'
+        self.sb.commit("notes.md", "clean\n")
+        for first, second in ((live, dead), (dead, live)):
+            self.sb.write_roster('{"deal_x": %s, "deal_x": %s}' % (first, second))
+            self.assertBlocked(*self.sb.push())
+
     def test_inactive_deal_term_is_allowed(self):
         self.sb.commit("notes.md", "closed deal %s is public now\n" % INACTIVE)
         self.assertAllowed(*self.sb.push())
@@ -801,6 +811,51 @@ class Units(unittest.TestCase):
                          ["abc"])  # missing `active` counts as active
         self.assertEqual(scan.load_terms(self._roster(ROSTER)),
                          sorted([TERM.lower(), TERM2.lower()]))
+
+    def test_duplicate_keys_fail_closed_at_any_level(self):
+        live = '{"active": true, "always": ["%s"]}' % TERM
+        dead = '{"active": false}'
+        for text in ('{"deal_x": %s, "deal_x": %s}' % (live, dead),        # deal key, both orders
+                     '{"deal_x": %s, "deal_x": %s}' % (dead, live),
+                     '{"deal_x": {"always": ["%s"], "always": []}}' % TERM,  # nested field
+                     '{"deal_x": {"always": [], "always": ["%s"]}}' % TERM,
+                     '{"deal_x": {"always": ["%s"], "active": true, "active": false}}' % TERM,
+                     '{"_meta": {"n": 1, "n": 2}, "deal_x": %s}' % live,     # metadata too
+                     '{"deal_x": %s, "deal_y": {"active": false, "always": [{"a": 1, "a": 2}]}}'
+                     % live):                                                # inside a list
+            self.assertIsNone(scan.load_roster(self._roster(text)), text)
+        # The same key in two DIFFERENT objects is not a duplicate.
+        ok = '{"deal_x": %s, "deal_y": {"active": false, "always": ["%s"]}}' % (live, INACTIVE)
+        r = scan.load_roster(self._roster(ok))
+        self.assertIsNotNone(r)
+        self.assertEqual(r.terms, [TERM.lower()])
+
+    def test_any_pdf_header_in_the_first_kb_is_unscannable(self):
+        # Pinned broad on purpose: narrowing this by structure tokens (obj / trailer / xref /
+        # startxref) was refuted twice -- pypdf (strict=False) opens trailer-only documents,
+        # `N 0 OBJ` + xref-stream files, and `Xtrailer` / `startxrefZ` spellings.
+        hexterm = TERM.encode().hex().encode()
+        lenient = (
+            b"%PDF-1.4\n%%EOF\n",
+            b"readme\n%PDF-1.7\ntrailer\n<< /Info << /Title <" + hexterm + b"> >> >>\n",
+            b"readme\n%PDF-1.7\nXtrailer\n<< /Info << /Title <" + hexterm + b"> >> >>\n"
+            b"startxrefZ\n5\n%%EOF\n",
+            b"readme\n%PDF-1.7\n2 0 OBJ << /Type /XRef >> stream\nendstream\n",
+            b" " * 1000 + b"%PDF-1.7\n",
+            # Known false positive, kept: a text file mentioning the header still fails closed.
+            b"# Notes\nA PDF starts with %PDF- then a version.\n",
+        )
+        for data in lenient:
+            self.assertTrue((scan.sniff(data) or "").startswith("pdf"), data[:40])
+
+    def test_scan_text_with_a_very_long_term_still_scans_every_slice(self):
+        # 16 x 16384 = WINDOW: the old step was 0 (range() raised); a longer term gave a
+        # negative step and an EMPTY loop (nothing scanned). The window now grows instead.
+        for n in (16384, 17000):
+            term = ("q" * (n - 6)) + "zyxwvu"
+            filler = "a b " * (scan.WINDOW // 2)
+            self.assertEqual(scan.scan_text(filler + term.upper() + filler, [term]), [0], n)
+            self.assertEqual(scan.scan_text(filler + filler, [term]), [], n)
 
     def test_load_terms_context_shapes(self):
         ok = {"d": {"always": [], "context": [CTX_TERM], "context_requires_any": [ANCHOR]}}
