@@ -2,7 +2,7 @@
 // is escaped. Signed as the property LLC (ORA Voice Register: landlord mail is signed by the
 // property-owning entity, never the firm), so a statement with no entity_llc cannot be rendered —
 // the route reports it as a blocker instead of staging it.
-import type { Statement } from './statement'
+import { BALANCE_FORWARD_LABEL, lineEffectCents, type Statement } from './statement'
 
 export interface StatementHeader {
   leaseId: string
@@ -56,7 +56,7 @@ export function renderStatementEmail(s: Statement, h: StatementHeader): { subjec
   const activity = s.lines.length === 0
     ? `<tr><td ${TD} colspan="4">No charges or payments posted in this period.</td></tr>`
     : s.lines.map(l => `<tr><td ${TD}>${usDate(l.date)}</td><td ${TD}>${esc(l.label)}</td>`
-      + `<td ${TDR}>${l.kind === 'payment' ? `(${formatCents(l.amountCents)})` : formatCents(l.amountCents)}</td>`
+      + `<td ${TDR}>${lineEffectCents(l) < 0 ? `(${formatCents(-lineEffectCents(l))})` : formatCents(lineEffectCents(l))}</td>`
       + `<td ${TDR}>${formatCents(l.balanceCents)}</td></tr>`).join('')
 
   const pending = s.pending.length === 0 ? '' : `
@@ -80,7 +80,7 @@ export function renderStatementEmail(s: Statement, h: StatementHeader): { subjec
 <tr><td ${TD}>Opening balance (${usDate(s.start)})</td><td ${TDR}>${formatCents(s.openingCents)}</td></tr>
 <tr><td ${TD}>Charges</td><td ${TDR}>${formatCents(s.chargesCents)}</td></tr>
 <tr><td ${TD}>Payments received</td><td ${TDR}>(${formatCents(s.paymentsCents)})</td></tr>
-<tr><td ${TD}><strong>Closing balance (${usDate(s.end)})</strong></td><td ${TDR}><strong>${formatCents(s.closingCents)}</strong></td></tr>
+${s.forwardCents !== 0 ? `<tr><td ${TD}>${esc(BALANCE_FORWARD_LABEL)}</td><td ${TDR}>${s.forwardCents < 0 ? `(${formatCents(-s.forwardCents)})` : formatCents(s.forwardCents)}</td></tr>\n` : ''}<tr><td ${TD}><strong>Closing balance (${usDate(s.end)})</strong></td><td ${TDR}><strong>${formatCents(s.closingCents)}</strong></td></tr>
 </table>
 <p style="margin:16px 0 4px"><strong>Activity</strong></p>
 <table style="border-collapse:collapse;font-size:14px">

@@ -166,6 +166,14 @@ export function allocateOldestFirst(balanceCents: number, charges: AllocationCha
   return out
 }
 
+// A positive balance forward (0030) is owed as of its date, so for aging it is a charge due on
+// as_of (newest-first allocation reaches it only after every later charge). A negative one is a
+// credit already netted in the balance and needs no entry. The id cannot collide with a uuid.
+export function balanceForwardAgingCharge(bf: { id: string; as_of: string; amountCents: number }): AllocationCharge {
+  if (!(bf.amountCents > 0)) throw new Error(`balance forward ${bf.id}: only a positive balance forward ages`)
+  return { id: `balance_forward:${bf.id}`, due_date: bf.as_of, amountCents: bf.amountCents }
+}
+
 // ── Snapshot cross-check ────────────────────────────────────────────────────────────────────────
 //
 // ar_ledger and charges are read in separate requests, so a charge inserted/voided/edited between

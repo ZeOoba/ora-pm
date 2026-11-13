@@ -761,7 +761,7 @@ cronRouter.post('/delinquency-check', async (c) => {
   if (arErr) return c.json({ error: arErr.message }, 500)
   if (!arRows || arRows.length === 0) return c.json({ late_fees_posted: 0, delinquent_count: 0, payments_feed_absent: paymentsFeedAbsent, late_fees_enabled: !lateFeesDisabled, email: buildEmail([], 0) })
 
-  type ARRow = { lease_id: string; tenant_id: string; tenant_name: string; property_name: string | null; suite: string | null; balance: number }
+  type ARRow = { lease_id: string; tenant_id: string; tenant_name: string; property_name: string | null; suite: string | null; balance: number; balance_forward?: number | string | null; balance_forward_as_of?: string | null }
 
   // GRACE_DAYS cutoff is the same for every row — compute once.
   const cutoffDate = new Date()
@@ -836,6 +836,17 @@ cronRouter.post('/delinquency-check', async (c) => {
     recentByLease.set(r.lease_id, (recentByLease.get(r.lease_id) ?? 0) + amt)
   }
   const existingFeeLeaseIds = new Set((existingFeeRes.data as { lease_id: string }[]).map((r) => r.lease_id))
+
+  // 0030: ar_ledger.balance includes the lease's balance forward from QuickBooks. A positive one is
+  // owed as of its as_of date, like a charge due then: when that date is inside the grace window it
+  // is "recent" too. (A negative one is a credit and simply lowers the balance.)
+  for (const ar of arRows as ARRow[]) {
+    const bf = Number(ar.balance_forward ?? 0)
+    if (!Number.isFinite(bf)) return c.json({ error: `non-numeric ar_ledger.balance_forward for lease ${ar.lease_id}` }, 500)
+    if (bf > 0 && typeof ar.balance_forward_as_of === 'string' && ar.balance_forward_as_of > cutoffStr) {
+      recentByLease.set(ar.lease_id, (recentByLease.get(ar.lease_id) ?? 0) + bf)
+    }
+  }
 
   // Half-cent tolerance: balances and amounts are 2dp NUMERIC in Postgres but arrive as IEEE
   // doubles, and the subtraction can leave ~1e-13 of noise — never fine a tenant over noise.

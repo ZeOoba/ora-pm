@@ -132,6 +132,8 @@ export interface ARLedgerRow {
   lease_id: string; tenant_id: string; unit_id: string; tenant_name: string
   property_id: string; property_name: string; suite: string
   total_charged: number; total_paid: number; balance: number
+  // 0030: the live balance forward from QuickBooks (signed; 0 when none) and its date.
+  balance_forward?: number | string; balance_forward_as_of?: string | null
 }
 
 export interface RentRollRow {
