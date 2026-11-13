@@ -683,9 +683,6 @@ def text_views(data):
     return views
 
 
-_PDF_STRUCT_RE = re.compile(rb"(?<![A-Za-z])(?:obj|trailer|xref|startxref)(?![A-Za-z])")
-
-
 def sniff(data):
     """Container kind by magic bytes (never by extension), or None for plain content."""
     if data[:2] == b"\x1f\x8b":
@@ -702,12 +699,10 @@ def sniff(data):
         return "rar (unsupported)"
     if data[:4] == b"\x28\xb5\x2f\xfd":
         return "zstd (unsupported)"
-    if data[:5] == b"%PDF-" or (b"%PDF-" in data[:1024] and _PDF_STRUCT_RE.search(data)):
-        # Readers accept the header anywhere in the first 1 KB. A PDF needs either an
-        # indirect object (`N G obj`) or a trailer / cross-reference section (a trailer can
-        # hold the whole document as direct objects -- REFUTE e1f8114, C2), so a text blob
-        # that merely MENTIONS `%PDF-` near its top and has none of the standalone tokens
-        # `obj`, `trailer`, `xref`, `startxref` is scanned as text.
+    if b"%PDF-" in data[:1024]:
+        # Deliberately broad: a text file that merely mentions `%PDF-` near its top fails
+        # closed too. Narrowing it by structure tokens was refuted twice (lenient parsers
+        # such as pypdf accept `OBJ`, `Xtrailer`, `startxrefZ`, trailer-only documents).
         return "pdf (text is not reliably decodable)"
     if data[257:262] == b"ustar":
         return "tar"

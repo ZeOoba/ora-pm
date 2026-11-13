@@ -241,10 +241,6 @@ class PushGate(unittest.TestCase):
         self.sb.commit("LOI.pdf", pdf)
         self.assertBlocked(*self.sb.push())
 
-    def test_clean_text_mentioning_the_pdf_header_is_allowed(self):
-        self.sb.commit("pdf-notes.md", "# PDF notes\nEvery PDF starts with %PDF- and a version.\n")
-        self.assertAllowed(*self.sb.push())
-
     def test_bz2_and_xz_are_decompressed(self):
         import bz2
         import lzma
@@ -834,31 +830,23 @@ class Units(unittest.TestCase):
         self.assertIsNotNone(r)
         self.assertEqual(r.terms, [TERM.lower()])
 
-    def test_pdf_sniff_requires_header_at_start_or_an_obj_token(self):
-        pdf = b"%PDF-1.4\n1 0 obj << >>\nendobj\n%%EOF\n"
-        self.assertTrue(scan.sniff(pdf).startswith("pdf"))
-        self.assertTrue(scan.sniff(b"%PDF-1.4\n%%EOF\n").startswith("pdf"))    # at offset 0
-        self.assertTrue(scan.sniff(b"junk prefix\n" + pdf).startswith("pdf"))   # prefixed PDF
-        late_obj = b"x\n%PDF-1.7\n" + b" " * 2000 + b"7 0 obj<<>>"
-        self.assertTrue(scan.sniff(late_obj).startswith("pdf"))
-        # No indirect object at all: the whole document inline in the trailer, term as a hex
-        # string, header past offset 0 (REFUTE e1f8114, C2 -- pypdf extracts the term).
+    def test_any_pdf_header_in_the_first_kb_is_unscannable(self):
+        # Pinned broad on purpose: narrowing this by structure tokens (obj / trailer / xref /
+        # startxref) was refuted twice -- pypdf (strict=False) opens trailer-only documents,
+        # `N 0 OBJ` + xref-stream files, and `Xtrailer` / `startxrefZ` spellings.
         hexterm = TERM.encode().hex().encode()
-        trailer_only = (b"readme\n%PDF-1.7\nxref\n0 1\n0000000000 65535 f \ntrailer\n"
-                        b"<< /Size 1 /Info << /Title <" + hexterm + b"> >> /Root << /Type "
-                        b"/Catalog /Pages << /Type /Pages /Count 1 /Kids [] >> >> >>\n%%EOF\n")
-        self.assertTrue(scan.sniff(trailer_only).startswith("pdf"))
-        for tok in (b"trailer", b"xref", b"startxref"):
-            self.assertTrue(scan.sniff(b"x\n%PDF-1.7\n" + tok + b"\n").startswith("pdf"), tok)
-        # A text file that merely mentions the header near its top is plain content.
-        self.assertIsNone(scan.sniff(b"# Notes\nA PDF starts with %PDF- then a version.\n"))
-        self.assertIsNone(scan.sniff(b"See %PDF-1.4 headers; the objects are listed below.\n"))
-
-    def test_text_mentioning_pdf_header_is_scanned_as_text(self):
-        data = ("# Notes\nPDFs begin with %%PDF- and %s is mentioned here.\n" % TERM).encode()
-        roster = scan.load_roster(self._roster(ROSTER))
-        self.assertIsNone(scan.sniff(data))
-        self.assertTrue(roster.hits(data.decode()))
+        lenient = (
+            b"%PDF-1.4\n%%EOF\n",
+            b"readme\n%PDF-1.7\ntrailer\n<< /Info << /Title <" + hexterm + b"> >> >>\n",
+            b"readme\n%PDF-1.7\nXtrailer\n<< /Info << /Title <" + hexterm + b"> >> >>\n"
+            b"startxrefZ\n5\n%%EOF\n",
+            b"readme\n%PDF-1.7\n2 0 OBJ << /Type /XRef >> stream\nendstream\n",
+            b" " * 1000 + b"%PDF-1.7\n",
+            # Known false positive, kept: a text file mentioning the header still fails closed.
+            b"# Notes\nA PDF starts with %PDF- then a version.\n",
+        )
+        for data in lenient:
+            self.assertTrue((scan.sniff(data) or "").startswith("pdf"), data[:40])
 
     def test_scan_text_with_a_very_long_term_still_scans_every_slice(self):
         # 16 x 16384 = WINDOW: the old step was 0 (range() raised); a longer term gave a
