@@ -205,7 +205,7 @@ cronRouter.post('/monthly-billing', async (c) => {
   let voidRecheckFailed = false
 
   // --- Step 1: charge posting — one bulk upsert for the whole portfolio, not one insert/charge. ---
-  const allCharges = inTermLeases.flatMap((lease) =>
+  const builtCharges = inTermLeases.flatMap((lease) =>
     buildMonthlyCharges({
       leaseId: lease.id,
       baseRentMonthly: lease.base_rent_monthly,
@@ -218,6 +218,51 @@ cronRouter.post('/monthly-billing', async (c) => {
   )
 
   let voidedSkipped = 0
+
+  // --- Step 1a: balance forwards from QuickBooks (migration 0030). A lease's charges dated on or
+  // before its live balance forward's as_of are frozen in the database (that history is inside the
+  // QuickBooks figure), and the bulk upsert is ONE statement: a single refused row would fail it
+  // for the whole portfolio. So such charges never enter the batch. Ones already posted are the
+  // normal re-run case (counted as skipped); a genuinely new one (its idempotency key not found) is
+  // never posted and counts as a chargeErrors entry, so trigger-billing.ps1 prints it. If the
+  // balance-forward read fails, the batch goes out unfiltered (the database guard still refuses any
+  // frozen row, so the worst case is the old whole-batch failure, never a wrong charge) and autopay
+  // is deferred this run. A voided frozen charge is no longer re-checked (voidedSkipped): that
+  // period is QuickBooks' figure.
+  let frozenByBalanceForward = 0
+  let allCharges = builtCharges
+  let bfLookupFailed = false
+  const bfCutoff = new Map<string, string>()
+  const bfRes = inTermLeases.length === 0 ? { data: [], error: null }
+    : await fetchChunked<{ lease_id: string; as_of: string }>(inTermLeases.map((l) => l.id), BULK_QUERY_CHUNK_SIZE, (chunk) =>
+      db.from('balance_forwards').select('lease_id, as_of').in('lease_id', chunk).is('voided_at', null),
+      { maxRows: POSTGREST_MAX_ROWS })
+  if (bfRes.error) {
+    bfLookupFailed = true
+    chargeErrors += 1
+    errorMessages.push(`balance-forward lookup failed; charges sent unfiltered (the database still refuses any dated on or before a QuickBooks cut-off) and autopay deferred: ${bfRes.error.message}`)
+  } else if (bfRes.data.length > 0) {
+    for (const b of bfRes.data) bfCutoff.set(b.lease_id, b.as_of)
+    const frozen = builtCharges.filter((ch) => { const cut = bfCutoff.get(ch.lease_id); return cut !== undefined && ch.charge_date <= cut })
+    if (frozen.length > 0) {
+      allCharges = builtCharges.filter((ch) => !frozen.includes(ch))
+      frozenByBalanceForward = frozen.length
+      const existing = await fetchChunked<{ idempotency_key: string }>(frozen.map((ch) => ch.idempotency_key), IDEMPOTENCY_KEY_CHUNK_SIZE, (chunk) =>
+        db.from('charges').select('idempotency_key').in('idempotency_key', chunk), { maxRows: POSTGREST_MAX_ROWS })
+      if (existing.error) {
+        chargeErrors += frozen.length
+        errorMessages.push(`${frozen.length} charge(s) dated on or before a lease's QuickBooks cut-off were not posted; could not check whether they already exist: ${existing.error.message}`)
+      } else {
+        const have = new Set(existing.data.map((r) => r.idempotency_key))
+        const missing = frozen.filter((ch) => !have.has(ch.idempotency_key))
+        skipped += frozen.length - missing.length
+        chargeErrors += missing.length
+        if (missing.length > 0) {
+          errorMessages.push(`${missing.length} new charge(s) dated on or before a lease's balance forward from QuickBooks were NOT posted (leases: ${[...new Set(missing.map((ch) => ch.lease_id))].join(', ')}) — that period is QuickBooks' figure; void the balance forward and re-import if it should change.`)
+        }
+      }
+    }
+  }
 
   if (allCharges.length > 0) {
     const { data: insertedCharges, error: chargesErr } = await db
@@ -285,8 +330,13 @@ cronRouter.post('/monthly-billing', async (c) => {
   // --- Step 2: autopay eligibility + prior-period pre-check (bulk, one query for all eligible). ---
   // In-term leases only: an excluded lease (past end / not started / invalid dates) has no charge
   // this period and must never reach a Stripe debit, even via arrears headroom.
+  // 0030: a lease whose balance forward from QuickBooks covers this billing month (as_of on or after
+  // its first day) is not autopay-debited for it: the app cannot see what was paid for that month in
+  // QuickBooks, so the debit would really sweep older arrears.
   const eligibleLeases = inTermLeases.filter((lease) => {
     const tenant = Array.isArray(lease.tenants) ? lease.tenants[0] : lease.tenants
+    const cut = bfCutoff.get(lease.id)
+    if (cut !== undefined && cut >= periodStartStr) return false
     return Boolean(lease.autopay_enabled && lease.autopay_payment_method_id && tenant?.stripe_customer_id)
   })
 
@@ -333,7 +383,7 @@ cronRouter.post('/monthly-billing', async (c) => {
   }
 
   // --- Step 3: autopay debit processing. ---
-  const autopayDeferred = priorAutopayCheckFailed || chargesBulkFailed
+  const autopayDeferred = priorAutopayCheckFailed || chargesBulkFailed || bfLookupFailed
   const notYetCollected = autopayDeferred
     ? []
     : eligibleLeases.filter((l) => !alreadyCollected.has(l.id))
@@ -493,7 +543,7 @@ cronRouter.post('/monthly-billing', async (c) => {
   // the charge-bulk-upsert failing means the ENTIRE portfolio got zero charges this run; a failed
   // autopay pre-check or debit-input lookup means that whole batch got zero debit attempts.
   const status = (chargesBulkFailed || voidRecheckFailed || priorAutopayCheckFailed || debitInputsBulkFailed) ? 500 : 200
-  return c.json({ posted, skipped, errors, chargeErrors, autopayErrors, errorMessages, remaining, year, month, voidedSkipped, notStarted, expiredUnbilled, leaseExceptions }, status)
+  return c.json({ posted, skipped, errors, chargeErrors, autopayErrors, errorMessages, remaining, year, month, voidedSkipped, notStarted, expiredUnbilled, leaseExceptions, frozenByBalanceForward }, status)
 })
 
 // OI-047: the recipients only scope the sent_notifications dedup-key set — they do not control

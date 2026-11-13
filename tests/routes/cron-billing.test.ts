@@ -92,6 +92,9 @@ const state = {
   debitInputsError: null as { code?: string; message: string } | null,
   voidRecheckError: null as { code?: string; message: string } | null,
   arLedgerPaddingRows: 0,
+  // Live balance forwards from QuickBooks (migration 0030): lease → as_of.
+  balanceForwards: [] as { lease_id: string; as_of: string }[],
+  balanceForwardsError: null as { code?: string; message: string } | null,
 }
 
 function paymentCounts(p: PaymentRow): boolean {
@@ -151,6 +154,17 @@ function leasesTable() {
 function installDbMock() {
   mockFrom.mockImplementation((table: string) => {
     if (table === 'leases') return leasesTable()
+    if (table === 'balance_forwards') {
+      return {
+        select: vi.fn().mockReturnValue({
+          in: vi.fn().mockImplementation((_col: string, leaseIds: string[]) => ({
+            is: vi.fn().mockImplementation(async () => state.balanceForwardsError
+              ? { data: null, error: state.balanceForwardsError }
+              : { data: capped(state.balanceForwards.filter((b) => leaseIds.includes(b.lease_id))), error: null }),
+          })),
+        }),
+      }
+    }
     if (table === 'charges') {
       return {
         // Step 1: bulk upsert — simulates INSERT ... ON CONFLICT (idempotency_key) DO NOTHING
@@ -174,6 +188,15 @@ function installDbMock() {
         //   - Step 3's open-charges lookup: 'lease_id, amount'
         //   - The PR #42 review-follow-up voided-charge re-check: 'idempotency_key, voided_at'
         select: vi.fn().mockImplementation((cols?: string) => {
+          if (cols === 'idempotency_key') {
+            // Balance-forward existence check for charges kept out of the batch.
+            return {
+              in: vi.fn().mockImplementation(async (_col: string, keys: string[]) => ({
+                data: capped(state.charges.filter(c => keys.includes(c.idempotency_key)).map(c => ({ idempotency_key: c.idempotency_key }))),
+                error: null,
+              })),
+            }
+          }
           if (cols === 'idempotency_key, voided_at') {
             // Voided-charge re-check — .in('idempotency_key', chunk), resolves directly (no
             // further chain), mirroring the real fetchChunked-driven query in cron.ts step 1.
@@ -351,6 +374,8 @@ beforeEach(() => {
   state.debitInputsError = null
   state.voidRecheckError = null
   state.arLedgerPaddingRows = 0
+  state.balanceForwards = []
+  state.balanceForwardsError = null
   installDbMock()
   mockStripe.paymentIntents.create.mockResolvedValue({ id: 'pi_auto_1', status: 'processing' })
 })
@@ -358,6 +383,84 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 // POST /api/cron/monthly-billing — autopay idempotency + balance cap (OI-034)
 // ---------------------------------------------------------------------------
+describe('POST /api/cron/monthly-billing — balance forwards from QuickBooks (0030)', () => {
+  // The database refuses any charge dated on or before a lease's live balance-forward cut-off, and
+  // the upsert is one statement, so such charges must never enter the batch.
+  it('keeps a frozen lease’s charges out of the batch; other leases still bill; an already-posted one is just skipped', async () => {
+    state.leases = [nonAutopayLease('lease_a'), nonAutopayLease('lease_b')]
+    state.balanceForwards = [{ lease_id: 'lease_a', as_of: '2026-06-15' }]
+    state.charges = [{ lease_id: 'lease_a', idempotency_key: 'auto:lease_a:2026-06-01:rent', amount: 4000, due_date: '2026-06-01' }]
+    const res = await postBilling()
+    expect(res.status).toBe(200)
+    const body = await res.json() as { posted: number; skipped: number; frozenByBalanceForward: number; errorMessages: string[]; errors: number }
+    expect(body.errors).toBe(0)
+    expect(body.skipped).toBe(1)
+    // lease_a keeps only its pre-existing row; lease_b was billed.
+    expect(state.charges.filter(c => c.lease_id === 'lease_a')).toHaveLength(1)
+    expect(state.charges.some(c => c.lease_id === 'lease_b')).toBe(true)
+    expect(body.frozenByBalanceForward).toBeGreaterThan(0)
+    expect(body.posted).toBeGreaterThan(0)
+    expect(body.errorMessages.join()).not.toMatch(/NOT posted/)
+  })
+
+  it('a genuinely new charge before the cut-off is surfaced, never posted', async () => {
+    state.leases = [nonAutopayLease('lease_a')]
+    state.balanceForwards = [{ lease_id: 'lease_a', as_of: '2026-06-30' }]
+    const res = await postBilling()
+    const body = await res.json() as { posted: number; errors: number; chargeErrors: number; errorMessages: string[] }
+    expect(body.posted).toBe(0)
+    // Counted as an error so trigger-billing.ps1 prints errorMessages (REFUTE: it only prints when errors > 0).
+    expect(body.chargeErrors).toBe(1)
+    expect(body.errors).toBe(1)
+    expect(state.charges.filter(c => c.lease_id === 'lease_a')).toEqual([])
+    expect(body.errorMessages.join()).toMatch(/new charge\(s\) dated on or before a lease's balance forward from QuickBooks were NOT posted \(leases: lease_a\)/)
+  })
+
+  it('a charge after the cut-off bills normally', async () => {
+    state.leases = [nonAutopayLease('lease_a')]
+    state.balanceForwards = [{ lease_id: 'lease_a', as_of: '2026-05-31' }]
+    const body = await (await postBilling()).json() as { posted: number; frozenByBalanceForward: number }
+    expect(body.posted).toBeGreaterThan(0)
+    expect(body.frozenByBalanceForward).toBe(0)
+  })
+
+  it('if the balance-forward read fails, the batch goes out unfiltered as an error (the database guard is the backstop) and autopay is deferred', async () => {
+    state.leases = [AUTOPAY_LEASE]
+    state.balanceForwardsError = { message: 'boom' }
+    const body = await (await postBilling()).json() as { posted: number; errors: number; remaining: number; errorMessages: string[] }
+    expect(body.posted).toBeGreaterThan(0)
+    expect(body.errors).toBeGreaterThan(0)
+    expect(body.remaining).toBe(1)
+    expect(body.errorMessages.join()).toMatch(/balance-forward lookup failed/)
+    expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
+  })
+
+  it('never autopay-debits a month its balance forward covers (it cannot see QuickBooks payments for it)', async () => {
+    state.leases = [AUTOPAY_LEASE]
+    state.balanceForwards = [{ lease_id: 'lease_1', as_of: '2026-06-01' }]
+    state.charges = [{ lease_id: 'lease_1', idempotency_key: 'auto:lease_1:2026-06-01:rent', amount: 5000, due_date: '2026-06-01' }]
+    const res = await postBilling()
+    expect(res.status).toBe(200)
+    expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
+    // A cut-off before the month: autopay runs normally.
+    state.balanceForwards = [{ lease_id: 'lease_1', as_of: '2026-05-31' }]
+    await postBilling()
+    expect(mockStripe.paymentIntents.create).toHaveBeenCalledTimes(1)
+  })
+
+  it('checks existing keys in chunks of at most 50 (URL length)', async () => {
+    state.leases = Array.from({ length: 60 }, (_, i) => nonAutopayLease(`lease_${String(i).padStart(3, '0')}`))
+    state.balanceForwards = state.leases.map((l) => ({ lease_id: l.id as string, as_of: '2026-06-30' }))
+    await postBilling()
+    const chargesTable = mockFrom.mock.results.map(r => r.value).filter(v => v && typeof v.select === 'function' && v.upsert)
+    const keyChunks = chargesTable.flatMap(t => (t.select as ReturnType<typeof vi.fn>).mock.results)
+      .map(r => r.value).filter(v => v && v.in && (v.in as ReturnType<typeof vi.fn>).mock?.calls.length)
+      .flatMap(v => (v.in as ReturnType<typeof vi.fn>).mock.calls.filter((c: unknown[]) => c[0] === 'idempotency_key').map((c: unknown[]) => (c[1] as string[]).length))
+    expect(keyChunks.length).toBeGreaterThan(1)
+    expect(Math.max(...keyChunks)).toBeLessThanOrEqual(50)
+  })
+})
+
 describe('POST /api/cron/monthly-billing', () => {
   it('returns 401 without cron secret', async () => {
     const res = await app.request('/api/cron/monthly-billing', { method: 'POST' }, env)
