@@ -402,6 +402,45 @@ class PushGate(unittest.TestCase):
         self.sb.commit("more.md", "clean\n", msg="clean")
         self.assertAllowed(*self.sb.push_to("public", "HEAD:refs/heads/feature"))
 
+    # --- REFUTE round 4 on 6d5b9031: the tracking-ref bound must describe the push target
+    def _term_on_origin_tracking(self):
+        w = self.sb.work
+        self.sb.commit("notes.md", "memo %s\n" % TERM, msg="memo")
+        self.sb.git(w, "push", "-q", "--no-verify", "origin", "main")
+        self.sb.git(w, "fetch", "-q", "origin")
+        self.sb.commit("more.md", "clean\n", msg="clean")
+
+    def test_pushurl_remote_is_not_bounded_by_its_fetch_tracking_refs(self):
+        self._term_on_origin_tracking()
+        self.sb.git(self.sb.work, "config", "remote.origin.pushurl", self.sb.bare("pub2"))
+        self.assertBlocked(*self.sb.push("HEAD:refs/heads/main"))
+
+    def test_push_instead_of_remote_is_not_bounded_by_its_fetch_tracking_refs(self):
+        self._term_on_origin_tracking()
+        self.sb.git(self.sb.work, "config", "url.%s.pushInsteadOf" % self.sb.bare("pub3"),
+                    self.sb.remote)
+        self.assertBlocked(*self.sb.push("HEAD:refs/heads/main"))
+
+    def test_multiple_urls_remote_is_not_bounded(self):
+        self._term_on_origin_tracking()
+        self.sb.git(self.sb.work, "config", "--add", "remote.origin.url", self.sb.bare("pub4"))
+        self.assertBlocked(*self.sb.push("HEAD:refs/heads/main"))
+
+    def test_prefix_remote_tracking_refs_do_not_bound_the_shorter_remote(self):
+        # remotes `o` (public) and `o/priv` (private): refs/remotes/o/priv/* must not count
+        # as already on `o`.
+        w = self.sb.work
+        self.sb.git(w, "remote", "add", "o", self.sb.bare("o_public"))
+        # `git remote add` refuses a subset name; `git remote rename` allows it
+        self.sb.git(w, "remote", "add", "opriv", self.sb.bare("o_priv"))
+        self.sb.git(w, "remote", "rename", "opriv", "o/priv")
+        self.sb.git(w, "push", "-q", "--no-verify", "o", "HEAD~0:refs/heads/seed")
+        self.sb.commit("notes.md", "memo %s\n" % TERM, msg="memo")
+        self.sb.git(w, "push", "-q", "--no-verify", "o/priv", "main")
+        self.sb.git(w, "fetch", "-q", "o")
+        self.sb.git(w, "fetch", "-q", "o/priv")
+        self.assertBlocked(*self.sb.push_to("o", "HEAD:refs/heads/main"))
+
     def test_push_to_a_bare_url_scans_full_history(self):
         w = self.sb.work
         self.sb.commit("notes.md", "memo %s\n" % TERM, msg="memo")
@@ -828,10 +867,11 @@ class Units(unittest.TestCase):
 
     def test_rev_range(self):
         z, a, b = "0" * 40, "a" * 40, "b" * 40
-        self.assertEqual(scan.rev_range(a, b, "origin"), [a, "^" + b])
+        bound = ["refs/remotes/origin/main", "refs/remotes/origin/x"]
+        self.assertEqual(scan.rev_range(a, b, bound), [a, "^" + b])
         self.assertEqual(scan.rev_range(a, b, None), [a, "^" + b])
-        self.assertEqual(scan.rev_range(a, z, "origin"), [a, "--not", "--remotes=origin"])
-        self.assertEqual(scan.rev_range(a, z, None), [a])  # bare URL / no tracking refs
+        self.assertEqual(scan.rev_range(a, z, bound), [a, "--not"] + bound)
+        self.assertEqual(scan.rev_range(a, z, None), [a])  # no usable bound: full history
 
     def test_require_refs_env_blocks_empty_stdin(self):
         p = self._roster(ROSTER)

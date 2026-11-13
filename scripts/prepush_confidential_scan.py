@@ -48,11 +48,14 @@ counts as one separator, and a separator-free form of each MULTI-word term (5+ c
 also matched against the normalized text, so `LOI_<TermNoSpaces>_MMDDYYYY` and line-wrapped
 or `&nbsp;`-joined names are caught without "east on" matching a one-word "easton".
 Range: an existing remote ref scans remote_sha..local_sha. A brand-new remote ref scans
-`local_sha --not --remotes=<remote>`, where <remote> is the name git passes the hook as
-argv[1] (commits not already known on THAT remote). When argv[1] is a bare URL or path, not a
-configured remote, or that remote has no tracking refs (never fetched), the pushed ref's FULL
-history is scanned instead -- fail-closed, and slower; an orphan branch is likewise scanned
-in full, deliberately.
+`local_sha --not <ref>...` over the exact tracking refs of the remote git passes the hook as
+argv[1] -- but ONLY when those refs provably describe the push target: the remote has exactly
+one fetch URL and one push URL and they are the same string as git resolves them (no
+pushurl, no pushInsteadOf, no second url); no other remote's name equals it, starts with
+`<remote>/` or is a `/`-prefix of it; no other remote's fetch refspec writes under
+refs/remotes/<remote>/; it has 1..MAX_BOUND_REFS tracking refs. Otherwise (a bare URL or
+path, an unknown remote, never fetched, any of the above) the pushed ref's FULL history is
+scanned -- fail-closed, and slower; an orphan branch is likewise scanned in full.
 
 Context terms (mirrors find_hit() in ~/.claude/hooks/confidentiality-guard.py): a deal's
 `context` term blocks only when one of the same deal's `context_requires_any` anchors also
@@ -114,8 +117,9 @@ Residual (not covered):
   * a term interleaved with markup whose total span exceeds the slice overlap AND straddles a
     256 KB slice edge;
   * history already on the remote is not rescanned: for a new ref, anything reachable from
-    the push remote's tracking refs counts as already there, so stale tracking refs (the
-    remote rewound or deleted a branch since the last fetch) can hide commits.
+    the push remote's own tracking refs counts as already there, so stale tracking refs (the
+    remote rewound or deleted a branch since the last fetch) or tracking refs written by
+    hand (`git update-ref refs/remotes/<remote>/...`) can hide commits.
 
 Exit 0 = allow, 1 = block (git pre-push convention). Bypass for a verified-clean push is a
 human's `git push --no-verify`; there is deliberately no environment-variable bypass.
@@ -461,28 +465,64 @@ def parse_pushrefs(text):
     return refs
 
 
-def push_remote(remote, cwd=None):
-    """The remote name git passed as argv[1] when it is a configured remote with at least one
-    tracking ref, else None (a bare URL / path, an unknown name, never fetched): the caller
-    then scans full history. RAISES nothing; a git failure also yields None."""
+MAX_BOUND_REFS = 500  # more tracking refs than this: no bound (command-line length)
+
+
+def _git_lines(args, cwd):
+    """stdout lines of a git call, or None when it fails."""
+    p = _git(args, cwd, text=True)
+    if p.returncode != 0:
+        return None
+    return [line for line in p.stdout.splitlines() if line.strip()]
+
+
+def push_bound(remote, cwd=None):
+    """Exact refs under refs/remotes/<remote>/ that may stand for "already on the push
+    target", or None (caller scans full history). `remote` is the hook's argv[1]. None unless
+    the tracking refs provably describe where the push goes -- see "Range" above."""
     if not remote or remote.startswith("-") or any(c in remote for c in "*?[\\:"):
         return None
-    p = _git(["config", "--get", "remote.%s.url" % remote], cwd, text=True)
-    if p.returncode != 0 or not p.stdout.strip():
+    fetch_urls = _git_lines(["remote", "get-url", "--all", remote], cwd)
+    push_urls = _git_lines(["remote", "get-url", "--push", "--all", remote], cwd)
+    if (not fetch_urls or not push_urls or len(fetch_urls) != 1 or len(push_urls) != 1
+            or fetch_urls[0] != push_urls[0]):
+        return None  # pushurl / pushInsteadOf / several urls: tracking refs show another repo
+    names = _git_lines(["remote"], cwd)
+    if names is None or remote not in names:
         return None
-    p = _git(["for-each-ref", "--count=1", "--format=%(refname)", "refs/remotes/%s/" % remote],
-             cwd, text=True)
-    if p.returncode != 0 or not p.stdout.strip():
+    prefix = "refs/remotes/%s/" % remote
+    for other in names:
+        if other == remote:
+            continue
+        if other.startswith(remote + "/") or remote.startswith(other + "/"):
+            return None  # nested remote names share a tracking-ref namespace
+    specs = _git_lines(["config", "--get-regexp", r"^remote\..*\.fetch$"], cwd) or []
+    for line in specs:
+        key, _sp, spec = line.partition(" ")
+        owner = key[len("remote."):-len(".fetch")]
+        dst = spec.partition(":")[2].lstrip("+")
+        if owner != remote and dst.startswith(prefix):
+            return None  # another remote writes into this remote's tracking refs
+    refs = _git_lines(["for-each-ref", "--format=%(refname)", prefix], cwd)
+    if not refs:
         return None
-    return remote
+    # Defence in depth (nested names already returned None above): drop any ref that a
+    # longer remote `<remote>/...` owns. str.startswith(()) is False, so none -> keep all.
+    others = tuple("refs/remotes/%s/" % o for o in names
+                   if o != remote and o.startswith(remote + "/"))
+    refs = [r for r in refs if r.startswith(prefix) and not r.startswith(others)]
+    if not refs or len(refs) > MAX_BOUND_REFS:
+        return None
+    return refs
 
 
-def rev_range(local_sha, remote_sha, remote):
-    """Revision arguments for what one pushed ref makes new on the remote."""
+def rev_range(local_sha, remote_sha, bound):
+    """Revision arguments for what one pushed ref makes new on the remote. `bound`: the
+    exact tracking refs from push_bound(), or None."""
     if set(remote_sha) != {ZERO}:
         return [local_sha, "^" + remote_sha]
-    if remote:
-        return [local_sha, "--not", "--remotes=" + remote]
+    if bound:
+        return [local_sha, "--not"] + list(bound)
     return [local_sha]  # no bound: full history, fail-closed
 
 
@@ -825,7 +865,7 @@ def tag_chain_hits(local_sha, roster, cwd=None):
 
 
 # --------------------------------------------------------------------------- main
-def scan_ref(local_ref, local_sha, remote_ref, remote_sha, roster, remote, cwd=None):
+def scan_ref(local_ref, local_sha, remote_ref, remote_sha, roster, bound, cwd=None):
     """List of block messages for one pushed ref (empty = clean)."""
     msgs = []
     label = shown(local_ref, roster)
@@ -864,7 +904,7 @@ def scan_ref(local_ref, local_sha, remote_ref, remote_sha, roster, remote, cwd=N
         msgs.append("(fail-closed) %s points at an object of unexpected type %r."
                     % (label, final_type))
         return msgs
-    rng = rev_range(local_sha, remote_sha, remote)
+    rng = rev_range(local_sha, remote_sha, bound)
     # One commit = one window: its raw object (every view), its own patch, and the content
     # and path of every blob it introduces (scan_blobs) -- see "Context terms" above.
     try:
@@ -920,12 +960,12 @@ def main(stdin_text=None, roster=None, cwd=None, remote=None):
         return 1
     if not roster.can_block():
         return 0  # no active always / context term: nothing can leak
-    remote = push_remote(remote, cwd)
+    bound = push_bound(remote, cwd)
     blocked = False
     for local_ref, local_sha, remote_ref, remote_sha in pushrefs:
         if set(local_sha) == {ZERO}:
             continue  # ref deletion: nothing new reaches the remote
-        for m in scan_ref(local_ref, local_sha, remote_ref, remote_sha, roster, remote, cwd):
+        for m in scan_ref(local_ref, local_sha, remote_ref, remote_sha, roster, bound, cwd):
             sys.stderr.write("pre-push BLOCKED: %s\n" % m)
             blocked = True
     if blocked:
