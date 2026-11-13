@@ -14,6 +14,7 @@ import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   RUNTIME_ENV,
+  DEFERRED_UNTIL,
   BUILD_ENV,
   RUNTIME_BINDINGS,
   evaluateEnv,
@@ -184,6 +185,13 @@ describe('manifest classification', () => {
     }
     expect(BUILD_ENV.VITE_SUPABASE_URL).toBe('required')
     expect(BUILD_ENV.VITE_SUPABASE_ANON_KEY).toBe('required')
+  })
+
+  it('names what each deferred variable waits for (not "tenant payments" for all of them)', () => {
+    const deferred = [...Object.entries(RUNTIME_ENV), ...Object.entries(BUILD_ENV)].filter(([, c]) => c === 'deferred').map(([n]) => n)
+    for (const name of deferred) expect(DEFERRED_UNTIL[name], name).toBeTruthy()
+    expect(DEFERRED_UNTIL.GL_PERIOD_LOCK_EMAILS).toMatch(/month-end close/)
+    expect(DEFERRED_UNTIL.STRIPE_SECRET_KEY).toBe('tenant payments launch')
   })
 
   it('keeps Stripe deferred until tenant payments launch', () => {
