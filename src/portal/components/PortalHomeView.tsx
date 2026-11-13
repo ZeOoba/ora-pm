@@ -130,7 +130,7 @@ export function PortalHomeView({ data, preview = false }: { data: PortalHomeData
 
         <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-3">
           <Tile label="Last payment" value={lastPayment ? formatCurrency(lastPayment.amount) : '—'}
-            sub={lastPayment ? `${formatDate(lastPayment.payment_date)} · ${lastPayment.stripe_status.replace(/_/g, ' ')}` : 'No payments on record'} />
+            sub={lastPayment ? `${formatDate(lastPayment.payment_date)} · ${(lastPayment.stripe_status ?? 'recorded').replace(/_/g, ' ')}` : 'No payments on record'} />
           <Tile label="Lease ends" value={nextEnd ? formatDate(nextEnd) : '—'} sub={<PortalLink preview={preview} to="/portal/lease" className="hover:text-navy">View my lease →</PortalLink>} />
           <Tile label="Insurance certificate" value="Upload" sub={<PortalLink preview={preview} to="/portal/insurance" className="hover:text-navy">Send a new COI →</PortalLink>} />
         </div>
