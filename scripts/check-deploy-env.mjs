@@ -50,6 +50,18 @@ export const RUNTIME_ENV = {
   GL_PERIOD_LOCK_EMAILS: 'deferred', // B8 ledger: period lock fails closed (403) until set; needed at first month-end close
 }
 
+/**
+ * What each deferred variable waits for, shown in its warning. A deferred variable without an
+ * entry falls back to "its feature" (tests require every deferred variable to have one).
+ * @type {Record<string, string>}
+ */
+export const DEFERRED_UNTIL = {
+  STRIPE_SECRET_KEY: 'tenant payments (pre-launch)',
+  STRIPE_WEBHOOK_SECRET: 'tenant payments (pre-launch)',
+  VITE_STRIPE_PUBLISHABLE_KEY: 'tenant payments (pre-launch)',
+  GL_PERIOD_LOCK_EMAILS: 'the first GL month-end close; until set, nobody can lock a period',
+}
+
 // Bindings are configured in wrangler.toml, not as env vars, so the Pages
 // env-var API can't see them. RATE_LIMIT_KV degrades to memory-only when unbound.
 export const RUNTIME_BINDINGS = ['RATE_LIMIT_KV']
@@ -102,7 +114,7 @@ function report(result, where, { warnOnly, log }) {
     log(`::${errLevel}::${name} is required but not set on ${where}`)
   }
   for (const name of result.missingDeferred) {
-    log(`::warning::${name} is not set on ${where} (deferred: needed only once tenant payments launch)`)
+    log(`::warning::${name} is not set on ${where} (deferred: needed for ${DEFERRED_UNTIL[name] ?? 'its feature'})`)
   }
   if (result.missingRequired.length === 0) log(`OK: every required variable is set on ${where}`)
   return result.missingRequired.length > 0 && !warnOnly ? 1 : 0
