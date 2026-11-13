@@ -52,9 +52,13 @@ destination itself). A brand-new remote ref scans the pushed commits NOT reachab
 the destination actually advertises: `git ls-remote <push url>` (argv[2], or argv[1] when
 argv[2] is absent; no prompt, 60 s timeout, credential helpers inherited), keeping only the
 advertised shas that exist locally as commits, passed as `^<sha>` lines on `--stdin` (no
-command-line cap). No local tracking ref, remote name or remote config is consulted. If
-ls-remote fails, times out or advertises nothing usable, the pushed ref's FULL history is
-scanned -- fail-closed, and slower; an orphan branch or a push to an empty repository is
+command-line cap). No local tracking ref is consulted. The bound is REFUSED (full scan)
+unless ls-remote would provably ask the repository the push goes to: the target must
+resolve to itself (`ls-remote --get-url` -- git already applied url.*.insteadOf to argv[2],
+and a second pass through a self-matching rule or a rule chain would ask another repo),
+argv[1] must not set remote.<name>.receivepack / uploadpack, and the target must be a plain
+file / ssh / http(s) / git URL or path (no `<helper>::` or `ext::` syntax). If ls-remote
+fails, times out or advertises nothing usable, the pushed ref's FULL history is scanned -- fail-closed, and slower; an orphan branch or a push to an empty repository is
 likewise scanned in full. This costs one extra connection to the remote per push that
 creates a ref.
 
@@ -117,7 +121,10 @@ Residual (not covered):
     covers the raw and entity-decoded text only);
   * a term interleaved with markup whose total span exceeds the slice overlap AND straddles a
     256 KB slice edge;
-  * history the destination already advertises is not rescanned (it is already public).
+  * history the destination already advertises is not rescanned (it is already public). So
+    a compromised or hostile destination that advertises arbitrary shas can exclude them;
+    and ls-remote runs before the push itself, so a commit advertised at check time but
+    removed from the destination before the push lands is not rescanned (race).
 
 Exit 0 = allow, 1 = block (git pre-push convention). Bypass for a verified-clean push is a
 human's `git push --no-verify`; there is deliberately no environment-variable bypass.
@@ -475,8 +482,19 @@ def destination_bound(remote, url, cwd=None):
     cannot be asked or advertises nothing usable (the caller then scans full history).
     `url` is the hook's argv[2] (the push URL), `remote` its argv[1]."""
     target = url or remote
-    if not target or target.startswith("-"):
+    if not target or target.startswith("-") or not _plain_transport(target):
         return []
+    if remote and not remote.startswith("-"):
+        for key in ("receivepack", "uploadpack"):
+            c = _git(["config", "--get", "remote.%s.%s" % (remote, key)], cwd, text=True)
+            if c.returncode == 0 and c.stdout.strip():
+                return []  # a custom pack program: ls-remote may not see the push target
+    try:
+        g = _git(["ls-remote", "--get-url", target], cwd, text=True, timeout=LS_REMOTE_TIMEOUT)
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+    if g.returncode != 0 or g.stdout.strip() != target:
+        return []  # insteadOf would rewrite the target again: another repository
     try:
         p = _git(["ls-remote", target], cwd, timeout=LS_REMOTE_TIMEOUT)
     except (subprocess.TimeoutExpired, OSError):
@@ -501,6 +519,20 @@ def destination_bound(remote, url, cwd=None):
                 and parts[0] not in out:
             out.append(parts[0])
     return out
+
+
+_PLAIN_SCHEMES = ("file", "ssh", "http", "https", "git")
+
+
+def _plain_transport(target):
+    """True for a plain file / ssh / http(s) / git URL, scp-like `host:path` or local path;
+    False for `<helper>::...` (ext:: included) or any other scheme."""
+    if "::" in target:
+        return False
+    scheme, sep, _rest = target.partition("://")
+    if sep:
+        return scheme.lower() in _PLAIN_SCHEMES
+    return True
 
 
 class RevRange:

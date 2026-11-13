@@ -497,8 +497,9 @@ class PushGate(unittest.TestCase):
         bad = os.path.join(self.sb.root, "no-such-remote.git")
         self.assertEqual(self._main_in_sandbox(stdin_text=line, roster=roster, remote="origin",
                                                url=bad), 1)
-        # argv[2] absent: argv[1] is used
-        self.assertEqual(self._main_in_sandbox(stdin_text=line, roster=roster, remote="origin"), 0)
+        # argv[2] absent: argv[1] (a remote NAME) never equals its own resolved URL, so the
+        # bound is refused and the full history is scanned (fail-closed)
+        self.assertEqual(self._main_in_sandbox(stdin_text=line, roster=roster, remote="origin"), 1)
 
     def test_new_branch_off_up_to_date_main_scans_only_its_own_commits(self):
         head, _line = self._term_on_remote_main_then_feature()
@@ -507,6 +508,55 @@ class PushGate(unittest.TestCase):
         self.assertEqual(scan.range_commits(scan.rev_range(head, "0" * 40, bound), self.sb.work),
                          [head])
         self.assertAllowed(*self.sb.push("feature"))
+
+    # --- REFUTE round 6 on bb7e7e3e: ls-remote must ask the repo the push goes to -------
+    def _private_has_term_public_pushed_via(self, remote_url, private):
+        """Term commit on the PRIVATE bare repo's main (fetched locally); a remote `pub`
+        whose push URL resolves elsewhere; returns the push result of a new branch."""
+        w = self.sb.work
+        self.sb.commit("notes.md", "memo %s\n" % TERM, msg="memo")
+        self.sb.git(w, "push", "-q", "--no-verify", private, "main")
+        self.sb.commit("more.md", "clean\n", msg="clean")
+        self.sb.git(w, "remote", "add", "pub", remote_url)
+        return self.sb.push_to("pub", "HEAD:refs/heads/feature")
+
+    def test_self_matching_insteadof_cannot_bound_by_another_repo(self):
+        # rule <root>/rr <- <root>/r: git rewrites r.git -> rr.git (the push target, argv[2]);
+        # ls-remote rr.git would rewrite AGAIN to rrr.git (private).
+        root = self.sb.root.replace("\\", "/")
+        self.sb.bare("rr")
+        private = self.sb.bare("rrr")
+        self.sb.git(self.sb.work, "config", "url.%s/rr.insteadOf" % root, "%s/r" % root)
+        self.assertBlocked(*self._private_has_term_public_pushed_via("%s/r.git" % root, private))
+
+    def test_insteadof_rule_chain_cannot_bound_by_another_repo(self):
+        root = self.sb.root.replace("\\", "/")
+        self.sb.bare("chain_pub")
+        private = self.sb.bare("chain_priv")
+        w = self.sb.work
+        self.sb.git(w, "config", "url.%s/chain_pub.git.insteadOf" % root, "%s/u.git" % root)
+        self.sb.git(w, "config", "url.%s/chain_priv.git.insteadOf" % root,
+                    "%s/chain_pub.git" % root)
+        self.assertBlocked(*self._private_has_term_public_pushed_via("%s/u.git" % root, private))
+
+    def test_custom_receivepack_disables_the_bound(self):
+        w = self.sb.work
+        self.sb.commit("notes.md", "memo %s\n" % TERM, msg="memo")
+        self.sb.git(w, "push", "-q", "--no-verify", "origin", "main")
+        self.sb.git(w, "checkout", "-q", "-b", "feature")
+        self.sb.commit("feature.md", "clean\n", msg="clean")
+        self.sb.git(w, "config", "remote.origin.receivepack", "git-receive-pack")
+        self.assertBlocked(*self.sb.push("feature"))  # full history: the old term counts
+
+    def test_bound_refused_for_helpers_odd_transports_and_custom_pack_programs(self):
+        w = self.sb.work
+        good = self.sb.remote.replace("\\", "/")
+        self.assertTrue(scan.destination_bound("origin", good, w))
+        for target in ("ext::sh -c true", "foo::" + good, "ftp://example.invalid/x.git",
+                       "ssh+git://example.invalid/x.git", "-oProxyCommand=x"):
+            self.assertEqual(scan.destination_bound("origin", target, w), [], target)
+        self.sb.git(w, "config", "remote.origin.uploadpack", "git-upload-pack")
+        self.assertEqual(scan.destination_bound("origin", good, w), [])
 
     def test_push_to_a_bare_url_scans_full_history(self):
         w = self.sb.work
