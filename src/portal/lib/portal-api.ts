@@ -75,7 +75,8 @@ export interface Payment {
   lease_id: string
   amount: number
   payment_date: string
-  stripe_status: string
+  /** NULL for check/wire/other payments recorded by the admin (0002); only ACH rows carry one. */
+  stripe_status: string | null
   notes: string | null
 }
 
