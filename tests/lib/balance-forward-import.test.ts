@@ -99,14 +99,17 @@ describe('planBalanceForwards', () => {
     expect(plan.errors.join()).toMatch(/matches 2 leases/)
   })
 
-  it('manual figures override the file; without a file only manual leases are planned', () => {
+  it('manual figures override the file; without a file the other leases are listed as needing a figure, never applied', () => {
     const leases = [lease('l1', 'A', 1000), lease('l2', 'B', 2000)]
     const noFile = planBalanceForwards({ ...base, leases, aging: null, manual: { l2: -500 } })
-    expect(noFile.rows.map((r) => [r.lease_id, r.qb_source, r.adjustment_cents])).toEqual([['l2', 'manual', -2500]])
+    expect(noFile.rows.map((r) => [r.lease_id, r.qb_source, r.status, r.adjustment_cents])).toEqual([['l1', 'none', 'no_figure', 0], ['l2', 'manual', 'adjust', -2500]])
+    expect(noFile.adjust_count).toBe(1)
+    expect(noFile.errors).toEqual([])
     const withFile = planBalanceForwards({ ...base, leases, aging: parseAgingSummary(csv(['A,,5.00,0,0,0,0,5.00', 'TOTAL,,5,0,0,0,0,5.00'])), manual: { l1: 0 } })
     expect(withFile.rows.find((r) => r.lease_id === 'l1')).toMatchObject({ qb_source: 'manual', qb_cents: 0, adjustment_cents: -1000 })
     expect(planBalanceForwards({ ...base, leases, aging: null, manual: { l1: 1.5 } }).errors.join()).toMatch(/whole cents/)
-    expect(planBalanceForwards({ ...base, leases, aging: null }).errors.join()).toMatch(/nothing to plan/)
+    expect(planBalanceForwards({ ...base, leases, aging: null }).adjust_count).toBe(0)
+    expect(planBalanceForwards({ ...base, leases: [], aging: null }).errors.join()).toMatch(/no leases/)
   })
 
   it('refuses a future cut-off, a file dated otherwise, and a lease with ACH still processing; skips one already forwarded', () => {

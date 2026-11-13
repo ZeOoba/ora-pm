@@ -15,7 +15,8 @@
 //     else is assigned by hand (`assign`), or left unmatched (a warning showing the dollars that
 //     will not reach the app, so the LLC's totals will not tie).
 //   * With a file, a lease no customer is matched to has a QuickBooks balance of 0 (QuickBooks says
-//     the tenant owes nothing). Without a file, only leases given a manual figure are planned.
+//     the tenant owes nothing). Without a file, a lease with no manual figure is listed as
+//     'no_figure' (so one can be typed) and never applied.
 //   * A manual figure (`manual`, cents) overrides the file for that lease.
 //   * The file's customer rows must add up to its TOTAL row, and its "As of" date must be the cut-off.
 import { parseCsv, parseAsOf } from './gl-opening-balance'
@@ -36,7 +37,7 @@ export interface BfLease {
 
 export interface QbCustomerRow { row: number; customer: string; cents: number }
 
-export type BfRowStatus = 'adjust' | 'no_change' | 'has_forward' | 'blocked'
+export type BfRowStatus = 'adjust' | 'no_change' | 'has_forward' | 'blocked' | 'no_figure'
 
 export interface BfPlanRow {
   lease_id: string
@@ -45,7 +46,7 @@ export interface BfPlanRow {
   property_name: string
   lease_status: string
   qb_customers: string[]
-  qb_source: 'file' | 'manual' | 'absent_from_file'
+  qb_source: 'file' | 'manual' | 'absent_from_file' | 'none'
   qb_cents: number
   app_cents: number
   adjustment_cents: number
@@ -213,7 +214,14 @@ export function planBalanceForwards(input: BfPlanInput): BfPlan {
   for (const l of leases) {
     const matched = customersByLease.get(l.lease_id) ?? []
     const hasManual = Object.prototype.hasOwnProperty.call(manual, l.lease_id)
-    if (!aging && !hasManual) continue
+    if (!aging && !hasManual) {
+      plan.rows.push({
+        lease_id: l.lease_id, tenant_name: l.tenant_name, suite: l.suite, property_name: l.property_name, lease_status: l.status,
+        qb_customers: [], qb_source: 'none', qb_cents: 0, app_cents: l.app_cents, adjustment_cents: 0, status: 'no_figure',
+        note: l.live_forward ? `already has a balance forward of ${centsText(l.live_forward.amount_cents)} as of ${l.live_forward.as_of}` : null,
+      })
+      continue
+    }
     const qb_cents = hasManual ? manual[l.lease_id] : matched.reduce((a, c) => a + c.cents, 0)
     const qb_source: BfPlanRow['qb_source'] = hasManual ? 'manual' : matched.length ? 'file' : 'absent_from_file'
     const adjustment_cents = qb_cents - l.app_cents
@@ -234,6 +242,6 @@ export function planBalanceForwards(input: BfPlanInput): BfPlan {
   }
   plan.rows.sort((a, b) => a.property_name.localeCompare(b.property_name) || a.tenant_name.localeCompare(b.tenant_name) || a.lease_id.localeCompare(b.lease_id))
   plan.adjust_count = plan.rows.filter((r) => r.status === 'adjust').length
-  if (plan.rows.length === 0 && plan.errors.length === 0) plan.errors.push('nothing to plan: upload the A/R Aging Summary or enter a QuickBooks balance for a lease')
+  if (plan.rows.length === 0 && plan.errors.length === 0) plan.errors.push('this LLC has no leases in the app')
   return plan
 }
