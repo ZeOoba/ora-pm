@@ -22,7 +22,7 @@ const LEASE = '00000000-0000-0000-0000-000000000004'
 
 function seed(db: ReturnType<typeof freshMigratedDb>) {
   db.none(`
-    INSERT INTO properties (id, name, address, city, state) VALUES ('${PROP}', 'REDACTED-020', 'REDACTED-010', 'Columbia', 'MD');
+    INSERT INTO properties (id, name, address, city, state) VALUES ('${PROP}', '100 Example', '100 Example Rd', 'Columbia', 'MD');
     INSERT INTO units (id, property_id, suite, sf) VALUES ('${UNIT}', '${PROP}', 'A1', 1000);
     INSERT INTO tenants (id, name) VALUES ('${TENANT}', 'Acme Co');
     INSERT INTO leases (id, tenant_id, unit_id, start_date, end_date, base_rent_monthly)

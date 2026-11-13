@@ -2,14 +2,13 @@
 --
 -- Gabriel rulings 2026-11-10. The 2026-11-10 extraction of all 139 active leases found leases the
 -- engine overbills, because it billed every lease a share of the WHOLE recoverable pool:
---   * partial recovery: REDACTED-019 passes through Taxes only ("pay when due all Taxes for the
---     Building", Operating Expenses "Intentionally Omitted"); REDACTED-012 and REDACTED-037 pass
---     through common area maintenance and water/storm/sewer but not taxes ("Landlord shall pay all
---     real estate taxes") or the landlord's building insurance;
---   * an annual cap: REDACTED-002 504-507 "Taxes, Insurance, and CAM expense incurred by
---     the tenant shall not exceed $15,000 annually" for the initial term;
---   * leases never reconciled: REDACTED-030 and REDACTED-036 (tenant pays taxes/insurance directly),
---     the REDACTED-007 legacy form (fixed charge "already included in the Minimum Rent").
+--   * partial recovery: some leases pass through Taxes only (Operating Expenses omitted); others
+--     pass through common area maintenance and water/storm/sewer but not taxes or the landlord's
+--     building insurance;
+--   * an annual cap: some leases cap the tenant's combined Taxes, Insurance and CAM at a fixed
+--     annual amount for the initial term;
+--   * leases never reconciled: some leases have the tenant pay taxes/insurance directly, and one
+--     legacy form bills a fixed charge already included in the Minimum Rent.
 --
 -- Columns:
 --   leases.recoverable_categories  TEXT[]: the subset of expenses.category values (0002) the lease

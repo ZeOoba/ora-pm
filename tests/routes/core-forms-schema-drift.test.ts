@@ -79,19 +79,19 @@ function expectWritten(spy: ReturnType<typeof vi.fn>, body: unknown) {
 
 const PROPERTY_FILLED = {
   name: 'Westside Industrial Park',
-  address: 'REDACTED-009',
+  address: '500 Sample Blvd',
   city: 'Columbus',
   state: 'OH',
   zip: '43224',
   property_type: 'industrial',
   total_sf: 42000,
-  entity_llc: 'REDACTED-035 Holdings LLC',
+  entity_llc: 'Sample Holdings LLC',
   notes: 'Shallow-bay, 12 suites',
 }
 
 const PROPERTY_BLANK = {
-  name: 'REDACTED-010',
-  address: 'REDACTED-010',
+  name: '100 Example Rd',
+  address: '100 Example Rd',
   city: 'Columbia',
   state: 'MD',
   zip: null,

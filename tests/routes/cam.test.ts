@@ -1714,14 +1714,14 @@ describe('POST /api/cam/calculate: recoverable categories, cap, not reconciled (
     expect(savedPatch()).toMatchObject({ total_property_recoverable_expenses: 75000, actual_cam_owed: 1500, recoverable_categories: null, cam_annual_cap_applied: null })
   })
 
-  it('taxes only (REDACTED-019): 2% of $40,000', async () => {
+  it('taxes only (200 Sample Ave): 2% of $40,000', async () => {
     state.leaseExtra = { recoverable_categories: ['taxes'] }
     const res = await calculate(BODY)
     expect(res.status).toBe(200)
     expect(savedPatch()).toMatchObject({ total_property_recoverable_expenses: 40000, actual_cam_owed: 800, recoverable_categories: ['taxes'] })
   })
 
-  it('CAM + water/sewer without taxes or insurance (REDACTED-043 s.36): 2% of $25,000', async () => {
+  it('CAM + water/sewer without taxes or insurance (400 Example Ct s.36): 2% of $25,000', async () => {
     state.leaseExtra = { recoverable_categories: ['maintenance', 'utilities'] }
     const res = await calculate(BODY)
     expect(res.status).toBe(200)
@@ -1748,7 +1748,7 @@ describe('POST /api/cam/calculate: recoverable categories, cap, not reconciled (
     expectRefusedNotPriced()
   })
 
-  it('annual cap binds (REDACTED-002 507): owed = cap, cap saved on the draft', async () => {
+  it('annual cap binds (300 Example Ln 507): owed = cap, cap saved on the draft', async () => {
     state.leaseExtra = { cam_annual_cap: '1000.00', cam_cap_through: '2029-06-30' }
     const res = await calculate(BODY)
     expect(res.status).toBe(200)
@@ -1765,7 +1765,7 @@ describe('POST /api/cam/calculate: recoverable categories, cap, not reconciled (
     expect(String(savedPatch().basis_warnings)).toMatch(/cap ends 2025-06-30/)
   })
 
-  it('not CAM-reconciled (REDACTED-030 direct pay): 422 with the reason, nothing priced', async () => {
+  it('not CAM-reconciled (600 Sample Way direct pay): 422 with the reason, nothing priced', async () => {
     state.leaseExtra = { cam_reconciled: false, cam_exclusion_reason: 'Direct pay per Second Amendment' }
     const res = await calculate(BODY)
     expect(res.status).toBe(422)

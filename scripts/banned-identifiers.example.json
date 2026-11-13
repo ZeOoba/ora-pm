@@ -1,0 +1,9 @@
+{
+  "_comment": "Synthetic values only. Copy to scripts/banned-identifiers.local.json (gitignored) and list the real private identifiers that must never appear in a tracked file: counterparty names, sold/excluded property labels, note payments, owned-property street addresses (house number + street name). Matching ignores case, punctuation and spacing. exemptPathPrefixes lists path prefixes a term may still appear under (applied migrations, whose text is stored data). tests/scripts/import-from-pipeline-roster.test.ts runs the scan only where the local file exists (or ORA_PM_BANNED_IDENTIFIERS points at one) and reports it as skipped otherwise.",
+  "terms": [
+    { "term": "Example Holding Trust" },
+    { "term": "9999 Sample" },
+    { "term": "12,345" },
+    { "term": "100 Example", "exemptPathPrefixes": ["supabase/migrations/"] }
+  ]
+}
