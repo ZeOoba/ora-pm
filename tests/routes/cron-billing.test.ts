@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import Stripe from 'stripe'
 import { createApp } from '../../server/index'
 
 // ---------------------------------------------------------------------------
@@ -52,15 +53,20 @@ vi.mock('../../server/lib/rate-limit', () => ({
 // does: total charged (lifetime, no date scoping) minus payments that count as paid.
 // ---------------------------------------------------------------------------
 const mockFrom = vi.hoisted(() => vi.fn())
-vi.mock('@supabase/supabase-js', () => ({ createClient: () => ({ from: mockFrom }) }))
+const mockRpc = vi.hoisted(() => vi.fn())
+vi.mock('@supabase/supabase-js', () => ({ createClient: () => ({ from: mockFrom, rpc: mockRpc }) }))
 
 type PaymentRow = {
+  id?: string
   lease_id: string
   amount: number
   method: string
   stripe_status?: string
-  autopay_period?: string
+  stripe_payment_intent_id?: string | null
+  autopay_period?: string | null
   payment_date?: string
+  client_request_id?: string | null
+  notes?: string | null
 }
 
 type ChargeRow = {
@@ -76,6 +82,7 @@ const inPaymentsSpy = vi.hoisted(() => vi.fn())
 const inChargesSpy = vi.hoisted(() => vi.fn())
 const inArLedgerSpy = vi.hoisted(() => vi.fn())
 const inIdemRecheckSpy = vi.hoisted(() => vi.fn())
+const paymentsUpdateSpy = vi.hoisted(() => vi.fn())
 
 const state = {
   leases: [] as Record<string, unknown>[],
@@ -87,11 +94,12 @@ const state = {
   charges: [] as ChargeRow[],
   payments: [] as PaymentRow[],
   chargesUpsertError: null as { code?: string; message: string } | null,
-  paymentsInsertError: null as { code?: string; message: string } | null,
   priorAutopayCheckError: null as { code?: string; message: string } | null,
   debitInputsError: null as { code?: string; message: string } | null,
   voidRecheckError: null as { code?: string; message: string } | null,
   arLedgerPaddingRows: 0,
+  reserveRpcError: null as { code?: string; message: string } | null,
+  writeBackError: null as { code?: string; message: string } | null,
 }
 
 function paymentCounts(p: PaymentRow): boolean {
@@ -148,7 +156,46 @@ function leasesTable() {
   return b
 }
 
+// JS stand-in for reserve_autopay_payment() (supabase/migrations/0031_autopay_reservation.sql),
+// over the SAME state tables the bulk reads use. The SQL body itself is executed on real Postgres
+// by tests/db/autopay-reservation-0031.test.ts against the same scenarios; this stand-in exists so
+// the route's control flow around each outcome can be driven here.
+let rpcSeq = 0
+function cents(n: number): number { return Math.round(n * 100) }
+function reserveAutopayStandIn(args: { p_lease_id: string; p_period_start: string; p_period_end: string; p_payment_date: string; p_notes: string | null }) {
+  const { p_lease_id: lease, p_period_start: start, p_period_end: end } = args
+  const existing = state.payments.find(p => p.lease_id === lease && p.autopay_period === start)
+  if (existing) {
+    return { outcome: 'existing', payment_id: existing.id ?? null, stripe_payment_intent_id: existing.stripe_payment_intent_id ?? null, stripe_status: existing.stripe_status ?? null, amount_cents: cents(existing.amount) }
+  }
+  // A row stamped for ANOTHER autopay period pays that period, wherever its date falls (0031 c).
+  const inPeriod = (d?: string, p?: PaymentRow) => d !== undefined && d >= start && d <= end
+    && !(p?.autopay_period != null && p.autopay_period !== start)
+  const inFlight = (p: PaymentRow) => p.method === 'ach_stripe' && (p.stripe_status === 'pending' || p.stripe_status === 'processing')
+  const mine = state.payments.filter(p => p.lease_id === lease)
+  const periodCharges = cents(state.charges.filter(c => c.lease_id === lease && (c.voided_at ?? null) === null && c.due_date >= start && c.due_date <= end).reduce((s, c) => s + c.amount, 0))
+  const periodPaid = cents(mine.filter(p => inPeriod(p.payment_date, p) && paymentCounts(p)).reduce((s, p) => s + p.amount, 0))
+  const periodInFlight = cents(mine.filter(p => inPeriod(p.payment_date, p) && inFlight(p)).reduce((s, p) => s + p.amount, 0))
+  const balance = cents(ledgerBalance(lease))
+  const allInFlight = cents(mine.filter(inFlight).reduce((s, p) => s + p.amount, 0))
+  const amount = Math.min(periodCharges - periodPaid - periodInFlight, balance - allInFlight)
+  if (amount <= 0) return { outcome: 'nothing_due', period_charges_cents: periodCharges, balance_cents: balance, in_flight_cents: allInFlight }
+  rpcSeq++
+  const row: PaymentRow = {
+    id: `pay_res_${rpcSeq}`, lease_id: lease, payment_date: args.p_payment_date, amount: amount / 100,
+    method: 'ach_stripe', stripe_payment_intent_id: null, stripe_status: 'pending', notes: args.p_notes,
+    autopay_period: start, client_request_id: `00000000-0000-4000-8000-${String(rpcSeq).padStart(12, '0')}`,
+  }
+  state.payments.push(row)
+  return { outcome: 'reserved', payment_id: row.id, client_request_id: row.client_request_id, amount_cents: amount }
+}
+
 function installDbMock() {
+  mockRpc.mockImplementation(async (fn: string, args: Parameters<typeof reserveAutopayStandIn>[0]) => {
+    if (fn !== 'reserve_autopay_payment') return { data: null, error: { message: `unexpected rpc ${fn}` } }
+    if (state.reserveRpcError) return { data: null, error: state.reserveRpcError }
+    return { data: reserveAutopayStandIn(args), error: null }
+  })
   mockFrom.mockImplementation((table: string) => {
     if (table === 'leases') return leasesTable()
     if (table === 'charges') {
@@ -252,10 +299,25 @@ function installDbMock() {
           })),
         }),
         insert: vi.fn().mockImplementation(async (row: PaymentRow) => {
-          if (state.paymentsInsertError) return { error: state.paymentsInsertError }
           state.payments.push(row)
           return { error: null }
         }),
+        // Autopay reservation write-back / release (migration 0031):
+        //   .update(patch).eq('id', paymentId).in('stripe_status', [...]).select('id')
+        update: paymentsUpdateSpy.mockImplementation((patch: Partial<PaymentRow>) => ({
+          eq: vi.fn().mockImplementation((eqCol: string, eqVal: string) => ({
+            in: vi.fn().mockImplementation((inCol: string, inVals: string[]) => ({
+              select: vi.fn().mockImplementation(async () => {
+                if (state.writeBackError) return { data: null, error: state.writeBackError }
+                const hits = state.payments.filter(p =>
+                  (p as Record<string, unknown>)[eqCol] === eqVal &&
+                  inVals.includes((p as Record<string, unknown>)[inCol] as string))
+                for (const h of hits) Object.assign(h, patch)
+                return { data: hits.map(h => ({ id: h.id })), error: null }
+              }),
+            })),
+          })),
+        })),
       }
     }
     if (table === 'ar_ledger') {
@@ -346,11 +408,12 @@ beforeEach(() => {
   state.charges = []
   state.payments = []
   state.chargesUpsertError = null
-  state.paymentsInsertError = null
   state.priorAutopayCheckError = null
   state.debitInputsError = null
   state.voidRecheckError = null
   state.arLedgerPaddingRows = 0
+  state.reserveRpcError = null
+  state.writeBackError = null
   installDbMock()
   mockStripe.paymentIntents.create.mockResolvedValue({ id: 'pi_auto_1', status: 'processing' })
 })
@@ -382,13 +445,17 @@ describe('POST /api/cron/monthly-billing', () => {
     expect(body2.skipped).toBe(2)
   })
 
-  // RED 2 — deterministic Stripe idempotency key as second argument
-  it('passes idempotencyKey autopay:<leaseId>:<periodStart> to paymentIntents.create', async () => {
+  // RED 2 — deterministic Stripe idempotency key as second argument. Since migration 0031 it is
+  // per RESERVATION (autopay:<leaseId>:<periodStart>:<client_request_id>): the reservation row,
+  // not the key, is what stops a second run debiting the period, and a key shared across
+  // reservations replays the first attempt's error (or rejects changed params) — REFUTE C3/C6.
+  it('passes idempotencyKey autopay:<leaseId>:<periodStart>:<reservation client_request_id> to paymentIntents.create', async () => {
     const res = await postBilling()
     expect(res.status).toBe(200)
+    const reservation = state.payments.find(p => p.autopay_period === '2026-06-01')
     expect(mockStripe.paymentIntents.create).toHaveBeenCalledWith(
       expect.objectContaining({ amount: 500000, currency: 'usd' }),
-      expect.objectContaining({ idempotencyKey: 'autopay:lease_1:2026-06-01' }),
+      expect.objectContaining({ idempotencyKey: `autopay:lease_1:2026-06-01:${reservation?.client_request_id}` }),
     )
   })
 
@@ -417,19 +484,6 @@ describe('POST /api/cron/monthly-billing', () => {
       expect.objectContaining({ amount: 300000 }), // $3,000 in cents, not $5,000
       expect.anything(),
     )
-  })
-
-  // Race: concurrent run wins the payments insert → 23505 counted as skipped
-  it('treats a 23505 on the payments insert as skipped, not an error', async () => {
-    state.paymentsInsertError = { code: '23505', message: 'duplicate key value violates unique constraint "payments_autopay_period_uniq"' }
-
-    const res = await postBilling()
-    expect(res.status).toBe(200)
-    const body = await res.json() as { skipped: number; errors: number; errorMessages: string[] }
-
-    expect(body.errors).toBe(0)
-    expect(body.errorMessages).toEqual([])
-    expect(body.skipped).toBe(1)
   })
 
   // RED 5 — the balance cap must be PERIOD-scoped, not lifetime (REFUTE finding,
@@ -564,10 +618,12 @@ describe('POST /api/cron/monthly-billing', () => {
     })
   })
 
-  // M11 (2026-11-08 audit): the per-lease catch around paymentIntents.create and the non-23505
-  // payments-insert branch had no test. Both are per-lease failures, NOT whole-batch failures, so
-  // the run still answers 200; the error must be counted, attributed to the right lease, and must
-  // not stop the next lease's debit.
+  // M11 (2026-11-08 audit): the per-lease catch around paymentIntents.create had no test. It is a
+  // per-lease failure, NOT a whole-batch failure, so the run still answers 200; the error must be
+  // counted, attributed to the right lease, and must not stop the next lease's debit. Since
+  // migration 0031 the row is reserved before the call: a non-Stripe error is indeterminate, so
+  // lease A's reservation stays pending (in flight), and B's is written back. The definitive /
+  // write-back-failure branches are covered in the in-flight describe block at the end.
   it('M11: a Stripe create rejection for lease A is counted and named, and lease B is still debited and recorded', async () => {
     state.leases = [autopayLease('lease_A'), autopayLease('lease_B')]
     mockStripe.paymentIntents.create.mockImplementation(async (params: { metadata: { lease_id: string } }) => {
@@ -583,24 +639,10 @@ describe('POST /api/cron/monthly-billing', () => {
     expect(body.errorMessages).toHaveLength(1)
     expect(body.errorMessages[0]).toMatch(/autopay lease lease_A: .*bank_account_unusable/)
     expect(mockStripe.paymentIntents.create).toHaveBeenCalledTimes(2)
-    const recorded = state.payments.filter(p => p.method === 'ach_stripe')
+    const recorded = state.payments.filter(p => p.method === 'ach_stripe' && p.stripe_payment_intent_id)
     expect(recorded).toHaveLength(1)
-    expect(recorded[0]).toMatchObject({ lease_id: 'lease_B', amount: 5000, autopay_period: '2026-06-01' })
-  })
-
-  it('M11: a non-23505 payments insert error after a successful create is reported as "created but not recorded"', async () => {
-    mockStripe.paymentIntents.create.mockResolvedValue({ id: 'pi_orphan', status: 'processing' })
-    state.paymentsInsertError = { code: 'XX000', message: 'internal error' }
-
-    const res = await postBilling()
-    expect(res.status).toBe(200)
-    const body = await res.json() as { autopayErrors: number; errors: number; skipped: number; errorMessages: string[] }
-    expect(body.autopayErrors).toBe(1)
-    expect(body.errors).toBe(1)
-    expect(body.errorMessages).toHaveLength(1)
-    // Names the lease AND the PaymentIntent, so the orphaned debit can be reconciled by hand.
-    expect(body.errorMessages[0]).toMatch(/autopay lease lease_1: payment pi_orphan created but not recorded: internal error/)
-    expect(state.payments.filter(p => p.method === 'ach_stripe')).toHaveLength(0)
+    expect(recorded[0]).toMatchObject({ lease_id: 'lease_B', amount: 5000, autopay_period: '2026-06-01', stripe_payment_intent_id: 'pi_B' })
+    expect(state.payments.find(p => p.lease_id === 'lease_A')).toMatchObject({ stripe_status: 'pending', stripe_payment_intent_id: null })
   })
 
   // -------------------------------------------------------------------------
@@ -1184,5 +1226,230 @@ describe('monthly-billing: lease term enforcement', () => {
     expect(body.expiredUnbilled).toBe(1)
     expect(body.leaseExceptions.map(e => e.lease_id)).toEqual(['lease_b'])
     expect(mockStripe.paymentIntents.create).toHaveBeenCalledTimes(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 2026-11-12 audit finding 1 (autopay-ignores-inflight-portal-ach): a portal ACH still
+// 'pending'/'processing' is money already moving. ar_ledger and the period-paid sum count ACH
+// only once it is 'succeeded', so before migration 0031 the cron debited the same rent again.
+// ---------------------------------------------------------------------------
+describe('monthly-billing: in-flight portal ACH (audit 2026-11-12 #1)', () => {
+  const portalRow = (amount: number, status: 'pending' | 'processing', payment_date: string): PaymentRow => ({
+    id: `pay_portal_${amount}_${payment_date}`, lease_id: 'lease_1', amount, method: 'ach_stripe',
+    stripe_status: status, stripe_payment_intent_id: 'pi_portal_1', payment_date,
+    client_request_id: '11111111-1111-4111-8111-111111111111',
+  })
+
+  it('does not debit a tenant whose in-period portal ACH for the full rent is still processing', async () => {
+    state.payments = [portalRow(5000, 'processing', '2026-06-01')]
+
+    const res = await postBilling()
+    expect(res.status).toBe(200)
+    const body = await res.json() as { skipped: number; errors: number }
+    expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
+    expect(body.errors).toBe(0)
+    expect(body.skipped).toBe(1) // the autopay skip (the charge upsert posted fresh)
+  })
+
+  it('debits only the remainder when an in-period portal ACH for part of the rent is still pending', async () => {
+    state.payments = [portalRow(2000, 'pending', '2026-06-02')]
+
+    const res = await postBilling()
+    expect(res.status).toBe(200)
+    expect(mockStripe.paymentIntents.create).toHaveBeenCalledTimes(1)
+    expect(mockStripe.paymentIntents.create).toHaveBeenCalledWith(
+      expect.objectContaining({ amount: 300000 }),
+      expect.anything(),
+    )
+  })
+
+  it('caps the debit at the balance net of ALL in-flight ACH (a prepayment dated last month still processing)', async () => {
+    // Paid on May 30 for June's rent; still processing on June 1. Out of period, so it never
+    // reduces the period outstanding — but the balance it is paying down is the same $5,000.
+    state.payments = [portalRow(5000, 'processing', '2026-05-30')]
+
+    const res = await postBilling()
+    expect(res.status).toBe(200)
+    expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
+  })
+
+  it('writes the autopay row BEFORE calling Stripe, and stamps its client_request_id into the PaymentIntent metadata', async () => {
+    let seenAtCall: PaymentRow | undefined
+    mockStripe.paymentIntents.create.mockImplementation(async () => {
+      const row = state.payments.find(p => p.lease_id === 'lease_1' && p.autopay_period === '2026-06-01')
+      seenAtCall = row ? { ...row } : undefined
+      return { id: 'pi_auto_1', status: 'processing' }
+    })
+
+    const res = await postBilling()
+    expect(res.status).toBe(200)
+    expect(seenAtCall).toMatchObject({ stripe_status: 'pending', stripe_payment_intent_id: null, amount: 5000 })
+    const [params, opts] = mockStripe.paymentIntents.create.mock.calls[0] as [{ amount: number; metadata: Record<string, string> }, { idempotencyKey: string }]
+    expect(params.amount).toBe(500000)
+    expect(params.metadata.client_request_id).toBe(seenAtCall?.client_request_id)
+    expect(opts.idempotencyKey).toBe(`autopay:lease_1:2026-06-01:${seenAtCall?.client_request_id}`)
+    // Written back onto the SAME row, not a second insert.
+    const rows = state.payments.filter(p => p.method === 'ach_stripe')
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ stripe_payment_intent_id: 'pi_auto_1', stripe_status: 'processing', autopay_period: '2026-06-01' })
+  })
+
+  it('debits the amount the reservation returned, not the pre-filter estimate', async () => {
+    // The bulk pre-filter cannot see an in-flight row dated outside the period; the reservation
+    // (under the lock) can. $5,000 rent + $1,000 prior arrears; a $3,000 portal payment from May
+    // is still processing → balance net of in-flight = $3,000, so that is the most autopay takes.
+    state.charges = [{ lease_id: 'lease_1', idempotency_key: 'arrears-1', amount: 1000, due_date: '2026-04-05' }]
+    state.payments = [portalRow(3000, 'processing', '2026-05-28')]
+
+    const res = await postBilling()
+    expect(res.status).toBe(200)
+    expect(mockStripe.paymentIntents.create).toHaveBeenCalledWith(expect.objectContaining({ amount: 300000 }), expect.anything())
+  })
+
+  it('a concurrent run that already reserved the period is skipped without a Stripe call', async () => {
+    mockRpc.mockImplementationOnce(async () => ({ data: { outcome: 'existing', payment_id: 'pay_other', stripe_payment_intent_id: null, stripe_status: 'pending', amount_cents: 500000 }, error: null }))
+
+    const res = await postBilling()
+    expect(res.status).toBe(200)
+    const body = await res.json() as { skipped: number; errors: number }
+    expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
+    expect(body.errors).toBe(0)
+    expect(body.skipped).toBe(1)
+  })
+
+  it('never calls Stripe when the reservation RPC fails, names the lease, counts it in remaining and answers 500', async () => {
+    // REFUTE C5(b): no debit attempt was made, so the lease is still outstanding — `remaining`
+    // must say so (trigger-billing.ps1 loops on it), and an unknown-state failure is never a 200.
+    state.reserveRpcError = { code: 'XX000', message: 'function reserve_autopay_payment does not exist' }
+
+    const res = await postBilling()
+    const body = await res.json() as { autopayErrors: number; remaining: number; errorMessages: string[] }
+    expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
+    expect(res.status).toBe(500)
+    expect(body.autopayErrors).toBe(1)
+    expect(body.remaining).toBe(1)
+    expect(body.errorMessages[0]).toMatch(/autopay lease lease_1: reservation failed/)
+  })
+
+  // A Stripe stand-in that honours idempotency keys the way Stripe does: the same key with the
+  // same params replays the stored result (or error); the same key with DIFFERENT params is
+  // rejected with StripeIdempotencyError. `first` decides the outcome of the first request per key.
+  function stripeHonouringIdempotency(first: (params: Record<string, unknown>, n: number) => unknown) {
+    const seen = new Map<string, { params: string; outcome: { ok: unknown } | { err: unknown } }>()
+    let n = 0
+    mockStripe.paymentIntents.create.mockImplementation(async (params: Record<string, unknown>, opts: { idempotencyKey: string }) => {
+      const key = opts.idempotencyKey
+      const p = JSON.stringify(params)
+      const prior = seen.get(key)
+      if (prior) {
+        if (prior.params !== p) throw new Stripe.errors.StripeIdempotencyError({ type: 'idempotency_error', message: 'Keys for idempotent requests can only be used with the same parameters they were first used with.' } as never)
+        if ('err' in prior.outcome) throw prior.outcome.err
+        return prior.outcome.ok
+      }
+      n++
+      try {
+        const ok = first(params, n)
+        seen.set(key, { params: p, outcome: { ok } })
+        return ok
+      } catch (err) {
+        seen.set(key, { params: p, outcome: { err } })
+        throw err
+      }
+    })
+  }
+
+  it('a definitive Stripe rejection releases the reservation (failed, period freed) and a later run really retries', async () => {
+    stripeHonouringIdempotency((_p, n) => {
+      if (n === 1) throw new Stripe.errors.StripeInvalidRequestError({ type: 'invalid_request_error', message: 'No such payment_method: pm_bank_1' } as never)
+      return { id: 'pi_retry', status: 'processing' }
+    })
+
+    const res = await postBilling()
+    const body = await res.json() as { autopayErrors: number; errorMessages: string[] }
+    expect(body.autopayErrors).toBe(1)
+    const released = state.payments.filter(p => p.method === 'ach_stripe')
+    expect(released).toHaveLength(1)
+    expect(released[0]).toMatchObject({ stripe_status: 'failed', autopay_period: null })
+    expect(ledgerBalanceLease1()).toBe(5000) // a failed row neither pays nor stays in flight
+
+    // Next run: the period is free again, re-reserves, and Stripe accepts the new attempt.
+    const res2 = await postBilling()
+    expect(res2.status).toBe(200)
+    expect((await res2.json() as { autopayErrors: number }).autopayErrors).toBe(0)
+    const live = state.payments.filter(p => p.autopay_period === '2026-06-01')
+    expect(live).toHaveLength(1)
+    expect(live[0]).toMatchObject({ stripe_payment_intent_id: 'pi_retry', stripe_status: 'processing' })
+  })
+
+  it('a deterministic decline repeated on every run never leaves a stuck pending row (REFUTE C6)', async () => {
+    stripeHonouringIdempotency(() => {
+      throw new Stripe.errors.StripeCardError({ type: 'card_error', message: 'The bank account is unusable', payment_intent: { id: `pi_declined_${Math.random()}` } } as never)
+    })
+
+    for (let i = 0; i < 3; i++) await postBilling()
+    const rows = state.payments.filter(p => p.method === 'ach_stripe')
+    expect(rows.every(p => p.stripe_status === 'failed' && p.autopay_period === null)).toBe(true)
+    expect(rows.filter(p => p.stripe_status === 'pending')).toHaveLength(0)
+  })
+
+  it('a "definitive" error class whose PaymentIntent is already processing is treated as indeterminate (row not released)', async () => {
+    mockStripe.paymentIntents.create.mockRejectedValueOnce(
+      new Stripe.errors.StripeCardError({ type: 'card_error', message: 'odd', payment_intent: { id: 'pi_live', status: 'processing' } } as never),
+    )
+    await postBilling()
+    expect(state.payments.filter(p => p.method === 'ach_stripe')).toMatchObject([{ stripe_status: 'pending', autopay_period: '2026-06-01' }])
+    await postBilling()
+    expect(mockStripe.paymentIntents.create).toHaveBeenCalledTimes(1)
+  })
+
+  it('a rate-limit error is indeterminate (the first attempt may have run): reservation stays pending', async () => {
+    mockStripe.paymentIntents.create.mockRejectedValueOnce(new Stripe.errors.StripeRateLimitError({ type: 'rate_limit_error', message: 'Too many requests' } as never))
+
+    await postBilling()
+    expect(state.payments.filter(p => p.method === 'ach_stripe')).toMatchObject([{ stripe_status: 'pending', autopay_period: '2026-06-01' }])
+  })
+
+  it('a prior period\'s catch-up autopay dated inside this period is NOT counted as this period\'s payment (REFUTE C5a)', async () => {
+    // May's autopay ran late, on June 2: autopay_period 2026-05-01, payment_date 2026-06-02.
+    // It pays May's rent. June's rent is still owed, whether May's debit is processing or settled.
+    for (const status of ['processing', 'succeeded'] as const) {
+      vi.clearAllMocks(); installDbMock()
+      mockStripe.paymentIntents.create.mockResolvedValue({ id: 'pi_june', status: 'processing' })
+      state.charges = [{ lease_id: 'lease_1', idempotency_key: 'may-rent', amount: 5000, due_date: '2026-05-01' }]
+      state.payments = [{ id: 'pay_may', lease_id: 'lease_1', amount: 5000, method: 'ach_stripe', stripe_status: status, stripe_payment_intent_id: 'pi_may', autopay_period: '2026-05-01', payment_date: '2026-06-02' }]
+
+      const res = await postBilling()
+      expect(res.status).toBe(200)
+      expect(mockStripe.paymentIntents.create).toHaveBeenCalledWith(expect.objectContaining({ amount: 500000 }), expect.anything())
+    }
+  })
+
+  it('an indeterminate Stripe failure leaves the reservation pending (in flight), so no later run debits again', async () => {
+    mockStripe.paymentIntents.create.mockRejectedValueOnce(new Stripe.errors.StripeConnectionError({ message: 'socket hang up' } as never))
+
+    const res = await postBilling()
+    const body = await res.json() as { autopayErrors: number; errorMessages: string[] }
+    expect(body.autopayErrors).toBe(1)
+    expect(body.errorMessages[0]).toMatch(/autopay lease lease_1: .*socket hang up.*left pending/)
+    const rows = state.payments.filter(p => p.method === 'ach_stripe')
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ stripe_status: 'pending', stripe_payment_intent_id: null, autopay_period: '2026-06-01' })
+
+    await postBilling()
+    expect(mockStripe.paymentIntents.create).toHaveBeenCalledTimes(1)
+  })
+
+  it('a failed write-back after a successful debit is reported with the PaymentIntent and the reservation id', async () => {
+    mockStripe.paymentIntents.create.mockResolvedValue({ id: 'pi_orphan', status: 'processing' })
+    state.writeBackError = { code: 'XX000', message: 'internal error' }
+
+    const res = await postBilling()
+    expect(res.status).toBe(200)
+    const body = await res.json() as { autopayErrors: number; errorMessages: string[] }
+    expect(body.autopayErrors).toBe(1)
+    expect(body.errorMessages[0]).toMatch(/autopay lease lease_1: payment pi_orphan created but not written back to reservation pay_res_\d+: internal error/)
+    // The reservation row is the recoverable trace: still pending, still blocking a second debit.
+    expect(state.payments.filter(p => p.method === 'ach_stripe')).toMatchObject([{ stripe_status: 'pending', autopay_period: '2026-06-01' }])
   })
 })

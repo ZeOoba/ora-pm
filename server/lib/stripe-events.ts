@@ -123,9 +123,11 @@ function piId(ref: string | Stripe.PaymentIntent | null): string | null {
 // never overwritten twice, and the same allowed-from guard applies, so a
 // reservation already released as 'failed' is never revived.
 //
-// PIs with no client_request_id in metadata (cron.ts autopay debits) have
-// no reservation row to fall back to — their insert-after-Stripe path is
-// unchanged by OI-233 and is tracked separately.
+// cron.ts autopay debits reserve the same way since migration 0031
+// (reserve_autopay_payment) and stamp the reservation's client_request_id into
+// the PaymentIntent metadata, so this fallback completes their rows too. Only
+// autopay PIs created before 0031 carry no client_request_id and have no
+// reservation row to fall back to.
 async function updatePaymentByIntent(
   db: Db,
   pi: Stripe.PaymentIntent,
