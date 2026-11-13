@@ -328,15 +328,18 @@ class PushGate(unittest.TestCase):
         self.sb.commit("feature.md", "clean\n")
         self.assertAllowed(*self.sb.push("feature"))
 
-    def test_new_branch_without_tracking_refs_scans_full_history(self):
-        # No refs/remotes/origin/* to bound the scan: the pushed ref's FULL history is scanned
-        # (fail-closed), so a term already on the remote's history still blocks.
+    def test_new_branch_bound_ignores_local_tracking_refs(self):
+        # The bound comes from what the destination advertises (ls-remote), never from local
+        # refs/remotes/*: deleting them changes nothing. The term below is ALREADY on the
+        # destination's main, so it is not new and is not rescanned; the full-history
+        # fallback (ls-remote unusable) is pinned by
+        # test_unreachable_push_url_falls_back_to_full_history.
         self.sb.commit("old.md", "%s\n" % TERM)
         self.sb.git(self.sb.work, "push", "-q", "--no-verify", "origin", "main")
         self.sb.git(self.sb.work, "update-ref", "-d", "refs/remotes/origin/main")
         self.sb.git(self.sb.work, "checkout", "-q", "-b", "feature")
         self.sb.commit("feature.md", "clean\n")
-        self.assertBlocked(*self.sb.push("feature"))
+        self.assertAllowed(*self.sb.push("feature"))
 
     def test_new_branch_without_tracking_refs_and_clean_history_is_allowed(self):
         self.sb.git(self.sb.work, "update-ref", "-d", "refs/remotes/origin/main")
@@ -440,6 +443,70 @@ class PushGate(unittest.TestCase):
         self.sb.git(w, "fetch", "-q", "o")
         self.sb.git(w, "fetch", "-q", "o/priv")
         self.assertBlocked(*self.sb.push_to("o", "HEAD:refs/heads/main"))
+
+    # --- REFUTE round 5 on 51d9b668: bound new refs by what the destination advertises ---
+    def test_case_colliding_remote_names_cannot_hide_commits(self):
+        # NTFS / APFS: `origin` and `Origin` share refs/remotes/origin/; a fetch from the
+        # private `Origin` must not make its commits count as already on public `origin`.
+        w = self.sb.work
+        self.sb.git(w, "remote", "add", "Origin", self.sb.bare("priv"))
+        self.sb.commit("notes.md", "memo %s\n" % TERM, msg="memo")
+        self.sb.git(w, "push", "-q", "--no-verify", "Origin", "main")
+        self.sb.git(w, "fetch", "-q", "Origin")
+        self.sb.commit("more.md", "clean\n", msg="clean")
+        self.assertBlocked(*self.sb.push("HEAD:refs/heads/feature"))
+
+    def test_stale_tracking_ref_after_remote_rewind_cannot_hide_commits(self):
+        w = self.sb.work
+        seed = self.sb.out("rev-parse", "HEAD")
+        self.sb.commit("notes.md", "memo %s\n" % TERM, msg="memo")
+        self.sb.git(w, "push", "-q", "--no-verify", "origin", "main")
+        self.sb.git(w, "fetch", "-q", "origin")
+        self.sb.git(self.sb.remote, "update-ref", "refs/heads/main", seed)  # remote rewound
+        self.sb.commit("more.md", "clean\n", msg="clean")
+        self.assertBlocked(*self.sb.push("HEAD:refs/heads/feature"))
+
+    def _term_on_remote_main_then_feature(self):
+        w = self.sb.work
+        self.sb.commit("notes.md", "memo %s\n" % TERM, msg="memo")
+        self.sb.git(w, "push", "-q", "--no-verify", "origin", "main")
+        self.sb.git(w, "checkout", "-q", "-b", "feature")
+        self.sb.commit("feature.md", "clean\n", msg="clean")
+        head = self.sb.out("rev-parse", "HEAD")
+        line = "refs/heads/feature %s refs/heads/feature %s\n" % (head, "0" * 40)
+        return head, line
+
+    def _main_in_sandbox(self, **kw):
+        old = {k: os.environ.get(k) for k in ("HOME", "USERPROFILE", "GIT_CONFIG_GLOBAL",
+                                              "GIT_CONFIG_NOSYSTEM")}
+        os.environ.update({k: self.sb.env[k] for k in old})
+        try:
+            return scan.main(cwd=self.sb.work, **kw)
+        finally:
+            for k, v in old.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+    def test_unreachable_push_url_falls_back_to_full_history(self):
+        _head, line = self._term_on_remote_main_then_feature()
+        roster = os.path.join(self.sb.home, ".claude", "hooks", "confidential-terms.json")
+        self.assertEqual(self._main_in_sandbox(stdin_text=line, roster=roster, remote="origin",
+                                               url=self.sb.remote), 0)
+        bad = os.path.join(self.sb.root, "no-such-remote.git")
+        self.assertEqual(self._main_in_sandbox(stdin_text=line, roster=roster, remote="origin",
+                                               url=bad), 1)
+        # argv[2] absent: argv[1] is used
+        self.assertEqual(self._main_in_sandbox(stdin_text=line, roster=roster, remote="origin"), 0)
+
+    def test_new_branch_off_up_to_date_main_scans_only_its_own_commits(self):
+        head, _line = self._term_on_remote_main_then_feature()
+        bound = scan.destination_bound("origin", self.sb.remote, self.sb.work)
+        self.assertTrue(bound)
+        self.assertEqual(scan.range_commits(scan.rev_range(head, "0" * 40, bound), self.sb.work),
+                         [head])
+        self.assertAllowed(*self.sb.push("feature"))
 
     def test_push_to_a_bare_url_scans_full_history(self):
         w = self.sb.work
@@ -867,11 +934,14 @@ class Units(unittest.TestCase):
 
     def test_rev_range(self):
         z, a, b = "0" * 40, "a" * 40, "b" * 40
-        bound = ["refs/remotes/origin/main", "refs/remotes/origin/x"]
-        self.assertEqual(scan.rev_range(a, b, bound), [a, "^" + b])
-        self.assertEqual(scan.rev_range(a, b, None), [a, "^" + b])
-        self.assertEqual(scan.rev_range(a, z, bound), [a, "--not"] + bound)
-        self.assertEqual(scan.rev_range(a, z, None), [a])  # no usable bound: full history
+        c, d = "c" * 40, "d" * 40
+        r = scan.rev_range(a, b, [c, d])        # existing ref: git's remote sha is the truth
+        self.assertEqual((r.git_args(), r.stdin()), ([a, "^" + b], None))
+        r = scan.rev_range(a, z, [c, d])        # new ref: advertised shas, on stdin
+        self.assertEqual((r.git_args(), r.stdin()), ([a, "--stdin"], "^%s\n^%s\n" % (c, d)))
+        for nothing in (None, []):              # nothing advertised / ls-remote failed
+            r = scan.rev_range(a, z, nothing)
+            self.assertEqual((r.git_args(), r.stdin()), ([a], None))
 
     def test_require_refs_env_blocks_empty_stdin(self):
         p = self._roster(ROSTER)
