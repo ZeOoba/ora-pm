@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { createApp } from '../../server/index'
 import { pgTable, PG_MAX_ROWS, type Row } from '../fixtures/pg-table'
@@ -200,5 +202,124 @@ describe('GET /api/exports/qb-iif — PostgREST max_rows + error handling', () =
     const res = await get()
     expect(res.status).toBe(404)
     expect(res.headers.get('content-disposition')).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 2026-11-12 audit findings 2 and 3. The IIF journal is what gets imported into QuickBooks (the
+// books of record), so it must journal EVERY live charge of the period exactly once:
+//   #2 percentage_rent, other (tax/insurance escrows, manual adjustments) and security_deposit
+//      used to fall through the classifier and vanish while the entry stayed balanced;
+//   #3 only leases whose CURRENT status was 'active' were read, so re-exporting a past month
+//      dropped every lease that has since ended.
+// The charge-type list is read from the charges.type CHECK in migration 0002 (the database's own
+// enum), so a type added there without an account mapping fails this table, not QuickBooks.
+// ---------------------------------------------------------------------------
+const CHARGE_TYPE_CHECK = readFileSync(join(__dirname, '../../supabase/migrations/0002_financial_tables.sql'), 'utf8')
+  .match(/type TEXT NOT NULL CHECK \(type IN \(([^)]*)\)\)/)
+const DB_CHARGE_TYPES = [...(CHARGE_TYPE_CHECK?.[1] ?? '').matchAll(/'([a-z_]+)'/g)].map(m => m[1])
+
+// The test's own expectation, written out per type — not imported from the code under test.
+const EXPECTED_CREDIT_ACCOUNT: Record<string, string> = {
+  rent: 'Rental Income:Base Rent',
+  cam_estimate: 'Rental Income:CAM',
+  cam_true_up: 'Rental Income:CAM',
+  late_fee: 'Rental Income:Late Fees',
+  security_deposit: 'Security Deposits Held',
+  utility_water: 'Rental Income:Utilities',
+  utility_gas: 'Rental Income:Utilities',
+  utility_electric: 'Rental Income:Utilities',
+  utility_other: 'Rental Income:Utilities',
+  percentage_rent: 'Rental Income:Percentage Rent',
+  other: 'Rental Income:Other',
+}
+
+describe('GET /api/exports/qb-iif — every charge type and every lease status (audit 2026-11-12 #2, #3)', () => {
+  const get = () => app.request(`/api/exports/qb-iif?property_id=${PROP}&year=2026&month=3`, {}, env)
+  function world(leases: Row[], units: Row[], charges: Row[]) {
+    install({
+      properties: pgTable([{ id: PROP, name: 'Test Prop', entity_llc: 'Test LLC' }]),
+      units: pgTable(units),
+      leases: pgTable(leases),
+      charges: pgTable(charges),
+    })
+  }
+  // AR is the TRNS (debit) line; each credit is an SPL line.
+  const arDebit = (iif: string) => iif.split('\n').find(l => l.startsWith('TRNS\t'))?.split('\t')[4]
+  const creditsBy = (iif: string) => {
+    const out: Record<string, string> = {}
+    for (const l of iif.split('\n').filter(x => x.startsWith('SPL\t'))) {
+      const f = l.split('\t')
+      out[f[3]] = f[4]
+    }
+    return out
+  }
+
+  it('reads the full charge-type enum from migration 0002 and has an expected account for each', () => {
+    expect(DB_CHARGE_TYPES.length).toBe(11)
+    expect(Object.keys(EXPECTED_CREDIT_ACCOUNT).sort()).toEqual([...DB_CHARGE_TYPES].sort())
+  })
+
+  it.each(DB_CHARGE_TYPES)('journals a lone %s charge: AR debit and the mapped credit, both for the full amount', async (type) => {
+    const u = unit(); const l = lease(u.id as string)
+    world([l], [u], [charge(l.id as string, '2026-03-10', type, 123.45)])
+
+    const res = await get()
+    expect(res.status).toBe(200)
+    const iif = await res.text()
+    expect(arDebit(iif)).toBe('123.45')
+    expect(creditsBy(iif)).toEqual({ [EXPECTED_CREDIT_ACCOUNT[type]]: '-123.45' })
+  })
+
+  it('the AR debit equals the sum of ALL live charges of every type, and credits balance it', async () => {
+    const u = unit(); const l = lease(u.id as string)
+    const charges = DB_CHARGE_TYPES.map((type, i) => charge(l.id as string, '2026-03-02', type, 100 + i + 0.01))
+    world([l], [u], [...charges, charge(l.id as string, '2026-03-02', 'other', 999, '2026-09-13T12:00:00Z')])
+
+    const res = await get()
+    expect(res.status).toBe(200)
+    const iif = await res.text()
+    const totalCents = charges.reduce((s, c) => s + Math.round((c.amount as number) * 100), 0)
+    expect(arDebit(iif)).toBe((totalCents / 100).toFixed(2))
+    const creditCents = Object.values(creditsBy(iif)).reduce((s, v) => s + Math.round(Number(v) * 100), 0)
+    expect(creditCents).toBe(-totalCents)
+  })
+
+  it('refuses the export (500, no file) when a charge has a type with no account mapping, instead of dropping it', async () => {
+    const u = unit(); const l = lease(u.id as string)
+    world([l], [u], [charge(l.id as string, '2026-03-10', 'rent', 1000), charge(l.id as string, '2026-03-10', 'mystery_type', 5)])
+
+    const res = await get()
+    expect(res.status).toBe(500)
+    expect(res.headers.get('content-disposition')).toBeNull()
+    expect((await res.json() as { error: string }).error).toMatch(/mystery_type/)
+  })
+
+  it('still scopes to the month and the property once the lease status filter is gone', async () => {
+    const u = unit(); const other = unit('prop_other')
+    const l = lease(u.id as string, 'terminated'); const lo = lease(other.id as string)
+    world([l, lo], [u, other], [
+      charge(l.id as string, '2026-03-31', 'rent', 1000),
+      charge(l.id as string, '2026-02-28', 'rent', 11),   // previous month
+      charge(l.id as string, '2026-04-01', 'rent', 22),   // next month
+      charge(lo.id as string, '2026-03-15', 'rent', 33),  // another property
+    ])
+
+    const iif = await (await get()).text()
+    expect(arDebit(iif)).toBe('1000.00')
+  })
+
+  it.each(['terminated', 'expired', 'pending'])('journals a charge in the month from a lease whose status is now %s', async (status) => {
+    const u = unit(); const live = lease(u.id as string); const ended = lease(u.id as string, status)
+    world([live, ended], [u], [
+      charge(live.id as string, '2026-03-01', 'rent', 1000),
+      charge(ended.id as string, '2026-03-01', 'rent', 700),
+    ])
+
+    const res = await get()
+    expect(res.status).toBe(200)
+    const iif = await res.text()
+    expect(arDebit(iif)).toBe('1700.00')
+    expect(creditsBy(iif)).toEqual({ 'Rental Income:Base Rent': '-1700.00' })
   })
 })
