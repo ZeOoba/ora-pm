@@ -191,7 +191,7 @@ describe('manifest classification', () => {
     const deferred = [...Object.entries(RUNTIME_ENV), ...Object.entries(BUILD_ENV)].filter(([, c]) => c === 'deferred').map(([n]) => n)
     for (const name of deferred) expect(DEFERRED_UNTIL[name], name).toBeTruthy()
     expect(DEFERRED_UNTIL.GL_PERIOD_LOCK_EMAILS).toMatch(/month-end close/)
-    expect(DEFERRED_UNTIL.STRIPE_SECRET_KEY).toBe('tenant payments launch')
+    expect(DEFERRED_UNTIL.STRIPE_SECRET_KEY).toBe('tenant payments (pre-launch)')
   })
 
   it('keeps Stripe deferred until tenant payments launch', () => {
