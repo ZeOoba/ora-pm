@@ -510,12 +510,16 @@ class PushGate(unittest.TestCase):
         self.assertAllowed(*self.sb.push("feature"))
 
     # --- REFUTE round 6 on bb7e7e3e: ls-remote must ask the repo the push goes to -------
-    def _private_has_term_public_pushed_via(self, remote_url, private):
+    def _private_has_term_public_pushed_via(self, remote_url, private, configure=None):
         """Term commit on the PRIVATE bare repo's main (fetched locally); a remote `pub`
-        whose push URL resolves elsewhere; returns the push result of a new branch."""
+        whose push URL resolves elsewhere; returns the push result of a new branch.
+        `configure` (the insteadOf rules) runs only AFTER the private repo is seeded: on
+        POSIX the private path itself can match a rule's prefix and be rewritten away."""
         w = self.sb.work
         self.sb.commit("notes.md", "memo %s\n" % TERM, msg="memo")
         self.sb.git(w, "push", "-q", "--no-verify", private, "main")
+        if configure is not None:
+            configure()
         self.sb.commit("more.md", "clean\n", msg="clean")
         self.sb.git(w, "remote", "add", "pub", remote_url)
         return self.sb.push_to("pub", "HEAD:refs/heads/feature")
@@ -526,18 +530,23 @@ class PushGate(unittest.TestCase):
         root = self.sb.root.replace("\\", "/")
         self.sb.bare("rr")
         private = self.sb.bare("rrr")
-        self.sb.git(self.sb.work, "config", "url.%s/rr.insteadOf" % root, "%s/r" % root)
-        self.assertBlocked(*self._private_has_term_public_pushed_via("%s/r.git" % root, private))
+        configure = lambda: self.sb.git(self.sb.work, "config", "url.%s/rr.insteadOf" % root,
+                                        "%s/r" % root)
+        self.assertBlocked(*self._private_has_term_public_pushed_via("%s/r.git" % root, private,
+                                                                     configure))
 
     def test_insteadof_rule_chain_cannot_bound_by_another_repo(self):
         root = self.sb.root.replace("\\", "/")
         self.sb.bare("chain_pub")
         private = self.sb.bare("chain_priv")
         w = self.sb.work
-        self.sb.git(w, "config", "url.%s/chain_pub.git.insteadOf" % root, "%s/u.git" % root)
-        self.sb.git(w, "config", "url.%s/chain_priv.git.insteadOf" % root,
-                    "%s/chain_pub.git" % root)
-        self.assertBlocked(*self._private_has_term_public_pushed_via("%s/u.git" % root, private))
+
+        def configure():
+            self.sb.git(w, "config", "url.%s/chain_pub.git.insteadOf" % root, "%s/u.git" % root)
+            self.sb.git(w, "config", "url.%s/chain_priv.git.insteadOf" % root,
+                        "%s/chain_pub.git" % root)
+        self.assertBlocked(*self._private_has_term_public_pushed_via("%s/u.git" % root, private,
+                                                                     configure))
 
     def test_custom_receivepack_disables_the_bound(self):
         w = self.sb.work
