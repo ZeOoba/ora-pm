@@ -58,6 +58,13 @@
 --      after p_period_start → 'nothing_due' (reason balance_forward_covers_period);
 --      otherwise period charges dated on or before its as_of are left out (they are
 --      inside the QuickBooks figure).
+--      KNOWN GAP (fails safe, under-collects only): payments dated in the period are
+--      not filtered the same way, so an in-period payment made against such an
+--      excluded pre-cut-off charge still reduces this period's debit. Example: a
+--      $700 manual charge dated before as_of but due in the period, paid by check in
+--      the period → autopay takes $700 less than this period's rent; the shortfall
+--      stays on the tenant's ledger. Needs a manual pre-cut-off charge due AND paid
+--      in the period.
 --   d. amount <= 0 → 'nothing_due'. Nothing written.
 --   e. INSERT the reservation: 'pending', PI id NULL, autopay_period stamped
 --      (payments_autopay_period_uniq, 0011, is the second line of defence),

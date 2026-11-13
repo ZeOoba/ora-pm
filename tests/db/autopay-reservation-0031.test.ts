@@ -199,6 +199,17 @@ describe('reserve_autopay_payment() — outcomes', () => {
     expect(await autopayRows()).toEqual([])
   })
 
+  it('nothing_due for a covered period even when a charge dated AFTER the cut-off falls in it (the early return, not the charge filter)', async () => {
+    await charge('5000.00', '2026-06-01')
+    await balanceForward('2026-06-15')
+    // Late fee dated June 20 (after as_of), due in June: the charge filter alone would debit it.
+    await db.query(
+      `INSERT INTO charges (lease_id, charge_date, due_date, period_start, period_end, type, amount, source, idempotency_key)
+       VALUES ($1, '2026-06-20', '2026-06-20', '2026-06-20', '2026-06-20', 'late_fee', 50, 'manual', 'bf-late-fee')`, [LEASE])
+    expect(await reserve()).toMatchObject({ outcome: 'nothing_due', reason: 'balance_forward_covers_period' })
+    expect(await autopayRows()).toEqual([])
+  })
+
   it('a voided balance forward does not block the period', async () => {
     await charge('5000.00', '2026-06-01')
     await balanceForward('2026-06-15')
