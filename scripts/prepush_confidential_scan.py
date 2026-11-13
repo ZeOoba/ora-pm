@@ -315,10 +315,14 @@ def scan_text(text, terms, tight=()):
         _scan_window(text, terms, found, plus_terms, tight)
         return sorted(found)
     overlap = max(MIN_OVERLAP, OVERLAP_FACTOR * max((len(t) for t in terms), default=0))
-    step = WINDOW - overlap
+    # A very long term (16x its length >= WINDOW, i.e. ~16K characters) would make the step
+    # zero (range() raises) or negative (range() is empty: NOTHING scanned). Grow the window
+    # instead so the step is always at least the overlap.
+    window = max(WINDOW, 2 * overlap)
+    step = window - overlap
     for start in range(0, len(text), step):
-        _scan_window(text[start:start + WINDOW], terms, found, plus_terms, tight)
-        if len(found) == len(terms) or start + WINDOW >= len(text):
+        _scan_window(text[start:start + window], terms, found, plus_terms, tight)
+        if len(found) == len(terms) or start + window >= len(text):
             break
     return sorted(found)
 
@@ -396,6 +400,18 @@ def _anchor_forms(t):
     return sorted({f for f in (normalize(t).strip(), normalize(_guard_tight(t)).strip()) if f})
 
 
+def _no_duplicate_keys(pairs):
+    """object_pairs_hook: reject a JSON object that repeats a key, at any nesting level.
+    json.load would keep the LAST value, so a later `{"active": false}` (or an empty field)
+    could silently drop an earlier entry's terms. Raising here makes load_roster fail closed."""
+    out = {}
+    for k, v in pairs:
+        if k in out:
+            raise ValueError("duplicate key in roster")
+        out[k] = v
+    return out
+
+
 def load_roster(path=None):
     """Roster, or None when the roster cannot be read or any deal entry is malformed
     (fail-closed: we cannot prove we know its terms).
@@ -403,11 +419,12 @@ def load_roster(path=None):
     A deal counts unless it explicitly says `"active": false` (a missing flag is treated as
     active). A key starting with "_" is metadata (e.g. `_meta`) unless it carries one of
     `always` / `context` / `context_requires_any`. Each of those fields, when present, must be
-    a list of strings (null is malformed), on inactive deals too."""
+    a list of strings (null is malformed), on inactive deals too. A key repeated in any JSON
+    object (top level or nested) is malformed: json.load would silently keep the last value."""
     path = path or roster_path()
     try:
         with open(path, encoding="utf-8") as f:
-            data = json.load(f)
+            data = json.load(f, object_pairs_hook=_no_duplicate_keys)
     except Exception:
         return None
     if not isinstance(data, dict):
@@ -666,6 +683,9 @@ def text_views(data):
     return views
 
 
+_PDF_OBJ_RE = re.compile(rb"(?<![A-Za-z])obj(?![A-Za-z])")
+
+
 def sniff(data):
     """Container kind by magic bytes (never by extension), or None for plain content."""
     if data[:2] == b"\x1f\x8b":
@@ -682,7 +702,10 @@ def sniff(data):
         return "rar (unsupported)"
     if data[:4] == b"\x28\xb5\x2f\xfd":
         return "zstd (unsupported)"
-    if b"%PDF-" in data[:1024]:
+    if data[:5] == b"%PDF-" or (b"%PDF-" in data[:1024] and _PDF_OBJ_RE.search(data)):
+        # Readers accept the header anywhere in the first 1 KB, but a PDF can only carry
+        # content in indirect objects (`N G obj`), so a text blob that merely MENTIONS
+        # `%PDF-` near its top and has no standalone `obj` token is scanned as text.
         return "pdf (text is not reliably decodable)"
     if data[257:262] == b"ustar":
         return "tar"

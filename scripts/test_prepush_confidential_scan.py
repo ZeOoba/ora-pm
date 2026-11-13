@@ -241,6 +241,10 @@ class PushGate(unittest.TestCase):
         self.sb.commit("LOI.pdf", pdf)
         self.assertBlocked(*self.sb.push())
 
+    def test_clean_text_mentioning_the_pdf_header_is_allowed(self):
+        self.sb.commit("pdf-notes.md", "# PDF notes\nEvery PDF starts with %PDF- and a version.\n")
+        self.assertAllowed(*self.sb.push())
+
     def test_bz2_and_xz_are_decompressed(self):
         import bz2
         import lzma
@@ -590,6 +594,16 @@ class PushGate(unittest.TestCase):
         self.sb.commit("notes.md", "clean\n")
         self.assertBlocked(*self.sb.push())
 
+    def test_duplicate_deal_key_roster_blocks_in_either_order(self):
+        # json.load keeps the LAST value for a repeated key: a trailing inactive copy would
+        # silently drop the deal's terms (REFUTE wf_df157e64-c52). Both orders must block.
+        live = '{"active": true, "always": ["%s"]}' % TERM
+        dead = '{"active": false}'
+        self.sb.commit("notes.md", "clean\n")
+        for first, second in ((live, dead), (dead, live)):
+            self.sb.write_roster('{"deal_x": %s, "deal_x": %s}' % (first, second))
+            self.assertBlocked(*self.sb.push())
+
     def test_inactive_deal_term_is_allowed(self):
         self.sb.commit("notes.md", "closed deal %s is public now\n" % INACTIVE)
         self.assertAllowed(*self.sb.push())
@@ -801,6 +815,50 @@ class Units(unittest.TestCase):
                          ["abc"])  # missing `active` counts as active
         self.assertEqual(scan.load_terms(self._roster(ROSTER)),
                          sorted([TERM.lower(), TERM2.lower()]))
+
+    def test_duplicate_keys_fail_closed_at_any_level(self):
+        live = '{"active": true, "always": ["%s"]}' % TERM
+        dead = '{"active": false}'
+        for text in ('{"deal_x": %s, "deal_x": %s}' % (live, dead),        # deal key, both orders
+                     '{"deal_x": %s, "deal_x": %s}' % (dead, live),
+                     '{"deal_x": {"always": ["%s"], "always": []}}' % TERM,  # nested field
+                     '{"deal_x": {"always": [], "always": ["%s"]}}' % TERM,
+                     '{"deal_x": {"always": ["%s"], "active": true, "active": false}}' % TERM,
+                     '{"_meta": {"n": 1, "n": 2}, "deal_x": %s}' % live,     # metadata too
+                     '{"deal_x": %s, "deal_y": {"active": false, "always": [{"a": 1, "a": 2}]}}'
+                     % live):                                                # inside a list
+            self.assertIsNone(scan.load_roster(self._roster(text)), text)
+        # The same key in two DIFFERENT objects is not a duplicate.
+        ok = '{"deal_x": %s, "deal_y": {"active": false, "always": ["%s"]}}' % (live, INACTIVE)
+        r = scan.load_roster(self._roster(ok))
+        self.assertIsNotNone(r)
+        self.assertEqual(r.terms, [TERM.lower()])
+
+    def test_pdf_sniff_requires_header_at_start_or_an_obj_token(self):
+        pdf = b"%PDF-1.4\n1 0 obj << >>\nendobj\n%%EOF\n"
+        self.assertTrue(scan.sniff(pdf).startswith("pdf"))
+        self.assertTrue(scan.sniff(b"%PDF-1.4\n%%EOF\n").startswith("pdf"))    # at offset 0
+        self.assertTrue(scan.sniff(b"junk prefix\n" + pdf).startswith("pdf"))   # prefixed PDF
+        late_obj = b"x\n%PDF-1.7\n" + b" " * 2000 + b"7 0 obj<<>>"
+        self.assertTrue(scan.sniff(late_obj).startswith("pdf"))
+        # A text file that merely mentions the header near its top is plain content.
+        self.assertIsNone(scan.sniff(b"# Notes\nA PDF starts with %PDF- then a version.\n"))
+        self.assertIsNone(scan.sniff(b"See %PDF-1.4 headers; the objects are listed below.\n"))
+
+    def test_text_mentioning_pdf_header_is_scanned_as_text(self):
+        data = ("# Notes\nPDFs begin with %%PDF- and %s is mentioned here.\n" % TERM).encode()
+        roster = scan.load_roster(self._roster(ROSTER))
+        self.assertIsNone(scan.sniff(data))
+        self.assertTrue(roster.hits(data.decode()))
+
+    def test_scan_text_with_a_very_long_term_still_scans_every_slice(self):
+        # 16 x 16384 = WINDOW: the old step was 0 (range() raised); a longer term gave a
+        # negative step and an EMPTY loop (nothing scanned). The window now grows instead.
+        for n in (16384, 17000):
+            term = ("q" * (n - 6)) + "zyxwvu"
+            filler = "a b " * (scan.WINDOW // 2)
+            self.assertEqual(scan.scan_text(filler + term.upper() + filler, [term]), [0], n)
+            self.assertEqual(scan.scan_text(filler + filler, [term]), [], n)
 
     def test_load_terms_context_shapes(self):
         ok = {"d": {"always": [], "context": [CTX_TERM], "context_requires_any": [ANCHOR]}}
