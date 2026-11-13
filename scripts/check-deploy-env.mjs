@@ -45,7 +45,8 @@ export const RUNTIME_ENV = {
   ANTHROPIC_API_KEY: 'required', // intake.ts 501s lease extraction without it
   STRIPE_SECRET_KEY: 'deferred', // tenant payments / autopay — pre-launch
   STRIPE_WEBHOOK_SECRET: 'deferred', // tenant payments — pre-launch
-  INTAKE_MODEL: 'optional', // intake.ts resolveModel() falls back to DEFAULT_MODEL
+  INTAKE_MODEL: 'optional',
+  LATE_FEES_ENABLED: 'optional', // cron.ts posts late fees only when exactly 'true'; unset = off (the safe default) // intake.ts resolveModel() falls back to DEFAULT_MODEL
   CRIT_ALERT_RECIPIENTS: 'required', // cron.ts critical-date alerts 503 without it (kept out of the public repo)
   GL_PERIOD_LOCK_EMAILS: 'deferred', // B8 ledger: period lock fails closed (403) until set; needed at first month-end close
 }

@@ -170,6 +170,7 @@ Names only. `scripts/check-deploy-env.mjs` is the authoritative classification, 
 | `STRIPE_WEBHOOK_SECRET` | runtime | deferred | Webhook signature verification |
 | `CRIT_ALERT_RECIPIENTS` | runtime | required | Critical-date alert dedup recipient(s); must match the address on existing `sent_notifications` rows. Both alert endpoints return 503 when unset |
 | `GL_PERIOD_LOCK_EMAILS` | runtime | deferred | Who may lock a GL period; unset means nobody (fails closed) |
+| `LATE_FEES_ENABLED` | runtime | optional | Automatic late fees post only when exactly `true`; unset means off. Leave off until every lease's app balance matches QuickBooks (balance-forward credits), or the first recorded payment triggers fees on lifetime charges |
 | `INTAKE_MODEL` | runtime | optional | Intake model override; allowlisted values only, else the default |
 | `RATE_LIMIT_KV` | binding | optional | KV namespace for durable rate limits; memory-only when unbound |
 
