@@ -48,6 +48,22 @@ describe('Portal home', () => {
     expect(render(createElement(PortalDashboard))).not.toContain('carried forward')
   })
 
+  // Audit 2026-11-12 #4: a check/wire/other payment recorded by the admin has stripe_status NULL
+  // (0002). PortalHomeView (shared by the portal home and admin "View as tenant") called
+  // .replace() on it and the whole page crashed for every check-paying tenant.
+  it('renders when the latest payment is a manual check with no stripe_status, and labels it recorded', () => {
+    results.current = { ...data(18412.51), 'portal-payments': ok({ data: [{ id: 'p2', amount: 5000, payment_date: '2026-11-03', stripe_status: null, notes: 'Check 1042' }] }) }
+    const html = render(createElement(PortalDashboard))
+    expect(html).toContain('Last payment')
+    expect(html).toContain('$5,000.00')
+    expect(html).toMatch(/· recorded</)
+  })
+
+  it('still shows the ACH status, underscores spaced, for an ACH payment', () => {
+    results.current = { ...data(18412.51), 'portal-payments': ok({ data: [{ id: 'p3', amount: 100, payment_date: '2026-11-03', stripe_status: 'requires_action', notes: null }] }) }
+    expect(render(createElement(PortalDashboard))).toMatch(/· requires action</)
+  })
+
   it('leads with the balance and routes payment through the existing Pay Now page', () => {
     results.current = data(18412.51)
     const html = render(createElement(PortalDashboard))
