@@ -32,7 +32,9 @@ describe('stage-statement-drafts.ps1 — static', () => {
 const shell = ['pwsh', 'powershell'].find(s => spawnSync(s, ['-NoProfile', '-Command', 'exit 0']).status === 0)
 const run = (packet: string, dry = true) => spawnSync(shell!, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', SCRIPT, '-Packet', packet, ...(dry ? ['-DryRun'] : [])], { encoding: 'utf8' })
 
-describe.skipIf(!shell)('stage-statement-drafts.ps1 — dry run', () => {
+// Every case spawns PowerShell (1-2.5 s each on CI, more on a cold first start), so the 5 s default
+// timed out the first case on main (run 4b9df57, attempt 1). 30 s per case is still a real bound.
+describe.skipIf(!shell)('stage-statement-drafts.ps1 — dry run', { timeout: 30_000 }, () => {
   let dir = ''
   beforeAll(() => { dir = mkdtempSync(join(tmpdir(), 'stmt-packet-')) })
   afterAll(() => { rmSync(dir, { recursive: true, force: true }) })
