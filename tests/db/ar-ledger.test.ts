@@ -80,6 +80,7 @@ function freshLedgerDb() {
     CREATE TABLE leases (id UUID PRIMARY KEY, tenant_id UUID NOT NULL REFERENCES tenants(id), unit_id UUID NOT NULL REFERENCES units(id));
     CREATE TABLE charges (id UUID PRIMARY KEY, lease_id UUID NOT NULL REFERENCES leases(id), amount NUMERIC NOT NULL, voided_at TIMESTAMPTZ, void_reason TEXT);
     CREATE TABLE payments (id UUID PRIMARY KEY, lease_id UUID NOT NULL REFERENCES leases(id), amount NUMERIC NOT NULL, method TEXT NOT NULL, stripe_status TEXT);
+    CREATE TABLE balance_forwards (id UUID PRIMARY KEY, lease_id UUID NOT NULL REFERENCES leases(id), as_of DATE NOT NULL, amount NUMERIC NOT NULL, voided_at TIMESTAMPTZ);
   `)
   pub.none(pgMemExecutable(extractLiveArLedgerView().sql))
   return pub
@@ -225,6 +226,31 @@ describe('ar_ledger view — balance arithmetic under multiple charges + payment
     `)
     const [row] = db.many(`SELECT total_charged, balance FROM ar_ledger WHERE lease_id = '${LEASE}'`)
     expect(Number(row.total_charged)).toBe(0)
+    expect(Number(row.balance)).toBe(0)
+  })
+
+  // 0030: the live balance forward from QuickBooks is part of balance (signed), not of
+  // total_charged / total_paid; a voided one is ignored.
+  it('adds the live balance forward to balance, signed, and leaves total_charged / total_paid alone', () => {
+    db.none(`
+      INSERT INTO charges (id, lease_id, amount) VALUES ('c0000000-0000-0000-0000-000000000001', '${LEASE}', 1000);
+      INSERT INTO payments (id, lease_id, amount, method, stripe_status) VALUES ('a0000000-0000-0000-0000-000000000001', '${LEASE}', 400, 'check', NULL);
+      INSERT INTO balance_forwards (id, lease_id, as_of, amount, voided_at) VALUES
+        ('b0000000-0000-0000-0000-000000000001', '${LEASE}', '2026-11-12', 999, '2026-11-12T12:00:00Z'),
+        ('b0000000-0000-0000-0000-000000000002', '${LEASE}', '2026-11-12', -250.5, NULL);
+    `)
+    const [row] = db.many(`SELECT total_charged, total_paid, balance, balance_forward, balance_forward_as_of FROM ar_ledger WHERE lease_id = '${LEASE}'`)
+    expect(Number(row.total_charged)).toBe(1000)
+    expect(Number(row.total_paid)).toBe(400)
+    expect(Number(row.balance_forward)).toBe(-250.5)
+    expect(Number(row.balance)).toBe(349.5)
+    expect(row.balance_forward_as_of).not.toBeNull() // pg-mem returns a JS Date; the value is the row's as_of
+  })
+
+  it('a lease with no balance forward reads balance_forward 0 and a null date', () => {
+    const [row] = db.many(`SELECT balance, balance_forward, balance_forward_as_of FROM ar_ledger WHERE lease_id = '${LEASE}'`)
+    expect(Number(row.balance_forward)).toBe(0)
+    expect(row.balance_forward_as_of).toBeNull()
     expect(Number(row.balance)).toBe(0)
   })
 })

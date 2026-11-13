@@ -35,7 +35,7 @@ portalRouter.get('/me', async (c) => {
     .eq('auth_user_id', c.get('tenantUserId'))
     .single()
   if (error || !tenant) return c.json({ error: 'Tenant not found for this user' }, 404)
-  return send(c, await portalBalance(db, tenant.id), (total_balance) => ({ tenant, total_balance }))
+  return send(c, await portalBalance(db, tenant.id), (b) => ({ tenant, total_balance: b.total, balance_forward: b.forward }))
 })
 
 // GET /api/portal/charges — non-voided charges for the tenant's active leases

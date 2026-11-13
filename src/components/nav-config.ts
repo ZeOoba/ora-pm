@@ -1,5 +1,6 @@
 import {
   ArrowLeftRight,
+  ArrowRightLeft,
   Banknote,
   BookOpen,
   Building2,
@@ -76,6 +77,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { to: '/books/chart-of-accounts', label: 'Chart of accounts', icon: ListTree },
       { to: '/books/opening-balances', label: 'Opening balances', icon: Scale },
       { to: '/books/ar-posting', label: 'AR posting', icon: BookCheck },
+      { to: '/books/balance-forward', label: 'Balance forward', icon: ArrowRightLeft },
       { to: '/exports', label: 'QB export', icon: Download },
     ],
   },

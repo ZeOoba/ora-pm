@@ -75,11 +75,15 @@ describe('check-refute-required — financial-source classification', () => {
     expect(isFinancialSourcePath('server/lib/gl-opening-balance.ts')).toBe(true)
     expect(isFinancialSourcePath('server/lib/gl-ar-posting.ts')).toBe(true)
     expect(isFinancialSourcePath('server/lib/gl-ar-cash-posting.ts')).toBe(true)
+    // Balance forward from QuickBooks (0030).
+    expect(isFinancialSourcePath('server/lib/balance-forward-import.ts')).toBe(true)
+    expect(isFinancialSourcePath('server/routes/balance-forwards.ts')).toBe(true)
   })
 
   it('exposes the financial path set with the expected membership', () => {
     // 25 on main (#67 ar-aging-report, #71 gl.ts lib + route, #76 qb-iif-accounts, #81 gl-opening-balance) + server/lib/lease-abstract.ts from this PR.
-    expect(FINANCIAL_SOURCE_PATHS.size).toBe(28)
+    // + server/lib/balance-forward-import.ts and server/routes/balance-forwards.ts (0030).
+    expect(FINANCIAL_SOURCE_PATHS.size).toBe(30)
     for (const p of [
       'server/routes/cron.ts',
       'server/routes/stripe.ts',

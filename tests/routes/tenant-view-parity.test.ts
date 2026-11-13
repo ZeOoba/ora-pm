@@ -30,7 +30,7 @@ beforeEach(() => {
 })
 afterEach(() => { vi.useRealTimers() })
 
-function world(opts: { ledgerError?: boolean } = {}) {
+function world(opts: { ledgerError?: boolean; forwards?: boolean } = {}) {
   const tenants: Row[] = [
     { id: TA, name: 'KC Brewing Supply', contact_email: 'ap@kc.test', stripe_customer_id: null, auth_user_id: 'user_a' },
     { id: TB, name: 'Other Tenant', contact_email: 'x@b.test', stripe_customer_id: null, auth_user_id: 'user_b' },
@@ -46,6 +46,11 @@ function world(opts: { ledgerError?: boolean } = {}) {
     { lease_id: L2, tenant_id: TA, unit_id: 'u2', tenant_name: 'KC Brewing Supply', property_id: 'p', property_name: 'Raytown Flex', suite: '4', total_charged: 0, total_paid: 250, balance: '-250.00' },
     { lease_id: LB, tenant_id: TB, unit_id: 'u9', tenant_name: 'Other Tenant', property_id: 'p', property_name: 'Raytown Flex', suite: '9', total_charged: 999, total_paid: 0, balance: 999 },
   ]
+  // 0030: balance forwards from QuickBooks on both of TA's leases (already inside `balance`).
+  if (opts.forwards) {
+    Object.assign(ledger[0], { balance_forward: '100.00', balance_forward_as_of: '2026-10-31' })
+    Object.assign(ledger[1], { balance_forward: -40, balance_forward_as_of: '2026-11-12' })
+  }
   const charges: Row[] = [
     { id: 'c1', lease_id: L1, amount: 3170.09, due_date: '2026-09-01', voided_at: null, type: 'cam_estimate' },
     { id: 'c2', lease_id: L1, amount: 3170.09, due_date: '2026-10-01', voided_at: null, type: 'cam_estimate' },
@@ -92,6 +97,15 @@ describe('GET /api/portal/me', () => {
     const { status, body } = await json('/api/portal/me')
     expect(status).toBe(200)
     expect(body.total_balance).toBe(6090.18)
+    expect(body.balance_forward).toBeNull()
+  })
+
+  it('reports the balance forward across the tenant’s leases (summed, latest date), already inside total_balance', async () => {
+    world({ forwards: true })
+    const { status, body } = await json('/api/portal/me')
+    expect(status).toBe(200)
+    expect(body.total_balance).toBe(6090.18)
+    expect(body.balance_forward).toEqual({ amount: 60, as_of: '2026-11-12' })
   })
 
   it('fails closed (no $0 balance) when the ar_ledger read fails', async () => {

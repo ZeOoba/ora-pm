@@ -128,3 +128,54 @@ describe('buildStatement', () => {
     expect(s.lines.at(-1)?.balanceCents ?? s.openingCents).toBe(s.closingCents)
   })
 })
+
+describe('buildStatement — balance forward from QuickBooks (0030)', () => {
+  const charges = () => [ch('2026-10-01', 100000), ch('2026-11-01', 100000), ch('2026-12-01', 100000)]
+  const bf = (as_of: string, amountCents: number) => ({ id: 'lease-1', as_of, amountCents })
+
+  it('inside the period: one signed line after that day’s activity; closing includes it; the summary foots', () => {
+    const payments = [pay('2026-11-12', 30000), pay('2026-11-20', 10000)]
+    const s = buildStatement({ charges: charges(), payments, balanceForward: bf('2026-11-12', -25000), start: '2026-11-01', end: '2026-11-30' })
+    expect(s.openingCents).toBe(100000)
+    expect(s.forwardCents).toBe(-25000)
+    expect(s.closingCents).toBe(100000 + 100000 - 40000 - 25000)
+    expect(s.lines.map(l => [l.date, l.kind])).toEqual([
+      ['2026-11-01', 'charge'], ['2026-11-12', 'payment'], ['2026-11-12', 'balance_forward'], ['2026-11-20', 'payment'],
+    ])
+    const line = s.lines.find(l => l.kind === 'balance_forward')!
+    expect(line.label).toBe('Balance forward from prior system')
+    expect(line.amountCents).toBe(-25000)
+    expect(line.balanceCents).toBe(100000 + 100000 - 30000 - 25000)
+    expect(s.lines.at(-1)!.balanceCents).toBe(s.closingCents)
+    expect(s.openingCents + s.chargesCents - s.paymentsCents + s.forwardCents).toBe(s.closingCents)
+  })
+
+  it('before the period it is part of the opening balance (no line); after the period it is ignored', () => {
+    const before = buildStatement({ charges: charges(), payments: [], balanceForward: bf('2026-10-15', 5000), start: '2026-11-01', end: '2026-11-30' })
+    expect(before.openingCents).toBe(105000)
+    expect(before.forwardCents).toBe(0)
+    expect(before.lines.some(l => l.kind === 'balance_forward')).toBe(false)
+    const after = buildStatement({ charges: charges(), payments: [], balanceForward: bf('2026-12-15', 5000), start: '2026-11-01', end: '2026-11-30' })
+    expect(after.closingCents).toBe(200000)
+  })
+
+  it('a positive one ages as owed from its date, behind every newer charge', () => {
+    // Owes Oct, Nov and Dec rent plus 500 from QuickBooks as of Oct 15. Aged as of Dec 31, newest
+    // first: Dec 1 (30 days) → 1–30, Nov 1 (60) → 31–60, the Oct 15 balance forward (77) → 61–90, Oct 1 (91) → 90+.
+    const s = buildStatement({ charges: charges(), payments: [], balanceForward: bf('2026-10-15', 50000), start: '2026-12-01', end: '2026-12-31' })
+    expect(s.closingCents).toBe(350000)
+    expect(s.aging).toEqual({ current: 0, d1_30: 100000, d31_60: 100000, d61_90: 50000, d90_plus: 100000, unallocated: 0 })
+  })
+
+  it('a credit lowers what is aged (oldest charges retired first) and never creates a bucket of its own', () => {
+    const s = buildStatement({ charges: charges(), payments: [], balanceForward: bf('2026-10-15', -150000), start: '2026-12-01', end: '2026-12-31' })
+    expect(s.closingCents).toBe(150000)
+    expect(s.aging).toEqual({ current: 0, d1_30: 100000, d31_60: 50000, d61_90: 0, d90_plus: 0, unallocated: 0 })
+  })
+
+  it('rejects a zero, fractional or undated balance forward', () => {
+    for (const b of [bf('2026-11-12', 0), bf('2026-11-12', 1.5), bf('2026-13-01', 100)]) {
+      expect(() => buildStatement({ charges: [], payments: [], balanceForward: b, start: '2026-11-01', end: '2026-11-30' })).toThrow()
+    }
+  })
+})

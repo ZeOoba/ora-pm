@@ -62,6 +62,8 @@ export interface TenantMe {
     auth_user_id: string
   }
   total_balance: number
+  /** Part of total_balance brought over from the prior system (QuickBooks), across the tenant's leases. */
+  balance_forward?: { amount: number; as_of: string } | null
 }
 
 export interface Charge extends DBCharge {

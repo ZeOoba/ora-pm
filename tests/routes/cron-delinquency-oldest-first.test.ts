@@ -37,7 +37,7 @@ beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn())
 })
 
-type ARRow = { lease_id: string; tenant_id: string; tenant_name: string; property_name: string | null; suite: string | null; balance: number }
+type ARRow = { lease_id: string; tenant_id: string; tenant_name: string; property_name: string | null; suite: string | null; balance: number; balance_forward?: number | string; balance_forward_as_of?: string }
 type RecentRow = { lease_id: string; amount: number | string }
 type Resp = { late_fees_posted: number; delinquent_count: number; email: { subject: string; body: string } | null; error?: string }
 
@@ -170,6 +170,34 @@ describe('POST /api/cron/delinquency-check — oldest-first overdue test (OI-234
     expect(body.late_fees_posted).toBe(1)
     expect(body.delinquent_count).toBe(1)
     expect(charges.insert).toHaveBeenCalledTimes(1)
+  })
+
+  // 0030: ar_ledger.balance includes the QuickBooks balance forward. A positive one dated inside
+  // the grace window is recent (not yet overdue); an older one is overdue like an old charge.
+  const daysAgoStr = (d: number) => new Date(Date.now() - d * 86_400_000).toISOString().slice(0, 10)
+  it('(bf-1) a recent positive balance forward is not overdue -> no fee', async () => {
+    const charges = makeCharges({ recent: [] })
+    wire([{ ...ar('lease_1', 700), balance_forward: 700, balance_forward_as_of: daysAgoStr(2) } as ARRow], charges)
+    const { status, body } = await run()
+    expect(status).toBe(200)
+    expect(body.delinquent_count).toBe(0)
+    expect(charges.insert).not.toHaveBeenCalled()
+  })
+
+  it('(bf-2) an old positive balance forward is overdue -> fee', async () => {
+    const charges = makeCharges({ recent: [] })
+    wire([{ ...ar('lease_1', 700), balance_forward: '700.00', balance_forward_as_of: daysAgoStr(60) } as ARRow], charges)
+    const { status, body } = await run()
+    expect(status).toBe(200)
+    expect(body.late_fees_posted).toBe(1)
+  })
+
+  it('(bf-3) a non-numeric balance forward fails the run closed', async () => {
+    const charges = makeCharges({ recent: [] })
+    wire([{ ...ar('lease_1', 700), balance_forward: 'x', balance_forward_as_of: daysAgoStr(60) } as ARRow], charges)
+    const { status } = await run()
+    expect(status).toBe(500)
+    expect(charges.insert).not.toHaveBeenCalled()
   })
 
   it('(d) partial payment covering all old charges but not the recent one -> no fee, not listed', async () => {
