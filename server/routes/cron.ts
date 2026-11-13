@@ -13,6 +13,7 @@ type Env = {
   CRON_SECRET: string
   STRIPE_SECRET_KEY: string
   CRIT_ALERT_RECIPIENTS?: string
+  LATE_FEES_ENABLED?: string
   RATE_LIMIT_KV?: KVNamespace
 }
 
@@ -692,6 +693,13 @@ cronRouter.post('/delinquency-check', async (c) => {
   // OI-278: a payment row dated inside this window is the evidence that the payments feed is live.
   const PAYMENTS_FEED_LOOKBACK_DAYS = 45
   const PAYMENTS_FEED_ABSENT_LEAD = 'PAYMENTS FEED ABSENT — delinquency not reliable; no late fees posted'
+  // Late-fee off switch (2026-11-13). Payments start being recorded before every lease has its
+  // balance-forward credit from QuickBooks; the first recorded payment lifts the feed-absent guard
+  // below, and every lease would then look delinquent on its lifetime charges (OI-278 again). So
+  // late fees post only when LATE_FEES_ENABLED is exactly 'true'; anything else, unset included,
+  // reports the delinquency list without posting. Turn it on once app balances match QuickBooks.
+  const lateFeesDisabled = c.env.LATE_FEES_ENABLED !== 'true'
+  const LATE_FEES_DISABLED_LEAD = 'LATE FEES OFF (LATE_FEES_ENABLED is not "true") — no late fees posted'
 
   // OI-278 (2026-09-12): ar_ledger.balance = Σcharges − Σqualifying payments (migration 0010), so
   // with NO payments recorded every lease's balance is its lifetime charge total and every lease
@@ -732,11 +740,12 @@ cronRouter.post('/delinquency-check', async (c) => {
   const buildEmail = (delinquent: { tenant_name: string; property: string; balance: number }[], lateFeesPosted: number): { subject: string; body: string } | null => {
     if (delinquent.length === 0 && !paymentsFeedAbsent) return null
     const lines = delinquent.map(d => `  • ${d.tenant_name} | ${d.property} | Balance: $${d.balance.toFixed(2)}`)
-    const lead = paymentsFeedAbsent ? `${PAYMENTS_FEED_ABSENT_LEAD}\n\n` : ''
+    const lead = (paymentsFeedAbsent ? `${PAYMENTS_FEED_ABSENT_LEAD}\n\n` : '') + (lateFeesDisabled ? `${LATE_FEES_DISABLED_LEAD}\n\n` : '')
     const listing = lines.length > 0 ? lines.join('\n') : '  (no leases past the grace window)'
     const bodyText = `${lead}ORA PM — Delinquency Report\n${today}\n\n${listing}\n\nLate fees posted: ${lateFeesPosted}\nhttps://ora-pm.pages.dev/ar`
     const baseSubject = `[ORA PM] ${delinquent.length} Delinquent Tenant${delinquent.length === 1 ? '' : 's'} — ${today}`
-    const subject = paymentsFeedAbsent ? `${PAYMENTS_FEED_ABSENT_LEAD} — ${baseSubject}` : baseSubject
+    const subject = paymentsFeedAbsent ? `${PAYMENTS_FEED_ABSENT_LEAD} — ${baseSubject}`
+      : lateFeesDisabled ? `${LATE_FEES_DISABLED_LEAD} — ${baseSubject}` : baseSubject
     return { subject, body: bodyText }
   }
 
@@ -750,7 +759,7 @@ cronRouter.post('/delinquency-check', async (c) => {
   }, (row) => row.lease_id)
 
   if (arErr) return c.json({ error: arErr.message }, 500)
-  if (!arRows || arRows.length === 0) return c.json({ late_fees_posted: 0, delinquent_count: 0, payments_feed_absent: paymentsFeedAbsent, email: buildEmail([], 0) })
+  if (!arRows || arRows.length === 0) return c.json({ late_fees_posted: 0, delinquent_count: 0, payments_feed_absent: paymentsFeedAbsent, late_fees_enabled: !lateFeesDisabled, email: buildEmail([], 0) })
 
   type ARRow = { lease_id: string; tenant_id: string; tenant_name: string; property_name: string | null; suite: string | null; balance: number }
 
@@ -839,8 +848,9 @@ cronRouter.post('/delinquency-check', async (c) => {
     const overdue = Number(ar.balance) - (recentByLease.get(ar.lease_id) ?? 0)
     if (!(overdue > OVERDUE_EPSILON)) continue
 
-    // OI-278: with the payments feed absent, report the lease but never post the fee.
-    if (existingFeeLeaseIds.has(ar.lease_id) || paymentsFeedAbsent) {
+    // OI-278: with the payments feed absent, report the lease but never post the fee. Same when
+    // late fees are switched off.
+    if (existingFeeLeaseIds.has(ar.lease_id) || paymentsFeedAbsent || lateFeesDisabled) {
       delinquentLeases.push({ tenant_name: ar.tenant_name, property: [ar.property_name, ar.suite].filter(Boolean).join(' '), balance: ar.balance })
       continue
     }
@@ -880,5 +890,5 @@ cronRouter.post('/delinquency-check', async (c) => {
   // digest — unchanged from today's behavior (buildEmail is defined above the AR fetch).
   const email = buildEmail(delinquentLeases, lateFeesPosted)
 
-  return c.json({ late_fees_posted: lateFeesPosted, delinquent_count: delinquentLeases.length, payments_feed_absent: paymentsFeedAbsent, email })
+  return c.json({ late_fees_posted: lateFeesPosted, delinquent_count: delinquentLeases.length, payments_feed_absent: paymentsFeedAbsent, late_fees_enabled: !lateFeesDisabled, email })
 })

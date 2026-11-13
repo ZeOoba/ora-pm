@@ -19,6 +19,7 @@ const env = {
   CRON_SECRET: 'test',
   STRIPE_SECRET_KEY: 'sk_test_dummy',
   STRIPE_WEBHOOK_SECRET: 'whsec_dummy',
+  LATE_FEES_ENABLED: 'true',
   CRIT_ALERT_RECIPIENTS: 'admin@example.test',
 }
 const app = createApp()
@@ -623,6 +624,41 @@ describe('POST /api/cron/delinquency-check', () => {
       const insertSpy = vi.fn().mockResolvedValue({ error: null })
       installDb([{ payment_date: daysAgo(60), method: 'check' }, { payment_date: daysAgo(90), method: 'wire' }], insertSpy)
       await expectAbsent(insertSpy, 1)
+    })
+
+    // Late-fee off switch (2026-11-13): recording payments before every lease has its QuickBooks
+    // balance forward would lift the feed guard against lifetime-charge balances (OI-278 again).
+    describe('LATE_FEES_ENABLED switch', () => {
+      const postWith = (value: string | undefined) => {
+        const e: Record<string, string> = { ...env }
+        if (value === undefined) delete e.LATE_FEES_ENABLED
+        else e.LATE_FEES_ENABLED = value
+        return app.request('/api/cron/delinquency-check', { method: 'POST', headers: { Authorization: 'Bearer test' } }, e)
+      }
+      it.each([undefined, '', 'false', 'TRUE', '1', ' true'])('posts nothing when LATE_FEES_ENABLED is %j, even with a live payments feed', async (value) => {
+        const insertSpy = vi.fn().mockResolvedValue({ error: null })
+        installDb([{ payment_date: daysAgo(10), method: 'check' }], insertSpy)
+        const res = await postWith(value)
+        expect(res.status).toBe(200)
+        const body = await res.json() as Body & { late_fees_enabled: boolean }
+        expect(body.late_fees_enabled).toBe(false)
+        expect(body.payments_feed_absent).toBe(false)
+        expect(body.late_fees_posted).toBe(0)
+        expect(insertSpy).not.toHaveBeenCalled()
+        // Still REPORTED, and the digest leads with why nothing was posted.
+        expect(body.delinquent_count).toBe(1)
+        expect(body.email!.subject.startsWith('LATE FEES OFF')).toBe(true)
+        expect(body.email!.body.startsWith('LATE FEES OFF')).toBe(true)
+        expect(body.email!.body).toContain('Late fees posted: 0')
+      })
+      it("posts only when it is exactly 'true'", async () => {
+        const insertSpy = vi.fn().mockResolvedValue({ error: null })
+        installDb([{ payment_date: daysAgo(10), method: 'check' }], insertSpy)
+        const res = await postWith('true')
+        const body = await res.json() as Body & { late_fees_enabled: boolean }
+        expect(body.late_fees_enabled).toBe(true)
+        expect(body.late_fees_posted).toBe(1)
+      })
     })
 
     it('posts late fees per the existing rules when a qualifying payment inside the lookback exists', async () => {
