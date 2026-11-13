@@ -161,3 +161,20 @@ describe('planBalanceForwards — the ledger tie-out (0032)', () => {
     expect(fine.warnings.join()).not.toMatch(/ledger start date/)
   })
 })
+
+describe('planBalanceForwards — REFUTE-9 F10/F11', () => {
+  const base = { as_of: '2026-11-12', today: '2026-11-13' }
+  it('F10: a forward in a tied-out LLC is not offered "void it to import again"', () => {
+    const plan = planBalanceForwards({ ...base, aging: null, manual: { l1: 100 }, leases: [
+      lease('l1', 'A', 0, { live_forward: { amount_cents: 5000, as_of: '2026-05-31' }, ledger: { tied_out_as_of: '2026-05-31', start_date: '2026-06-01' } })] })
+    expect(plan.rows[0].note).toMatch(/can no longer be voided or re-imported/)
+    expect(plan.rows[0].note).not.toMatch(/void it to import again/)
+  })
+  it('F11: the start-date warning considers only leases being adjusted', () => {
+    const plan = planBalanceForwards({ ...base, as_of: '2026-06-30', today: '2026-11-13', aging: null, manual: { t: 100, o: 100 }, leases: [
+      lease('t', 'Tied', 0, { ledger: { tied_out_as_of: '2026-05-31', start_date: '2026-06-01' } }),
+      lease('o', 'Open', 0, { ledger: { tied_out_as_of: null, start_date: '2026-08-01' } })] })
+    expect(plan.adjust_count).toBe(1)
+    expect(plan.warnings.join()).not.toMatch(/ledger start date/)
+  })
+})

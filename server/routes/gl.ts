@@ -404,13 +404,20 @@ glRouter.get('/entities/:id/ar', async (c) => {
     accounting_basis: entity.data.accounting_basis, ledger_start_date: entity.data.ledger_start_date,
     roles: roles.data ?? [], tieout: tieout.data,
     properties: (props.data ?? []).filter((p) => p.gl_entity_id === id || p.gl_entity_id === null),
-    balance_forwards: {
-      count: live.length,
-      net_cents: live.reduce((a, b) => a + b.cents, 0),
-      positive_cents: live.filter((b) => b.cents > 0).reduce((a, b) => a + b.cents, 0),
-      negative_cents: live.filter((b) => b.cents < 0).reduce((a, b) => a + b.cents, 0),
-      after_cutoff: cutoff ? live.filter((b) => b.as_of > cutoff).map((b) => ({ lease_id: b.lease_id, as_of: b.as_of, amount_cents: b.cents })) : [],
-    },
+    // REFUTE-9 F12: count/net cover only the forwards the tie-out would count (as_of on or before the
+    // cut-off); with no start date yet, none can be judged (cutoff null) and all are listed as live.
+    balance_forwards: (() => {
+      const inTie = cutoff ? live.filter((b) => b.as_of <= cutoff) : []
+      return {
+        cutoff,
+        live_count: live.length,
+        count: inTie.length,
+        net_cents: inTie.reduce((a, b) => a + b.cents, 0),
+        positive_cents: inTie.filter((b) => b.cents > 0).reduce((a, b) => a + b.cents, 0),
+        negative_cents: inTie.filter((b) => b.cents < 0).reduce((a, b) => a + b.cents, 0),
+        after_cutoff: cutoff ? live.filter((b) => b.as_of > cutoff).map((b) => ({ lease_id: b.lease_id, as_of: b.as_of, amount_cents: b.cents })) : [],
+      }
+    })(),
   } })
 })
 

@@ -441,7 +441,7 @@ describe('AR posting (B8 slice 3)', () => {
     expect(res.status).toBe(200)
     const d = (await res.json() as { data: { by_role: Record<string, number>; errors: string[]; attention: unknown[] } }).data
     expect(d.errors).toEqual([])
-    expect(d.by_role).toEqual({ undeposited_funds: 120000, rent: -70000, balance_forward: -50000 })
+    expect(d.by_role).toEqual({ undeposited_funds: 120000, rent: -120000 }) // forward income nets into rent (unmapped)
     expect(d.attention).toEqual([])
   })
 
@@ -470,7 +470,7 @@ describe('AR posting (B8 slice 3)', () => {
     install({ bfs: [{ id: 'a', lease_id: L1, as_of: '2026-09-30', amount: 500, voided_at: null }, { id: 'b', lease_id: L1, as_of: '2026-10-02', amount: -200, voided_at: null },
       { id: 'c', lease_id: L1, as_of: '2026-09-30', amount: 999, voided_at: '2026-10-01T00:00:00Z' }] })
     const d = (await (await get(base)).json() as { data: { balance_forwards: Record<string, unknown> } }).data
-    expect(d.balance_forwards).toEqual({ count: 2, net_cents: 30000, positive_cents: 50000, negative_cents: -20000, after_cutoff: [{ lease_id: L1, as_of: '2026-10-02', amount_cents: -20000 }] })
+    expect(d.balance_forwards).toEqual({ cutoff: '2026-09-30', live_count: 2, count: 1, net_cents: 50000, positive_cents: 50000, negative_cents: 0, after_cutoff: [{ lease_id: L1, as_of: '2026-10-02', amount_cents: -20000 }] })
   })
 
   it('PUT /ar/accounts accepts the balance_forward role', async () => {

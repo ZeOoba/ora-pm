@@ -22,7 +22,7 @@ type ArSetup = {
   tieout: { as_of: string; app_ar_cents: number; gl_ar_cents: number; confirmed_by: string; confirmed_at: string } | null
   properties: { id: string; name: string; gl_entity_id: string | null }[]
   /** 0032: the LLC's live balance forwards from QuickBooks (Books › Balance forward). */
-  balance_forwards?: { count: number; net_cents: number; positive_cents: number; negative_cents: number; after_cutoff: { lease_id: string; as_of: string; amount_cents: number }[] }
+  balance_forwards?: { cutoff: string | null; live_count: number; count: number; net_cents: number; positive_cents: number; negative_cents: number; after_cutoff: { lease_id: string; as_of: string; amount_cents: number }[] }
 }
 type ArItem = { kind: string; source_id: string; lease_id: string; date: string; cents: number; label: string; debit_role: string; credit_role: string }
 export type ArRun = {
@@ -175,6 +175,9 @@ export function ArPosting() {
                   : 'Before anything posts, the app\'s open AR as of the day before the start date must equal the AR account in the opening balance, to the cent. Map the AR account and assign this LLC\'s properties first.'}
                 {' '}If it does not tie, the message gives both numbers; fix the difference in QuickBooks or the app and re-import the opening balance. Once confirmed, the opening balance can no longer be reversed.
               </p>
+              {bf && bf.live_count > 0 && !bf.cutoff && (
+                <p className="text-sm text-muted-foreground">{bf.live_count} balance forward{bf.live_count === 1 ? '' : 's'} from QuickBooks: whether they count depends on the ledger start date (set it first).</p>
+              )}
               {bf && bf.count > 0 && (
                 <p className="text-sm text-muted-foreground" aria-label="Balance forwards">
                   {bf.count} balance forward{bf.count === 1 ? '' : 's'} from QuickBooks (net {signedDollars(bf.net_cents)}) count in this tie-out

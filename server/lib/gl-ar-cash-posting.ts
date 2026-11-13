@@ -247,7 +247,10 @@ export function planCashArRun(input: CashPlanInput): CashPlan {
     for (const [r, v] of delta) {
       if (!v) continue
       needed.add(r as ArRole)
-      plan.by_role[r as ArRole] = (plan.by_role[r as ArRole] ?? 0) + v
+      // REFUTE-9 F8: an unmapped balance_forward posts to the rent account, so the preview nets it
+      // there (gl_ar_cash_expected groups by account), instead of showing a reclass the ledger never posts.
+      const key = (r === 'balance_forward' && !input.roles.balance_forward ? 'rent' : r) as ArRole
+      plan.by_role[key] = (plan.by_role[key] ?? 0) + v
     }
   }
   for (const r of Object.keys(plan.by_role) as ArRole[]) if (plan.by_role[r] === 0) delete plan.by_role[r]

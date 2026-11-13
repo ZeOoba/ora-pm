@@ -285,6 +285,66 @@ BEGIN
   RAISE NOTICE 'ok: BF2 a mapped balance_forward account takes the forward''s income; rent takes the rest';
 END $$;
 
+-- ── REFUTE-9 F1: items inside a forward count by the state the forward measured ─────────────────
+-- Accrual AF. Lease A: rent 1,000 (09-01) and an 'other' 300 (09-10) voided on 10-05 — after the
+-- tie-out date but before the import — so the forward (QB 1,200 − app 1,000 = +200) already
+-- excludes it. Lease B: rent 1,000 and an ACH of 1,000 dated 09-29 that settled after the tie-out
+-- date; the forward (QB 150 − app 0 = +150) already counts it. Open AR at the tie-out: 1,200 + 150.
+INSERT INTO gl_entities (id, name, accounting_basis) VALUES ('c3200000-0000-4000-8000-0000000000af', 'BF Settled LLC', 'accrual');
+INSERT INTO properties (id, name, gl_entity_id) VALUES ('c3210000-0000-4000-8000-0000000000af', 'BF Settled Park', 'c3200000-0000-4000-8000-0000000000af');
+INSERT INTO units (id, property_id, suite) VALUES ('c3220000-0000-4000-8000-0000000000af', 'c3210000-0000-4000-8000-0000000000af', 'A');
+INSERT INTO leases (id, unit_id, tenant_id) VALUES
+  ('c3230000-0000-4000-8000-0000000000a1', 'c3220000-0000-4000-8000-0000000000af', 'c3240000-0000-4000-8000-000000000001'),
+  ('c3230000-0000-4000-8000-0000000000b1', 'c3220000-0000-4000-8000-0000000000af', 'c3240000-0000-4000-8000-000000000001');
+INSERT INTO gl_accounts (id, entity_id, number, qb_name, account_type) VALUES
+  ('c32a0000-0000-4000-8000-0000000af002', 'c3200000-0000-4000-8000-0000000000af', '1100', 'Accounts Receivable', 'asset'),
+  ('c32a0000-0000-4000-8000-0000000af003', 'c3200000-0000-4000-8000-0000000000af', '1499', 'Undeposited Funds', 'asset'),
+  ('c32a0000-0000-4000-8000-0000000af006', 'c3200000-0000-4000-8000-0000000000af', '3000', 'Members'' Equity', 'equity'),
+  ('c32a0000-0000-4000-8000-0000000af007', 'c3200000-0000-4000-8000-0000000000af', '4000', 'Rental Income', 'income');
+INSERT INTO gl_ar_accounts (entity_id, role, account_id, updated_by) VALUES
+  ('c3200000-0000-4000-8000-0000000000af', 'ar', 'c32a0000-0000-4000-8000-0000000af002', 'tester'),
+  ('c3200000-0000-4000-8000-0000000000af', 'undeposited_funds', 'c32a0000-0000-4000-8000-0000000af003', 'tester'),
+  ('c3200000-0000-4000-8000-0000000000af', 'rent', 'c32a0000-0000-4000-8000-0000000af007', 'tester');
+INSERT INTO charges (id, lease_id, charge_date, due_date, type, amount, voided_at, void_reason) VALUES
+  ('c32c0000-0000-4000-8000-0000000000a1', 'c3230000-0000-4000-8000-0000000000a1', '2026-09-01', '2026-09-01', 'rent', 1000, NULL, NULL),
+  ('c32c0000-0000-4000-8000-0000000000a2', 'c3230000-0000-4000-8000-0000000000a1', '2026-09-10', '2026-09-10', 'other', 300, '2026-10-05 15:00Z', 'billed in error'),
+  ('c32c0000-0000-4000-8000-0000000000b1', 'c3230000-0000-4000-8000-0000000000b1', '2026-09-01', '2026-09-01', 'rent', 1000, NULL, NULL);
+INSERT INTO payments (id, lease_id, payment_date, amount, method, stripe_status) VALUES
+  ('c32d0000-0000-4000-8000-0000000000b1', 'c3230000-0000-4000-8000-0000000000b1', '2026-09-29', 1000, 'ach_stripe', 'processing');
+UPDATE payments SET stripe_status = 'succeeded' WHERE id = 'c32d0000-0000-4000-8000-0000000000b1';  -- settles after the tie-out date
+SELECT count(*) FROM apply_balance_forwards('2026-09-30', 'manual', NULL, 'tester', '[
+  {"lease_id":"c3230000-0000-4000-8000-0000000000a1","qb_balance":1200,"expected_app_balance":1000},
+  {"lease_id":"c3230000-0000-4000-8000-0000000000b1","qb_balance":150,"expected_app_balance":0}]');
+DO $$ BEGIN
+  PERFORM gl_post_opening_balance('c3200000-0000-4000-8000-0000000000af', '2026-10-01',
+    '[{"account_id":"c32a0000-0000-4000-8000-0000000af002","debit_cents":135000},{"account_id":"c32a0000-0000-4000-8000-0000000af006","credit_cents":135000}]', 'tester');
+  SET CONSTRAINTS ALL IMMEDIATE;
+  PERFORM pg_temp.eq('F1 tie-out = QuickBooks', gl_confirm_ar_tieout('c3200000-0000-4000-8000-0000000000af', 'tester'), 135000);
+  SET CONSTRAINTS ALL IMMEDIATE;
+  -- The voided charge is not counted (no void can post for it later); the late ACH is.
+  PERFORM pg_temp.eq('F1 voided charge not counted', (SELECT counted::int FROM gl_ar_tieout_items WHERE source_id = 'c32c0000-0000-4000-8000-0000000000a2'), 0);
+  PERFORM pg_temp.eq('F1 late ACH counted', (SELECT counted::int FROM gl_ar_tieout_items WHERE source_id = 'c32d0000-0000-4000-8000-0000000000b1'), 1);
+  PERFORM pg_temp.eq('F1 nothing to post for them', gl_post_ar_batch('c3200000-0000-4000-8000-0000000000af', '2026-10-31', '[]', 'tester'), 0);
+  PERFORM pg_temp.expect_error($q$SELECT gl_post_ar_batch('c3200000-0000-4000-8000-0000000000af', '2026-10-31',
+    '[{"kind":"charge_void_pre","source_id":"c32c0000-0000-4000-8000-0000000000a2"}]', 't')$q$, '.');
+  RAISE NOTICE 'ok: REFUTE-9 F1 items inside a forward count as the forward measured them; nothing double-counts';
+END $$;
+
+-- ── REFUTE-9 F3 / F7 / F9 ──────────────────────────────────────────────────────────────────────
+DO $$ BEGIN
+  -- F3: even the table owner cannot add a forward to a tied-out LLC.
+  PERFORM pg_temp.expect_error($q$INSERT INTO balance_forwards (lease_id, as_of, qb_balance, app_balance, amount, created_by)
+    VALUES ('c3230000-0000-4000-8000-000000000005', '2026-09-30', 10, 0, 10, 't')$q$, 'already tied out in the ledger');
+  -- F9: the freeze message for a counted forward's history says it is final.
+  PERFORM pg_temp.expect_error($q$INSERT INTO payments (lease_id, payment_date, amount, method) VALUES ('c3230000-0000-4000-8000-000000000001', '2026-09-15', 5, 'check')$q$,
+    'counted at its AR tie-out; its payments dated on or before then \(2026-09-15\) are frozen for good');
+  RAISE NOTICE 'ok: REFUTE-9 F3 no forward into a tied-out LLC by any writer; F9 frozen-for-good message';
+END $$;
+-- F7: a void outside READ COMMITTED is refused.
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT pg_temp.expect_error($q$SELECT void_balance_forward((SELECT id FROM balance_forwards WHERE lease_id = 'c3230000-0000-4000-8000-000000000008'), 't', 'x')$q$, 'must run in READ COMMITTED');
+ROLLBACK;
+
 -- ── Grants: the new function bodies keep the 0028–0030 privileges ──────────────────────────────
 DO $$ BEGIN
   IF has_function_privilege('authenticated', 'gl_ar_cash_alloc(uuid,bigint)', 'execute')

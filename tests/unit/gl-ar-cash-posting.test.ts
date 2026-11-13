@@ -167,8 +167,12 @@ describe('balance forwards (0032 BF3)', () => {
     const plan = planCashArRun(bfInput())
     expect(plan.errors).toEqual([])
     expect(plan.items.map((i) => [i.kind, i.source_id])).toEqual([['charge', 'r10'], ['payment', 'p10']])
-    // 1,200: Sep rent's last 400, the 500 forward, October 300.
-    expect(plan.by_role).toEqual({ undeposited_funds: 120000, rent: -70000, balance_forward: -50000 })
+    // 1,200: Sep rent's last 400, the 500 forward, October 300 — all Rental Income here (the forward
+    // falls back to rent, and the preview nets per account like the ledger: REFUTE-9 F8).
+    expect(plan.by_role).toEqual({ undeposited_funds: 120000, rent: -120000 })
+    // With its own account mapped, the forward's 500 shows separately.
+    expect(planCashArRun(bfInput({ roles: { undeposited_funds: 'uf', prepaid_rent: 'pp', rent: 'rent', balance_forward: 'bfacct' } })).by_role)
+      .toEqual({ undeposited_funds: 120000, rent: -70000, balance_forward: -50000 })
   })
 
   it('needs balance_forward or rent mapped; either one is enough', () => {
@@ -187,6 +191,18 @@ describe('balance forwards (0032 BF3)', () => {
       roles: { undeposited_funds: 'uf', prepaid_rent: 'pp', rent: 'rent' }, balanceForwards: [{ id: 'bf2', lease_id: 'l2', as_of: '2026-09-30', cents: -30000 }],
     })
     expect(plan.by_role).toEqual({ prepaid_rent: 40000, rent: -40000 })
+  })
+
+  it('REFUTE-9 F8: a void that only moves cash between rent and an unmapped forward shows no change', () => {
+    // Counted +500 forward (due 09-10) and a counted 400 rent (due 09-01) paid by a counted 400 check;
+    // voiding the rent moves the 400 to the forward: same Rental Income account, so the ledger posts nothing.
+    const plan = planCashArRun({
+      startDate: START, through: '2026-10-31', charges: [ch('r', 'lv', '2026-09-20', 'rent', 400, '2026-10-05T15:00:00Z', '2026-09-01')], payments: [pay('pc', 'lv', '2026-09-21', 400)],
+      events: [], tieoutItems: [{ kind: 'charge', source_id: 'r', counted: true }, { kind: 'payment', source_id: 'pc', counted: true }, { kind: 'balance_forward', source_id: 'bfv', counted: true, cents: 50000 }],
+      roles: { undeposited_funds: 'uf', prepaid_rent: 'pp', rent: 'rent' }, balanceForwards: [{ id: 'bfv', lease_id: 'lv', as_of: '2026-09-10', cents: 50000 }],
+    })
+    expect(plan.items.map((i) => i.kind)).toEqual(['charge_void'])
+    expect(plan.by_role).toEqual({})
   })
 
   it('a live forward the tie-out did not count needs attention and posts nothing', () => {

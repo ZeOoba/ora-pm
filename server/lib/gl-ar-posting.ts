@@ -41,8 +41,8 @@ export type LiveBalanceForward = { id: string; lease_id: string; as_of: string; 
 
 /** Attention for a live balance forward the tie-out did not count (the database prevents this; defensive). */
 export function uncountedForwardMessage(bf: LiveBalanceForward, startDate: string): string {
-  return `balance forward from QuickBooks dated ${bf.as_of} is not in the AR tie-out: it is in the app balance but not in the ledger. `
-    + `Void it and import it again as of the day before ${startDate} or earlier, or post a manual journal entry.`
+  return `balance forward from QuickBooks dated ${bf.as_of} is not in the AR tie-out (ledger start ${startDate}): it is in the app balance but not in the ledger. `
+    + 'It can no longer be re-imported for this LLC: void it, or post a manual journal entry for the same amount.'
 }
 export type ArKind = 'charge' | 'charge_void' | 'charge_void_pre' | 'payment' | 'payment_return' | 'payment_return_pre'
 

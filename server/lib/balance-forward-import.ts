@@ -248,7 +248,11 @@ export function planBalanceForwards(input: BfPlanInput): BfPlan {
     const adjustment_cents = qb_cents - l.app_cents
     let status: BfRowStatus = adjustment_cents === 0 ? 'no_change' : 'adjust'
     let note: string | null = null
-    if (l.live_forward) {
+    if (l.live_forward && l.ledger?.tied_out_as_of) {
+      // REFUTE-9 F10: counted (or at least frozen) by the ledger's tie-out: it cannot be voided or re-imported.
+      status = 'has_forward'
+      note = `has a balance forward of ${centsText(l.live_forward.amount_cents)} as of ${l.live_forward.as_of}, and its LLC's AR is tied out in the ledger as of ${l.ledger.tied_out_as_of}; it can no longer be voided or re-imported (record any difference as a manual journal entry)`
+    } else if (l.live_forward) {
       status = 'has_forward'
       note = `already has a balance forward of ${centsText(l.live_forward.amount_cents)} as of ${l.live_forward.as_of}; void it to import again`
     } else if (l.ledger?.tied_out_as_of) {
@@ -268,7 +272,9 @@ export function planBalanceForwards(input: BfPlanInput): BfPlan {
   plan.rows.sort((a, b) => a.property_name.localeCompare(b.property_name) || a.tenant_name.localeCompare(b.tenant_name) || a.lease_id.localeCompare(b.lease_id))
   plan.adjust_count = plan.rows.filter((r) => r.status === 'adjust').length
   // 0032 BF7: a cut-off on or after an LLC's ledger start date would refuse its AR tie-out.
-  const starts = [...new Set(leases.map((l) => l.ledger?.start_date).filter((d): d is string => !!d && as_of >= d))].sort()
+  // REFUTE-9 F11: only the leases this import would actually adjust.
+  const adjusting = new Set(plan.rows.filter((r) => r.status === 'adjust').map((r) => r.lease_id))
+  const starts = [...new Set(leases.filter((l) => adjusting.has(l.lease_id)).map((l) => l.ledger?.start_date).filter((d): d is string => !!d && as_of >= d))].sort()
   if (starts.length && plan.adjust_count > 0) {
     plan.warnings.push(`the cut-off ${as_of} is on or after the ledger start date ${starts.join(', ')}: the ledger's AR tie-out will refuse these balance forwards; use the day before the start date or earlier`)
   }

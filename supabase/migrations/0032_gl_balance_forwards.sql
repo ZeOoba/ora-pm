@@ -36,6 +36,18 @@
 --       FOR SHARE, so a void or an import either commits first and is read by the tie-out, or waits
 --       and then meets the tie-out (and is refused).
 --
+-- REFUTE-9 (adversarial pass on this migration) added:
+--   F1  a charge or payment dated on or before a lease's live balance forward is counted at the
+--       tie-out by its CURRENT state (what balance_forward_app_cents measured when the forward was
+--       made, frozen since by 0030 B3), not its state on the tie-out date: otherwise a charge voided,
+--       or an ACH settled, between the tie-out date and the import is counted twice.
+--   F2/F4/F5/F6  apply and void lock the lease, its unit and its property before resolving its
+--       entity; a property/unit/lease move locks its OLD and NEW entity rows (FOR SHARE, id order),
+--       so a move cannot interleave with a tie-out, an import or a void of the leases it carries.
+--   F3  a BEFORE INSERT trigger on balance_forwards refuses a tied-out LLC (any writer, not only apply).
+--   F7  void_balance_forward requires READ COMMITTED (a stale snapshot could miss the tie-out items).
+--   F9  the history-freeze message (0030 B3) no longer advises voiding a forward the ledger counted.
+--
 -- ORDERING: requires 0028, 0029, 0030. Re-runnable. Every function pins search_path = public, pg_temp.
 
 -- ── BF1 / BF2: the new item kind and account role ──────────────────────────────────────────────
@@ -138,10 +150,18 @@ CREATE OR REPLACE FUNCTION gl_ar_tieout_source(p_entity_id UUID, p_as_of DATE)
 LANGUAGE sql STABLE
 SET search_path = public, pg_temp
 AS $$
-  SELECT 'charge'::text, c.id, c.lease_id, gl_exact_cents(c.amount), (c.voided_at IS NULL OR gl_central_date(c.voided_at) > p_as_of)
+  -- REFUTE-9 F1: inside a live balance forward (dated on or before its as_of), an item counts by its
+  -- current state, as the forward measured it; elsewhere by its state on the tie-out date.
+  SELECT 'charge'::text, c.id, c.lease_id, gl_exact_cents(c.amount),
+         CASE WHEN EXISTS (SELECT 1 FROM balance_forwards b WHERE b.lease_id = c.lease_id AND b.voided_at IS NULL AND c.charge_date <= b.as_of)
+              THEN c.voided_at IS NULL
+              ELSE (c.voided_at IS NULL OR gl_central_date(c.voided_at) > p_as_of) END
     FROM charges c WHERE c.charge_date <= p_as_of AND gl_lease_entity(c.lease_id) = p_entity_id
   UNION ALL
-  SELECT 'payment'::text, p.id, p.lease_id, gl_exact_cents(p.amount), gl_payment_counted_as_of(p.method, p.stripe_status, p.status_changed_at, p_as_of)
+  SELECT 'payment'::text, p.id, p.lease_id, gl_exact_cents(p.amount),
+         CASE WHEN EXISTS (SELECT 1 FROM balance_forwards b WHERE b.lease_id = p.lease_id AND b.voided_at IS NULL AND p.payment_date <= b.as_of)
+              THEN gl_payment_counts(p.method, p.stripe_status)
+              ELSE gl_payment_counted_as_of(p.method, p.stripe_status, p.status_changed_at, p_as_of) END
     FROM payments p WHERE p.payment_date <= p_as_of AND gl_lease_entity(p.lease_id) = p_entity_id
   UNION ALL
   -- BF1/BF4: live balance forwards dated on or before the tie-out date (a void is a correction, not
@@ -433,7 +453,14 @@ DECLARE
   v_row balance_forwards%ROWTYPE;
   v_entity UUID;
 BEGIN
-  -- BF8: serialize with a tie-out of the lease's entity (it holds the row FOR UPDATE).
+  -- REFUTE-9 F7: a stale snapshot would miss tie-out items committed while this waited.
+  IF pg_catalog.current_setting('transaction_isolation') <> 'read committed' THEN
+    RAISE EXCEPTION 'bf: void_balance_forward must run in READ COMMITTED' USING ERRCODE = 'invalid_transaction_state';
+  END IF;
+  -- BF8 / REFUTE-9 F4: hold the lease's chain (a move waits, or has committed and is read), then
+  -- serialize with a tie-out of its entity (it holds the entity row FOR UPDATE).
+  PERFORM 1 FROM balance_forwards b JOIN leases l ON l.id = b.lease_id JOIN units u ON u.id = l.unit_id JOIN properties pr ON pr.id = u.property_id
+   WHERE b.id = p_id FOR SHARE OF l, u, pr;
   v_entity := gl_lease_entity((SELECT b.lease_id FROM balance_forwards b WHERE b.id = p_id));
   IF v_entity IS NOT NULL THEN PERFORM 1 FROM gl_entities WHERE id = v_entity FOR SHARE; END IF;
   UPDATE balance_forwards SET voided_at = pg_catalog.now(), voided_by = btrim(p_actor), void_reason = btrim(p_reason)
@@ -497,6 +524,9 @@ BEGIN
     IF EXISTS (SELECT 1 FROM balance_forwards b WHERE b.lease_id = v_lease AND b.voided_at IS NULL) THEN
       RAISE EXCEPTION 'bf: lease % already has a balance forward; void it first', v_lease USING ERRCODE = 'unique_violation';
     END IF;
+    -- REFUTE-9 F2/F5: hold the lease's unit and property, so a move of either waits for this import
+    -- (and then meets the committed forward) or has committed and is read here.
+    PERFORM 1 FROM leases l JOIN units u ON u.id = l.unit_id JOIN properties pr ON pr.id = u.property_id WHERE l.id = v_lease FOR SHARE OF u, pr;
     v_entity := gl_lease_entity(v_lease);
     -- R3: serialize with a tie-out of the same entity (gl_confirm_ar_tieout locks it FOR UPDATE).
     IF v_entity IS NOT NULL THEN PERFORM 1 FROM gl_entities WHERE id = v_entity FOR SHARE; END IF;
@@ -542,4 +572,123 @@ BEGIN
       v_late.lease_id, v_late.as_of, NEW.as_of, NEW.as_of USING ERRCODE = 'check_violation';
   END IF;
   RETURN NEW;
+END $$;
+
+-- REFUTE-9 F6: a move locks its old and new entity rows.
+CREATE OR REPLACE FUNCTION balance_forward_entity_move() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_entity UUID;
+  v_old UUID;
+  v_lease UUID;
+BEGIN
+  IF TG_TABLE_NAME = 'properties' THEN
+    IF NEW.gl_entity_id IS NOT DISTINCT FROM OLD.gl_entity_id THEN RETURN NEW; END IF;
+    v_entity := NEW.gl_entity_id;
+    v_old := OLD.gl_entity_id;
+  ELSIF TG_TABLE_NAME = 'units' THEN
+    IF NEW.property_id IS NOT DISTINCT FROM OLD.property_id THEN RETURN NEW; END IF;
+    SELECT p.gl_entity_id INTO v_entity FROM properties p WHERE p.id = NEW.property_id;
+    SELECT p.gl_entity_id INTO v_old FROM properties p WHERE p.id = OLD.property_id;
+  ELSE
+    IF NEW.unit_id IS NOT DISTINCT FROM OLD.unit_id THEN RETURN NEW; END IF;
+    SELECT p.gl_entity_id INTO v_entity FROM units u JOIN properties p ON p.id = u.property_id WHERE u.id = NEW.unit_id;
+    SELECT p.gl_entity_id INTO v_old FROM units u JOIN properties p ON p.id = u.property_id WHERE u.id = OLD.unit_id;
+  END IF;
+  -- REFUTE-9 F6: lock both entities (id order) so a move never interleaves with either one's tie-out
+  -- (it holds its entity FOR UPDATE): the move waits and then meets the tie-out's items, or commits
+  -- first and the tie-out reads the lease where it now is.
+  PERFORM 1 FROM gl_entities WHERE id IN (v_entity, v_old) ORDER BY id FOR SHARE;
+  IF v_entity IS NULL THEN RETURN NEW; END IF;
+  IF NOT EXISTS (SELECT 1 FROM gl_ar_tieouts t WHERE t.entity_id = v_entity) THEN RETURN NEW; END IF;
+  SELECT b.lease_id INTO v_lease FROM balance_forwards b JOIN leases l ON l.id = b.lease_id JOIN units u ON u.id = l.unit_id
+   WHERE b.voided_at IS NULL
+     AND CASE TG_TABLE_NAME WHEN 'properties' THEN u.property_id = NEW.id WHEN 'units' THEN u.id = NEW.id ELSE l.id = NEW.id END
+   LIMIT 1;
+  IF v_lease IS NOT NULL THEN
+    RAISE EXCEPTION 'bf: lease % has a balance forward from QuickBooks and cannot move into an LLC already tied out in the ledger', v_lease
+      USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NEW;
+END $$;
+
+-- REFUTE-9 F3 (BF7): any insert into balance_forwards, not only apply_balance_forwards, is refused for
+-- a lease whose LLC is tied out.
+CREATE OR REPLACE FUNCTION balance_forward_insert_guard() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_entity UUID;
+BEGIN
+  v_entity := gl_lease_entity(NEW.lease_id);
+  IF v_entity IS NULL THEN RETURN NEW; END IF;
+  PERFORM 1 FROM gl_entities WHERE id = v_entity FOR SHARE;
+  IF EXISTS (SELECT 1 FROM gl_ar_tieouts t WHERE t.entity_id = v_entity) THEN
+    RAISE EXCEPTION 'bf: lease %: its LLC is already tied out in the ledger; a balance forward must be imported before the AR tie-out', NEW.lease_id
+      USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS balance_forwards_insert_guard ON balance_forwards;
+CREATE TRIGGER balance_forwards_insert_guard BEFORE INSERT ON balance_forwards FOR EACH ROW EXECUTE FUNCTION balance_forward_insert_guard();
+REVOKE EXECUTE ON FUNCTION balance_forward_insert_guard() FROM PUBLIC, anon, authenticated;
+
+-- REFUTE-9 F9: the history-freeze message once the ledger counted the forward.
+CREATE OR REPLACE FUNCTION balance_forward_guard() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_old_lease UUID;
+  v_new_lease UUID;
+  v_old_date DATE;
+  v_new_date DATE;
+  v_cut DATE;
+  v_counted BOOLEAN;
+BEGIN
+  -- R1: an insert whose idempotency key is already taken never lands (ON CONFLICT DO NOTHING, or a
+  -- unique violation); a billing re-run must not be refused for it. (ON CONFLICT DO UPDATE would
+  -- update the existing row, and that UPDATE is checked below.)
+  IF TG_OP = 'INSERT' AND NEW.idempotency_key IS NOT NULL THEN
+    IF TG_TABLE_NAME = 'charges' AND EXISTS (SELECT 1 FROM charges c WHERE c.idempotency_key = NEW.idempotency_key) THEN RETURN NEW; END IF;
+    IF TG_TABLE_NAME = 'payments' AND EXISTS (SELECT 1 FROM payments p WHERE p.idempotency_key = NEW.idempotency_key) THEN RETURN NEW; END IF;
+  END IF;
+  IF TG_TABLE_NAME = 'charges' THEN
+    IF TG_OP <> 'INSERT' THEN v_old_lease := OLD.lease_id; v_old_date := OLD.charge_date; END IF;
+    IF TG_OP <> 'DELETE' THEN v_new_lease := NEW.lease_id; v_new_date := NEW.charge_date; END IF;
+    IF TG_OP = 'UPDATE' AND (NEW.lease_id, NEW.charge_date, NEW.amount, NEW.voided_at IS NULL)
+                            IS NOT DISTINCT FROM (OLD.lease_id, OLD.charge_date, OLD.amount, OLD.voided_at IS NULL) THEN
+      RETURN NEW;
+    END IF;
+  ELSE
+    IF TG_OP <> 'INSERT' THEN v_old_lease := OLD.lease_id; v_old_date := OLD.payment_date; END IF;
+    IF TG_OP <> 'DELETE' THEN v_new_lease := NEW.lease_id; v_new_date := NEW.payment_date; END IF;
+    IF TG_OP = 'UPDATE' AND (NEW.lease_id, NEW.payment_date, NEW.amount, NEW.method)
+                            IS NOT DISTINCT FROM (OLD.lease_id, OLD.payment_date, OLD.amount, OLD.method) THEN
+      RETURN NEW;
+    END IF;
+  END IF;
+  IF pg_catalog.current_setting('transaction_isolation') <> 'read committed' THEN
+    RAISE EXCEPTION 'bf: changes to charges and payments must run in READ COMMITTED (balance forward guard)'
+      USING ERRCODE = 'invalid_transaction_state';
+  END IF;
+  -- Wait out a concurrent import on the same lease, then read what it committed.
+  PERFORM 1 FROM leases WHERE id IN (v_old_lease, v_new_lease) ORDER BY id FOR SHARE;
+  FOR v_cut, v_old_lease, v_old_date, v_counted IN
+    SELECT b.as_of, x.lease, x.d, EXISTS (SELECT 1 FROM gl_ar_tieout_items i WHERE i.kind = 'balance_forward' AND i.source_id = b.id)
+      FROM (VALUES (v_old_lease, v_old_date), (v_new_lease, v_new_date)) AS x(lease, d)
+      JOIN balance_forwards b ON b.lease_id = x.lease AND b.voided_at IS NULL
+     WHERE x.d <= b.as_of
+  LOOP
+    IF v_counted THEN
+      RAISE EXCEPTION 'bf: lease % has a balance forward from QuickBooks as of % that the ledger counted at its AR tie-out; its % dated on or before then (%) are frozen for good. Record any difference as a manual journal entry.',
+        v_old_lease, v_cut, TG_TABLE_NAME, v_old_date USING ERRCODE = 'check_violation';
+    END IF;
+    RAISE EXCEPTION 'bf: lease % has a balance forward from QuickBooks as of %; its % dated on or before then (%) cannot change. Void the balance forward first, then import again.',
+      v_old_lease, v_cut, TG_TABLE_NAME, v_old_date USING ERRCODE = 'check_violation';
+  END LOOP;
+  RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
 END $$;

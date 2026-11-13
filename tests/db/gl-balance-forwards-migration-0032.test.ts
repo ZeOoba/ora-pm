@@ -61,4 +61,21 @@ describe('migration 0032 — balance forwards in the ledger (textual pins)', () 
       expect(f, name).toMatch(/after the AR tie-out date/)
     }
   })
+
+  it('REFUTE-9: apply and void hold the lease chain; moves lock both entities; inserts are guarded; void needs READ COMMITTED', () => {
+    expect(fnBody('apply_balance_forwards')).toMatch(/FOR SHARE OF u, pr;\s+v_entity := gl_lease_entity\(v_lease\)/)
+    const v = fnBody('void_balance_forward')
+    expect(v).toMatch(/FOR SHARE OF l, u, pr/)
+    expect(v).toMatch(/must run in READ COMMITTED/)
+    const move = sql.slice(sql.indexOf('CREATE OR REPLACE FUNCTION balance_forward_entity_move()'))
+    expect(move.slice(0, move.indexOf('END $$;'))).toMatch(/WHERE id IN \(v_entity, v_old\) ORDER BY id FOR SHARE/)
+    expect(sql).toMatch(/CREATE TRIGGER balance_forwards_insert_guard BEFORE INSERT ON balance_forwards/)
+  })
+
+  it('REFUTE-9 F1: inside a live forward, items count by their current state', () => {
+    const src = fnBody('gl_ar_tieout_source')
+    expect(src).toMatch(/c\.charge_date <= b\.as_of\)\s+THEN c\.voided_at IS NULL/)
+    expect(src).toMatch(/p\.payment_date <= b\.as_of\)\s+THEN gl_payment_counts\(p\.method, p\.stripe_status\)/)
+  })
 })
+
