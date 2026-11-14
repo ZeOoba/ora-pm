@@ -121,7 +121,7 @@ flowchart LR
 │   ├── components/              App shell, data table, charts, forms, shadcn ui/ primitives
 │   └── lib/                     Admin Supabase client, API wrapper, formatting, validation
 ├── supabase/
-│   ├── migrations/              0001–0030 SQL migrations: the schema source of truth (read its README)
+│   ├── migrations/              0001–0032 SQL migrations: the schema source of truth (read its README)
 │   ├── tests/                   GL SQL suites (core, opening balance, accrual and cash AR posting, balance forwards) on real Postgres
 │   └── config.toml              Supabase CLI local config
 ├── tests/                       Vitest suites: components, config, db, evals, lib, middleware, pages,
@@ -253,7 +253,7 @@ The API CORS allowlist in `server/index.ts` names both hosts and `ora-pm.pages.d
 
 ## Database and migrations
 
-`supabase/migrations/` (0001–0030) is the schema source of truth; each migration has a row in its README. Read [`supabase/migrations/README.md`](supabase/migrations/README.md) before changing a migration or relying on an RLS policy.
+`supabase/migrations/` (0001–0032) is the schema source of truth; each migration has a row in its README. Read [`supabase/migrations/README.md`](supabase/migrations/README.md) before changing a migration or relying on an RLS policy.
 
 - Migrations reach production through the manual **DB Migrate** workflow ([`db-migrate.yml`](.github/workflows/db-migrate.yml)): `workflow_dispatch` only, runs only from `main`, and `dry_run` defaults to true. The Supabase CLI is pinned to the same version in `ci.yml` and `db-migrate.yml`; bump both together.
 - A Dashboard-paste fallback is scripted in `scripts/prepare-migration-for-dashboard.mjs`.

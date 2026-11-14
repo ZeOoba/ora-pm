@@ -145,7 +145,9 @@ export function BalanceForward() {
                         <Button variant="danger" disabled={!voiding.reason.trim() || voidIt.isPending} onClick={() => voidIt.mutate(voiding)}>Void</Button>
                         <Button variant="ghost" onClick={() => setVoiding(null)}>Cancel</Button>
                       </div>
-                    ) : <Button variant="ghost" onClick={() => setVoiding({ id: r.id, reason: '' })}>Void…</Button>}
+                    ) : r.counted_at_tieout
+                      ? <span className="text-xs text-muted-foreground" title="Counted in the ledger's AR tie-out">In the ledger</span>
+                      : <Button variant="ghost" onClick={() => setVoiding({ id: r.id, reason: '' })}>Void…</Button>}
                   </TableCell>
                 </TableRow>
               ))}

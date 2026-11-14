@@ -52,3 +52,11 @@ describe('AR posting page', () => {
     expect(flatNavItems().some((i) => i.to === '/books/ar-posting' && i.label === 'AR posting')).toBe(true)
   })
 })
+
+describe('AR posting roles — balance forward (0032)', () => {
+  it('cash LLCs map the balance_forward role; accrual LLCs never see it', async () => {
+    const { rolesForBasis } = await import('../../src/pages/books/ar-posting-helpers')
+    expect(rolesForBasis('cash').map((r) => r.role)).toContain('balance_forward')
+    expect(rolesForBasis('accrual').map((r) => r.role)).not.toContain('balance_forward')
+  })
+})

@@ -32,7 +32,8 @@ describe('migration 0028 — posting rules (textual pins)', () => {
   it('the role CHECK lists exactly the planner roles', () => {
     const m = /gl_ar_accounts_role_check CHECK \(role IN \(([^)]*)\)\)/.exec(sql)
     expect(m).not.toBeNull()
-    expect(m![1].split(',').map((s) => s.trim().replace(/'/g, '')).sort()).toEqual([...AR_ROLES].sort())
+    // 0032 adds balance_forward (pinned in gl-balance-forwards-migration-0032.test.ts).
+    expect(m![1].split(',').map((s) => s.trim().replace(/'/g, '')).sort()).toEqual(AR_ROLES.filter((r) => r !== 'balance_forward').sort())
   })
 
   it('posting kinds and the ar_posting source', () => {

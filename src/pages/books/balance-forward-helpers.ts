@@ -53,6 +53,8 @@ export interface BalanceForwardRecord {
   tenant_name: string | null
   suite: string | null
   property_name: string | null
+  /** 0032: counted in the ledger's AR tie-out, so it can no longer be voided. */
+  counted_at_tieout?: boolean
 }
 
 export const STATUS_LABELS: Record<BfRowStatus, string> = {

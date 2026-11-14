@@ -5,6 +5,7 @@
 import { Hono, type Context } from 'hono'
 import { getDb } from '../db/client'
 import { dbError } from '../lib/api-error'
+import { toCents } from '../lib/ar-aging'
 import { fetchAllPages, POSTGREST_MAX_ROWS } from '../lib/postgrest-paging'
 import {
   AccountsImportSchema,
@@ -278,7 +279,15 @@ async function selectIn<T extends { id: string }>(db: Db, table: string, columns
 }
 
 /** Everything a run needs for one entity: its leases' charges and payments, postings, snapshot, roles. */
-async function loadArState(db: Db, entityId: string) {
+/** The calendar day before a YYYY-MM-DD date. */
+function dayBefore(iso: string): string {
+  const d = new Date(`${iso}T00:00:00Z`)
+  d.setUTCDate(d.getUTCDate() - 1)
+  return d.toISOString().slice(0, 10)
+}
+
+/** The entity's properties and lease ids (property → unit → lease). */
+async function entityLeases(db: Db, entityId: string) {
   const props = await fetchAllPages<{ id: string }>((after) => {
     let q = db.from('properties').select('id').eq('gl_entity_id', entityId)
     if (after !== null) q = q.gt('id', after)
@@ -289,7 +298,15 @@ async function loadArState(db: Db, entityId: string) {
   if (units.error) return { error: units.error }
   const leases = await selectIn<{ id: string }>(db, 'leases', 'id', 'unit_id', units.data.map((u) => u.id))
   if (leases.error) return { error: leases.error }
-  const leaseIds = leases.data.map((l) => l.id)
+  return { data: { propertyIds: props.data.map((p) => p.id), leaseIds: leases.data.map((l) => l.id) } }
+}
+
+type BalanceForwardRow = { id: string; lease_id: string; as_of: string; amount: number | string; voided_at: string | null }
+
+async function loadArState(db: Db, entityId: string) {
+  const el = await entityLeases(db, entityId)
+  if (el.error) return { error: el.error }
+  const leaseIds = el.data.leaseIds
   const charges = await selectIn<CashCharge>(db, 'charges', 'id, lease_id, charge_date, due_date, type, amount, description, voided_at', 'lease_id', leaseIds)
   if (charges.error) return { error: charges.error }
   const payments = await selectIn<ArPayment>(db, 'payments', 'id, lease_id, payment_date, amount, method, stripe_status, status_changed_at', 'lease_id', leaseIds)
@@ -306,8 +323,8 @@ async function loadArState(db: Db, entityId: string) {
     return q.order('id').limit(POSTGREST_MAX_ROWS)
   }, (r) => r.id)
   if (events.error) return { error: events.error }
-  const items = await fetchAllPages<{ source_id: string; kind: 'charge' | 'payment'; counted: boolean }>((after) => {
-    let q = db.from('gl_ar_tieout_items').select('source_id, kind, counted').eq('entity_id', entityId)
+  const items = await fetchAllPages<{ source_id: string; kind: 'charge' | 'payment' | 'balance_forward'; counted: boolean; cents: number | string }>((after) => {
+    let q = db.from('gl_ar_tieout_items').select('source_id, kind, counted, cents').eq('entity_id', entityId)
     if (after !== null) q = q.gt('source_id', after)
     return q.order('source_id').limit(POSTGREST_MAX_ROWS)
   }, (r) => r.source_id)
@@ -320,12 +337,32 @@ async function loadArState(db: Db, entityId: string) {
     return q.order('period_start').limit(POSTGREST_MAX_ROWS)
   }, (r) => r.period_start)
   if (locks.error) return { error: locks.error }
+  // 0032: balance forwards from QuickBooks. Counted ones (in the snapshot) enter the cash replay with
+  // the snapshot's signed cents; a live one the tie-out did not count goes to attention. A counted one
+  // that reads voided or missing cannot happen (BF6); fail the plan closed if it does.
+  const forwards = await selectIn<BalanceForwardRow>(db, 'balance_forwards', 'id, lease_id, as_of, amount, voided_at', 'lease_id', leaseIds)
+  if (forwards.error) return { error: forwards.error }
+  const bfById = new Map(forwards.data.map((b) => [b.id, b]))
+  const counted = new Set<string>()
+  const balanceForwards: { id: string; lease_id: string; as_of: string; cents: number }[] = []
+  const bfProblems: string[] = []
+  for (const i of items.data) {
+    if (i.kind !== 'balance_forward') continue
+    counted.add(i.source_id)
+    const b = bfById.get(i.source_id)
+    const cents = Number(i.cents)
+    if (!b || b.voided_at || !Number.isSafeInteger(cents)) { bfProblems.push(`balance forward ${i.source_id} is in the AR tie-out but missing or voided in the app`); continue }
+    if (i.counted) balanceForwards.push({ id: b.id, lease_id: b.lease_id, as_of: b.as_of, cents })
+  }
+  const liveBalanceForwards = forwards.data.filter((b) => !b.voided_at && !counted.has(b.id))
   return {
     data: {
-      propertyIds: props.data.map((p) => p.id),
+      propertyIds: el.data.propertyIds,
       lockedMonths: locks.data.map((l) => l.period_start),
-      charges: charges.data, payments: payments.data, postings: postings.data, events: events.data, tieoutItems: items.data,
+      charges: charges.data, payments: payments.data, postings: postings.data, events: events.data,
+      tieoutItems: items.data.map((i) => ({ source_id: i.source_id, kind: i.kind, counted: i.counted, cents: Number(i.cents) })),
       roles: Object.fromEntries((roles.data ?? []).map((r) => [r.role, r.account_id])) as Partial<Record<ArRole, string>>,
+      balanceForwards, liveBalanceForwards, bfProblems,
     },
   }
 }
@@ -349,10 +386,38 @@ glRouter.get('/entities/:id/ar', async (c) => {
     db.from('properties').select('id, name, gl_entity_id').order('name').limit(POSTGREST_MAX_ROWS),
   ])
   if (roles.error || tieout.error || props.error) return dbError(c, (roles.error ?? tieout.error ?? props.error)!, 'Failed to load AR setup')
+  // 0032: the LLC's live balance forwards, for the tie-out card. after_cutoff ones refuse the tie-out.
+  const el = await entityLeases(db, id)
+  if (el.error) return dbError(c, el.error, 'Failed to load AR setup')
+  const bfs = await selectIn<BalanceForwardRow>(db, 'balance_forwards', 'id, lease_id, as_of, amount, voided_at', 'lease_id', el.data.leaseIds)
+  if (bfs.error) return dbError(c, bfs.error, 'Failed to load balance forwards')
+  // Signed: a credit forward is negative (exactCents is for non-negative amounts only).
+  const live: (BalanceForwardRow & { cents: number })[] = []
+  for (const b of bfs.data) {
+    if (b.voided_at) continue
+    const cents = toCents(b.amount)
+    if (cents === null) return dbError(c, { message: `non-numeric balance_forwards.amount on ${b.id}` }, 'Failed to load balance forwards')
+    live.push({ ...b, cents })
+  }
+  const cutoff = entity.data.ledger_start_date ? dayBefore(entity.data.ledger_start_date as string) : null
   return c.json({ data: {
     accounting_basis: entity.data.accounting_basis, ledger_start_date: entity.data.ledger_start_date,
     roles: roles.data ?? [], tieout: tieout.data,
     properties: (props.data ?? []).filter((p) => p.gl_entity_id === id || p.gl_entity_id === null),
+    // REFUTE-9 F12: count/net cover only the forwards the tie-out would count (as_of on or before the
+    // cut-off); with no start date yet, none can be judged (cutoff null) and all are listed as live.
+    balance_forwards: (() => {
+      const inTie = cutoff ? live.filter((b) => b.as_of <= cutoff) : []
+      return {
+        cutoff,
+        live_count: live.length,
+        count: inTie.length,
+        net_cents: inTie.reduce((a, b) => a + b.cents, 0),
+        positive_cents: inTie.filter((b) => b.cents > 0).reduce((a, b) => a + b.cents, 0),
+        negative_cents: inTie.filter((b) => b.cents < 0).reduce((a, b) => a + b.cents, 0),
+        after_cutoff: cutoff ? live.filter((b) => b.as_of > cutoff).map((b) => ({ lease_id: b.lease_id, as_of: b.as_of, amount_cents: b.cents })) : [],
+      }
+    })(),
   } })
 })
 
@@ -443,8 +508,10 @@ glRouter.post('/entities/:id/ar/run', async (c) => {
   const state = await loadArState(db, id)
   if (state.error) return dbError(c, state.error, 'Failed to load AR activity')
   const plan = cash
-    ? planCashArRun({ startDate: start, through, charges: state.data.charges, payments: state.data.payments, events: state.data.events, tieoutItems: state.data.tieoutItems, roles: state.data.roles, lockedMonths: state.data.lockedMonths })
+    ? planCashArRun({ startDate: start, through, charges: state.data.charges, payments: state.data.payments, events: state.data.events, tieoutItems: state.data.tieoutItems, roles: state.data.roles, lockedMonths: state.data.lockedMonths,
+        balanceForwards: state.data.balanceForwards, liveBalanceForwards: state.data.liveBalanceForwards })
     : planArRun({ startDate: start, through, ...state.data })
+  plan.errors.push(...state.data.bfProblems)
   const result = { ...plan, through, plan_hash: await arPlanHash(id, through, plan.items), applied: false, posted: 0 }
   if (apply !== true) return c.json({ data: result }, plan.errors.length ? 422 : 200)
   if (plan.errors.length) return c.json({ error: 'The run cannot be posted', data: result }, 422)

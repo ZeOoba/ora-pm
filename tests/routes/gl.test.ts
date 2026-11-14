@@ -376,7 +376,7 @@ describe('AR posting (B8 slice 3)', () => {
   const P1 = 'f0000000-0000-4000-8000-000000000001'
   const U1 = 'f1000000-0000-4000-8000-000000000001'
   const L1 = 'f2000000-0000-4000-8000-000000000001'
-  function install(opts: { basis?: string; start?: string | null; tieout?: boolean; charges?: Row[]; payments?: Row[]; postings?: Row[]; events?: Row[]; locked?: string[] } = {}) {
+  function install(opts: { basis?: string; start?: string | null; tieout?: boolean; charges?: Row[]; payments?: Row[]; postings?: Row[]; events?: Row[]; locked?: string[]; items?: Row[]; bfs?: Row[]; roles?: Row[] } = {}) {
     const tables: Record<string, ReturnType<typeof pgTable>> = {
       gl_entities: pgTable([{ id: E, accounting_basis: opts.basis ?? 'accrual', ledger_start_date: opts.start === undefined ? '2026-10-01' : opts.start }]),
       gl_ar_tieouts: pgTable(opts.tieout === false ? [] : [{ entity_id: E }]),
@@ -387,9 +387,10 @@ describe('AR posting (B8 slice 3)', () => {
       payments: pgTable(opts.payments ?? [{ id: 'p1', lease_id: L1, payment_date: '2026-10-03', amount: '1000.00', method: 'check', stripe_status: null, status_changed_at: null }]),
       gl_ar_postings: pgTable(opts.postings ?? []),
       gl_ar_cash_events: pgTable(opts.events ?? [{ id: 'none', entity_id: 'other', kind: 'charge', source_id: 'none' }]),
-      gl_ar_tieout_items: pgTable([]),
+      gl_ar_tieout_items: pgTable(opts.items ?? []),
+      balance_forwards: pgTable(opts.bfs ?? []),
       gl_periods: pgTable((opts.locked ?? []).map((m) => ({ entity_id: E, period_start: m, status: 'locked' }))),
-      gl_ar_accounts: pgTable([{ entity_id: E, role: 'ar', account_id: A1 }, { entity_id: E, role: 'undeposited_funds', account_id: A2 }, { entity_id: E, role: 'rent', account_id: A2 }, { entity_id: E, role: 'prepaid_rent', account_id: A1 }]),
+      gl_ar_accounts: pgTable(opts.roles ?? [{ entity_id: E, role: 'ar', account_id: A1 }, { entity_id: E, role: 'undeposited_funds', account_id: A2 }, { entity_id: E, role: 'rent', account_id: A2 }, { entity_id: E, role: 'prepaid_rent', account_id: A1 }]),
     }
     mockFrom.mockImplementation((t: string) => tables[t])
   }
@@ -424,6 +425,59 @@ describe('AR posting (B8 slice 3)', () => {
     install()
     mockRpc.mockResolvedValue({ data: null, error: { code: '23505', message: 'duplicate key value violates unique constraint "gl_ar_postings_once"' } })
     expect((await post(`${base}/run`, { through: '2026-10-31', apply: true, expected_plan_hash: (await preview()).plan_hash })).status).toBe(409)
+  })
+
+  // 0032: balance forwards from QuickBooks reach the planners from the tie-out snapshot.
+  it('cash preview: a counted forward is paid by later cash (by_role shows it; rent fallback, no mapping error)', async () => {
+    install({ basis: 'cash',
+      charges: [{ id: 'r09', lease_id: L1, charge_date: '2026-09-01', due_date: '2026-09-01', type: 'rent', amount: 1000, description: null, voided_at: null },
+        { id: 'r10', lease_id: L1, charge_date: '2026-10-01', due_date: '2026-10-01', type: 'rent', amount: 1000, description: null, voided_at: null }],
+      payments: [{ id: 'p09', lease_id: L1, payment_date: '2026-09-05', amount: 600, method: 'check', stripe_status: null, status_changed_at: null },
+        { id: 'p10', lease_id: L1, payment_date: '2026-10-05', amount: 1200, method: 'check', stripe_status: null, status_changed_at: null }],
+      events: [], items: [{ entity_id: E, kind: 'charge', source_id: 'r09', counted: true, cents: 100000 }, { entity_id: E, kind: 'payment', source_id: 'p09', counted: true, cents: 60000 },
+        { entity_id: E, kind: 'balance_forward', source_id: 'bf1', counted: true, cents: 50000 }],
+      bfs: [{ id: 'bf1', lease_id: L1, as_of: '2026-09-30', amount: '500.00', voided_at: null }] })
+    const res = await post(`${base}/run`, { through: '2026-10-31' })
+    expect(res.status).toBe(200)
+    const d = (await res.json() as { data: { by_role: Record<string, number>; errors: string[]; attention: unknown[] } }).data
+    expect(d.errors).toEqual([])
+    expect(d.by_role).toEqual({ undeposited_funds: 120000, rent: -120000 }) // forward income nets into rent (unmapped)
+    expect(d.attention).toEqual([])
+  })
+
+  it('accrual: counted forwards add no items and leave the plan hash unchanged; a live uncounted one needs attention', async () => {
+    install()
+    const plain = await preview()
+    install({ items: [{ entity_id: E, kind: 'balance_forward', source_id: 'bf1', counted: true, cents: 75000 }],
+      bfs: [{ id: 'bf1', lease_id: L1, as_of: '2026-09-30', amount: 750, voided_at: null }] })
+    const withBf = await preview()
+    expect(withBf.items).toEqual(plain.items)
+    expect(withBf.plan_hash).toBe(plain.plan_hash)
+    install({ bfs: [{ id: 'bfx', lease_id: L1, as_of: '2026-10-15', amount: 10, voided_at: null }] })
+    const d = (await (await post(`${base}/run`, { through: '2026-10-31' })).json() as { data: { attention: { kind: string; source_id: string }[] } }).data
+    expect(d.attention).toContainEqual(expect.objectContaining({ kind: 'balance_forward', source_id: 'bfx' }))
+  })
+
+  it('a counted forward that reads voided or missing fails the plan closed', async () => {
+    install({ basis: 'cash', events: [], items: [{ entity_id: E, kind: 'balance_forward', source_id: 'bf1', counted: true, cents: 50000 }],
+      bfs: [{ id: 'bf1', lease_id: L1, as_of: '2026-09-30', amount: 500, voided_at: '2026-11-01T00:00:00Z' }] })
+    const res = await post(`${base}/run`, { through: '2026-10-31' })
+    expect(res.status).toBe(422)
+    expect(((await res.json()) as { data: { errors: string[] } }).data.errors.join()).toMatch(/in the AR tie-out but missing or voided/)
+  })
+
+  it('GET /ar summarizes live forwards and lists any dated after the tie-out date', async () => {
+    install({ bfs: [{ id: 'a', lease_id: L1, as_of: '2026-09-30', amount: 500, voided_at: null }, { id: 'b', lease_id: L1, as_of: '2026-10-02', amount: -200, voided_at: null },
+      { id: 'c', lease_id: L1, as_of: '2026-09-30', amount: 999, voided_at: '2026-10-01T00:00:00Z' }] })
+    const d = (await (await get(base)).json() as { data: { balance_forwards: Record<string, unknown> } }).data
+    expect(d.balance_forwards).toEqual({ cutoff: '2026-09-30', live_count: 2, count: 1, net_cents: 50000, positive_cents: 50000, negative_cents: 0, after_cutoff: [{ lease_id: L1, as_of: '2026-10-02', amount_cents: -20000 }] })
+  })
+
+  it('PUT /ar/accounts accepts the balance_forward role', async () => {
+    install()
+    mockRpc.mockResolvedValue({ data: null, error: null })
+    const res = await app.request(`${base}/accounts`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ roles: { balance_forward: null } }) }, env)
+    expect(res.status).not.toBe(422)
   })
 
   it('cash-basis LLCs plan replay events and post through gl_post_ar_cash_batch', async () => {

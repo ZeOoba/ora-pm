@@ -275,7 +275,9 @@ cronRouter.post('/monthly-billing', async (c) => {
   if (allCharges.length > 0) {
     const { data: insertedCharges, error: chargesErr } = await db
       .from('charges')
-      .upsert(allCharges, { onConflict: 'idempotency_key', ignoreDuplicates: true })
+      // 0032 REFUTE-11 D1: rows in lease-id order, so each charge's balance-forward guard takes its
+      // lease lock in the same global order apply_balance_forwards uses (no deadlock).
+      .upsert([...allCharges].sort((a, b) => (a.lease_id < b.lease_id ? -1 : a.lease_id > b.lease_id ? 1 : 0)), { onConflict: 'idempotency_key', ignoreDuplicates: true })
       .select('idempotency_key')
 
     if (chargesErr) {

@@ -50,7 +50,7 @@ ALTER ROLE service_role BYPASSRLS;
 SQL
 
 # Apply twice: the migration must be re-runnable.
-for m in supabase/migrations/0023_gl_core.sql supabase/migrations/0025_gl_qb_account_type.sql supabase/migrations/0027_gl_opening_balance.sql supabase/migrations/0028_gl_ar_posting.sql supabase/migrations/0029_gl_ar_cash_posting.sql supabase/migrations/0030_balance_forwards.sql; do
+for m in supabase/migrations/0023_gl_core.sql supabase/migrations/0025_gl_qb_account_type.sql supabase/migrations/0027_gl_opening_balance.sql supabase/migrations/0028_gl_ar_posting.sql supabase/migrations/0029_gl_ar_cash_posting.sql supabase/migrations/0030_balance_forwards.sql supabase/migrations/0032_gl_balance_forwards.sql; do
   psql "$GL_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f "$m"
   psql "$GL_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f "$m"
 done
@@ -62,4 +62,5 @@ psql "$GL_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f supabase/tests/gl_opening_
 psql "$GL_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f supabase/tests/gl_ar_posting.test.sql
 psql "$GL_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f supabase/tests/gl_ar_cash_posting.test.sql
 psql "$GL_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f supabase/tests/balance_forwards.test.sql
+psql "$GL_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f supabase/tests/gl_balance_forwards.test.sql
 echo "verify-gl-sql: all GL SQL checks passed"

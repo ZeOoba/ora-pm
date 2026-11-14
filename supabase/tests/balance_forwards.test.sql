@@ -147,11 +147,11 @@ BEGIN
 END $$;
 SELECT pg_temp.eq('re-imported credit', (SELECT amount FROM balance_forwards WHERE lease_id = 'b0300000-0000-4000-8000-000000000001' AND voided_at IS NULL), -205);
 
--- B4: the native ledger's AR tie-out does not count balance forwards yet.
+-- B4' (0032 BF7): the ledger's AR tie-out counts balance forwards, but refuses one dated after it.
 INSERT INTO gl_entities (id, name, accounting_basis) VALUES ('b0e00000-0000-4000-8000-000000000001', 'Fishel LLC', 'cash');
 UPDATE properties SET gl_entity_id = 'b0e00000-0000-4000-8000-000000000001' WHERE id = 'b0100000-0000-4000-8000-000000000001';
 SELECT pg_temp.expect_error($$INSERT INTO gl_ar_tieouts (entity_id, as_of, app_ar_cents, gl_ar_cents, opening_entry_id, confirmed_by)
-  VALUES ('b0e00000-0000-4000-8000-000000000001', '2026-06-30', 0, 0, gen_random_uuid(), 'tester')$$, 'AR tie-out does not count');
+  VALUES ('b0e00000-0000-4000-8000-000000000001', '2026-05-31', 0, 0, gen_random_uuid(), 'tester')$$, 'dated 2026-06-30, after the AR tie-out date 2026-05-31');
 -- REFUTE-8 R3: a lease with a live balance forward cannot be moved into a tied-out LLC — by its
 -- property, its unit, or the lease itself.
 DO $$
