@@ -4,7 +4,10 @@
 # 1) ALWAYS runs the PINNED scan copy the installer placed beside this hook (untracked, so no
 #    commit can change it). Missing copy, no usable Python 3.8+, or any nonzero => BLOCKED.
 # 2) Then, when HEAD tracks the scan, runs HEAD's committed blob (never the worktree file) on the
-#    same input. It can only ADD blocks: a no-op committed at HEAD cannot turn the gate off.
+#    same input; its verdict can only ADD blocks, so a no-op committed at HEAD cannot turn the
+#    gate off. NOT a sandbox: that blob is committed code run with the user's credentials (as on
+#    every push before this stage existed), and re-running the installer re-pins whatever scan
+#    is checked out -- review scanner changes before pushing or reinstalling.
 # git's ref lines are buffered once and reach both stages on stdin unchanged.
 # Emergency bypass (only after verifying the push is clean): git push --no-verify
 # PATH is rebuilt FIRST, with shell built-ins only, before this hook runs any external command

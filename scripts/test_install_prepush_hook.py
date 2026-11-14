@@ -178,6 +178,21 @@ class PinnedFirst(unittest.TestCase):
         self.sb.commit("notes.md", "nothing confidential here\n")
         self.assertBlocked(*self.sb.push())
 
+    def test_partial_ref_buffering_blocks(self):
+        # A cat that writes only part of git's ref lines and then fails (ENOSPC/EIO in TMPDIR)
+        # must block: the scanner allows when it sees no complete ref line (2026-11-14 refute).
+        stub = os.path.join(self.sb.root, "stubcat")
+        os.makedirs(stub)
+        p = os.path.join(stub, "cat")
+        with open(p, "w", newline="\n") as f:
+            f.write("#!/bin/sh\nhead -c 20\nexit 1\n")
+        os.chmod(p, 0o755)
+        self.sb.env["PATH"] = os.pathsep.join([stub, os.environ.get("PATH", "")])
+        self.sb.commit("deal.md", "memo for %s\n" % TERM)
+        rc, err = self.sb.push()
+        self.assertBlocked(rc, err)
+        self.assertIn("cannot buffer the ref lines", err)
+
     def test_both_stages_run_isolated_with_cwd_exe_search_off(self):
         # The shared suite's -I check never reaches the HEAD stage (its sandbox does not track
         # the scanner): here both stages run, each through a logging python first on PATH.
