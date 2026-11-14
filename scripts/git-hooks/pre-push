@@ -13,7 +13,8 @@
 # and including '/'. Parents are compared with test -ef, so case variants match; on MSYS the
 # Windows spelling (pwd -W) is walked too, so a mount such as /usr/bin whose real folder sits
 # inside the worktree is caught. Dropped: empty, '.', relative, '..' and unenterable entries. So
-# nothing untracked in the worktree (a planted python, sh, git) can stand in for the real tool.
+# nothing untracked in the worktree (a planted python, git, mktemp) can stand in for a tool this
+# script runs after this block. (git itself resolves sh before any hook runs: out of reach.)
 # Windows: children (python, git) must not search the current directory either.
 NoDefaultCurrentDirectoryInExePath=1
 export NoDefaultCurrentDirectoryInExePath

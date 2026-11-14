@@ -1184,8 +1184,9 @@ class PlantedInterpreter(unittest.TestCase):
         self.assertFalse(os.path.exists(self.marker), "the planted python ran:\n" + err)
 
     def test_untracked_module_beside_scanner_is_not_imported(self):
-        # The scanner runs isolated (-I): an untracked json.py beside the tracked scanner copy
-        # is not imported in its place. Both layouts (tools/ and scripts/) carry the copy.
+        # An untracked json.py beside the tracked scanner copy is never imported: the scanner
+        # runs from HEAD's blob in a temp file, not beside the worktree copy (-I itself is
+        # pinned by the logging-wrapper test). Both layouts (tools/ and scripts/) carry the copy.
         dirs = [os.path.join(self.sb.work, d) for d in ("tools", "scripts")]
         for d in dirs:
             os.makedirs(d, exist_ok=True)
@@ -1332,9 +1333,10 @@ def _sh():
 
 class PathBlock(unittest.TestCase):
     """The hook's PATH block run on its own in sh, with PATH set INSIDE sh: a native process
-    handing PATH to MSYS sh has '.' and '..' segments normalised away first, so a real push
-    on Windows never shows the block those spellings (2026-11-14 refute). Each case pins one
-    filter line: deleting it makes the case fail. Never skips."""
+    handing PATH to MSYS sh has the '.' and '..' segments of Windows-form entries normalised
+    away first, so a real push on Windows never shows the block those spellings (2026-11-14
+    refute). Each case pins one filter line: deleting it makes the case fail (the mount case
+    on Git for Windows only). Never skips."""
 
     def setUp(self):
         self.root = tempfile.mkdtemp(prefix="ora-pathblock-")
@@ -1381,8 +1383,10 @@ class PathBlock(unittest.TestCase):
         outside = os.path.join(self.root, "outside", "bin")
         os.makedirs(outside)
         dotted = _posix(os.path.join(self.root, "outside")) + "/../outside/bin"
-        rc, kept, err = self.run_block(dotted + ":/usr/bin", self.work)
+        dot = _posix(self.root) + "/./outside/bin"
+        rc, kept, err = self.run_block(dotted + ":" + dot + ":/usr/bin", self.work)
         self.assertNotIn(dotted, kept, err)
+        self.assertNotIn(dot, kept, err)
 
     def test_filesystem_root_as_cwd_drops_everything_under_it(self):
         # The parent walk must reach '/' (and 'C:/'): the line that turns '' or 'C:' into a
@@ -1395,8 +1399,10 @@ class PathBlock(unittest.TestCase):
     def test_mount_whose_real_folder_is_inside_the_worktree_is_dropped(self):
         # Git for Windows mounts /tmp on the user's temp folder: run from that folder's parent,
         # /tmp's MSYS path shares no prefix with the cwd and only its Windows spelling
-        # (pwd -W) shows it is inside. Elsewhere /tmp sits under the cwd (/) anyway.
-        cwd = os.path.dirname(os.path.realpath(tempfile.gettempdir()))
+        # (pwd -W) shows it is inside. Elsewhere (no pwd -W) the cwd is / and /tmp sits under it.
+        p = subprocess.run([_sh(), "-c", "cd /tmp && pwd -W"], capture_output=True, text=True)
+        win = p.stdout.strip() if p.returncode == 0 else ""
+        cwd = os.path.dirname(os.path.normpath(win)) if win else os.path.abspath(os.sep)
         rc, kept, err = self.run_block("/tmp:/usr/bin", cwd)
         self.assertNotIn("/tmp", kept, err)
 
