@@ -48,7 +48,7 @@ export const RUNTIME_ENV = {
   INTAKE_MODEL: 'optional',
   LATE_FEES_ENABLED: 'optional', // cron.ts posts late fees only when exactly 'true'; unset = off (the safe default) // intake.ts resolveModel() falls back to DEFAULT_MODEL
   CRIT_ALERT_RECIPIENTS: 'required', // cron.ts critical-date alerts 503 without it (kept out of the public repo)
-  GL_PERIOD_LOCK_EMAILS: 'deferred', // B8 ledger: period lock fails closed (403) until set; needed at first month-end close
+  GL_PERIOD_LOCK_EMAILS: 'required', // B8 ledger: period lock fails closed (403) without it; set before the first month-end close
 }
 
 /**
@@ -60,7 +60,6 @@ export const DEFERRED_UNTIL = {
   STRIPE_SECRET_KEY: 'tenant payments (pre-launch)',
   STRIPE_WEBHOOK_SECRET: 'tenant payments (pre-launch)',
   VITE_STRIPE_PUBLISHABLE_KEY: 'tenant payments (pre-launch)',
-  GL_PERIOD_LOCK_EMAILS: 'the first GL month-end close; until set, nobody can lock a period',
 }
 
 // Bindings are configured in wrangler.toml, not as env vars, so the Pages
