@@ -55,9 +55,9 @@ fi
 HOOK_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
 REL=scripts/prepush_confidential_scan.py
-# The worktree file itself never runs: an untracked, edited or stat-cache-hidden copy there could
-# stand in for the scanner. When HEAD tracks the scan, its committed blob is extracted to a temp
-# file and run; otherwise (or on any failure) the copy beside the hook runs.
+# When HEAD tracks the scan, its committed blob is extracted to a temp file and run, so an
+# untracked, edited or stat-cache-hidden worktree copy at $REL never stands in for it. Otherwise
+# (or on any failure) the copy beside the hook runs.
 SCAN="$HOOK_DIR/ora_prepush_confidential_scan.py"
 TMPSCAN=
 trap '[ -n "$TMPSCAN" ] && rm -f "$TMPSCAN"' EXIT

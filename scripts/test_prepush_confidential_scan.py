@@ -87,10 +87,16 @@ class Sandbox:
             os.chmod(os.path.join(tools, "hooks", "pre-push"), 0o755)
             shutil.copyfile(SCAN, os.path.join(tools, "prepush_confidential_scan.py"))
             self.git(self.work, "config", "core.hooksPath", os.path.join(tools, "hooks"))
+            self.rel = "tools/prepush_confidential_scan.py"         # the shim's REL
+            self.fallback = os.path.join(tools, "prepush_confidential_scan.py")
         else:
             p = subprocess.run([sys.executable, INSTALLER, "--repo", self.work],
                                capture_output=True, text=True, env=self.env)
             assert p.returncode == 0, p.stderr
+            self.rel = "scripts/prepush_confidential_scan.py"
+            hooks = self.out("rev-parse", "--git-path", "hooks")
+            self.fallback = os.path.join(self.work, hooks, "ora_prepush_confidential_scan.py")
+        assert os.path.isfile(self.fallback), self.fallback
 
     def write_roster(self, roster):
         path = os.path.join(self.home, ".claude", "hooks", "confidential-terms.json")
@@ -1152,6 +1158,8 @@ class PlantedInterpreter(unittest.TestCase):
     def test_dotdot_entry_back_into_worktree_is_dropped(self):
         sub = os.path.join(self.sb.work, "sub")
         self.plant(sub)
+        # hk/ must exist, or `cd` fails on it and this never reaches the '..' filter.
+        os.makedirs(os.path.join(self.sb.root, "hk"), exist_ok=True)
         self.push_term_with_path(os.path.join(self.sb.root, "hk", "..", "work", "sub"))
 
     def test_link_into_worktree_subdirectory_is_dropped(self):
@@ -1188,6 +1196,56 @@ class PlantedInterpreter(unittest.TestCase):
                 f.write("import sys\nopen(%r, 'w').close()\nsys.exit(0)\n" % self.marker)
         self.set_path()
         self.sb.commit("deal.md", "memo for %s\n" % TERM)
+        self.assertBlockedByRealScan(*self.sb.push())
+
+    def wrap_python(self):
+        """A python/python3/py OUTSIDE the worktree, first on PATH, that logs how the hook calls
+        it and then runs the real interpreter. Proves -I and the Windows no-cwd-search variable
+        reach every interpreter call (2026-11-14 refute: deleting either passed every test).
+        The inherited variable is removed so only the hook's own export can supply it."""
+        wrap = os.path.join(self.sb.root, "wrap")
+        os.makedirs(wrap)
+        log = os.path.join(self.sb.root, "wrap.log")
+        real = os.path.abspath(sys.executable).replace("\\", "/")
+        body = ('#!/bin/sh\n'
+                'printf \'%s|%s|%s\\n\' "${NoDefaultCurrentDirectoryInExePath-}" "$1" "$2" >> \'@LOG@\'\n'
+                'exec \'@REAL@\' "$@"\n').replace("@LOG@", log.replace("\\", "/")).replace("@REAL@", real)
+        for n in ("python", "python3", "py"):
+            path = os.path.join(wrap, n)
+            with open(path, "w", newline="\n") as f:
+                f.write(body)
+            os.chmod(path, 0o755)
+        for k in [k for k in self.sb.env if k.upper() == "NODEFAULTCURRENTDIRECTORYINEXEPATH"]:
+            del self.sb.env[k]
+        self.set_path(wrap)
+        return log
+
+    def test_every_interpreter_call_is_isolated_with_cwd_exe_search_off(self):
+        log = self.wrap_python()
+        self.sb.commit("deal.md", "memo for %s\n" % TERM)
+        self.assertBlockedByRealScan(*self.sb.push())
+        with open(log, encoding="utf-8") as f:
+            calls = [line.rstrip("\n").split("|") for line in f if line.strip()]
+        scans = [c for c in calls if c[2] != "-c"]
+        self.assertTrue(scans, "the scanner never ran through the logged interpreter: %r" % calls)
+        for c in calls:
+            self.assertEqual(c[0], "1", "NoDefaultCurrentDirectoryInExePath not exported: %r" % c)
+            self.assertEqual(c[1], "-I", "interpreter called without -I: %r" % c)
+
+    def test_committed_scanner_runs_even_when_fallback_copy_is_noop(self):
+        # HEAD tracks the real scanner, so its blob must be what runs, not the copy beside the
+        # hook (2026-11-14 refute: dropping SCAN=$TMPSCAN passed every test).
+        dst = os.path.join(self.sb.work, *self.sb.rel.split("/"))
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copyfile(SCAN, dst)
+        self.sb.git(self.sb.work, "add", "-A")
+        self.sb.git(self.sb.work, "commit", "-q", "--no-verify", "-m", "add scanner")
+        self.sb.commit("deal.md", "memo for %s\n" % TERM)
+        self.plant_noop_scanner(os.path.dirname(self.sb.fallback))
+        if os.path.basename(self.sb.fallback) != "prepush_confidential_scan.py":
+            os.replace(os.path.join(os.path.dirname(self.sb.fallback), "prepush_confidential_scan.py"),
+                       self.sb.fallback)
+        self.set_path()
         self.assertBlockedByRealScan(*self.sb.push())
 
     def plant_noop_scanner(self, d):
