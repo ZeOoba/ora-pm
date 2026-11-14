@@ -87,10 +87,16 @@ class Sandbox:
             os.chmod(os.path.join(tools, "hooks", "pre-push"), 0o755)
             shutil.copyfile(SCAN, os.path.join(tools, "prepush_confidential_scan.py"))
             self.git(self.work, "config", "core.hooksPath", os.path.join(tools, "hooks"))
+            self.rel = "tools/prepush_confidential_scan.py"         # the shim's REL
+            self.fallback = os.path.join(tools, "prepush_confidential_scan.py")
         else:
             p = subprocess.run([sys.executable, INSTALLER, "--repo", self.work],
                                capture_output=True, text=True, env=self.env)
             assert p.returncode == 0, p.stderr
+            self.rel = "scripts/prepush_confidential_scan.py"
+            hooks = self.out("rev-parse", "--git-path", "hooks")
+            self.fallback = os.path.join(self.work, hooks, "ora_prepush_confidential_scan.py")
+        assert os.path.isfile(self.fallback), self.fallback
 
     def write_roster(self, roster):
         path = os.path.join(self.home, ".claude", "hooks", "confidential-terms.json")
@@ -1069,6 +1075,342 @@ class Units(unittest.TestCase):
             else:
                 os.environ["ORA_PREPUSH_REQUIRE_REFS"] = old
         self.assertEqual(scan.main(stdin_text="", roster=p), 0)
+
+
+class PlantedInterpreter(unittest.TestCase):
+    """A python planted in the worktree must never stand in for the real one. git runs the
+    hook in the worktree root, so '.', an empty or relative entry, the worktree itself (or a
+    case variant), a '..' entry or a junction/symlink INTO a worktree subdirectory on PATH
+    would otherwise resolve the bare name `python` to the planted copy (refute run
+    wf_39e200e8-462). Every case is a real `git push`."""
+
+    def setUp(self):
+        self.sb = Sandbox(ROSTER)
+        self.marker = os.path.join(self.sb.root, "planted-python-ran")
+        self.real = os.path.dirname(os.path.abspath(sys.executable))
+
+    def tearDown(self):
+        self.sb.close()
+
+    def plant(self, d):
+        os.makedirs(d, exist_ok=True)
+        body = "#!/bin/sh\necho ran >> '%s'\nexit 0\n" % self.marker.replace("\\", "/")
+        for n in ("python", "python3", "py"):
+            path = os.path.join(d, n)
+            with open(path, "w", newline="\n") as f:
+                f.write(body)
+            os.chmod(path, 0o755)
+
+    def links_into(self, target):
+        """Directory links outside the worktree that point at `target` inside it. Windows: a
+        junction (no privilege needed; must succeed) plus a symlink when the account may make
+        one. Elsewhere: a symlink (must succeed). Never skips: CI's skip baseline is zero."""
+        links = []
+        if os.name == "nt":
+            j = os.path.join(self.sb.root, "jlink")
+            p = subprocess.run(["cmd", "/c", "mklink", "/J", j, target], capture_output=True)
+            self.assertEqual(p.returncode, 0, "mklink /J failed: %r" % p.stderr)
+            links.append(j)
+            s = os.path.join(self.sb.root, "slink")
+            try:
+                os.symlink(target, s, target_is_directory=True)
+                links.append(s)
+            except OSError:
+                pass        # WinError 1314 without Developer Mode; the junction covers it
+        else:
+            s = os.path.join(self.sb.root, "slink")
+            os.symlink(target, s, target_is_directory=True)
+            links.append(s)
+        return links
+
+    def set_path(self, *front):
+        self.sb.env["PATH"] = os.pathsep.join(list(front) + [self.real, os.environ.get("PATH", "")])
+
+    def assertBlockedByRealScan(self, rc, err):
+        self.assertNotEqual(rc, 0, "push should have been blocked:\n" + err)
+        self.assertIn("pre-push BLOCKED", err)
+        self.assertFalse(os.path.exists(self.marker), "the planted python ran:\n" + err)
+        self.assertNotIn(TERM.lower(), err.lower(), "a roster term was echoed")
+
+    def push_term_with_path(self, *front):
+        self.set_path(*front)
+        self.sb.commit("deal.md", "memo for %s\n" % TERM)
+        self.assertBlockedByRealScan(*self.sb.push())
+
+    def test_dot_first_on_path_runs_real_scanner(self):
+        self.plant(self.sb.work)
+        self.push_term_with_path(".")
+
+    def test_empty_and_relative_entries_are_dropped(self):
+        self.plant(self.sb.work)
+        self.plant(os.path.join(self.sb.work, "bin"))
+        self.push_term_with_path("", "bin", "./bin")
+
+    def test_absolute_worktree_entry_and_case_variant_are_dropped(self):
+        sub = os.path.join(self.sb.work, "sub")
+        self.plant(self.sb.work)
+        self.plant(sub)
+        front = [self.sb.work, sub]
+        if os.name == "nt":
+            front = [self.sb.work.upper(), sub.swapcase()] + front
+        self.push_term_with_path(*front)
+
+    def test_dotdot_entry_back_into_worktree_is_dropped(self):
+        sub = os.path.join(self.sb.work, "sub")
+        self.plant(sub)
+        # End-to-end only: MSYS normalises '..' away before the hook sees it on Windows, and
+        # the physical-path check drops the entry anyway. PathBlock pins the '..' filter.
+        os.makedirs(os.path.join(self.sb.root, "hk"), exist_ok=True)
+        self.push_term_with_path(os.path.join(self.sb.root, "hk", "..", "work", "sub"))
+
+    def test_link_into_worktree_subdirectory_is_dropped(self):
+        # A junction/symlink OUTSIDE the worktree whose target is INSIDE it has no string
+        # prefix equal to the worktree; only its physical path gives it away.
+        sub = os.path.join(self.sb.work, "deep", "bin")
+        self.plant(sub)
+        links = self.links_into(sub)
+        for i, link in enumerate(links):
+            self.set_path(link)         # each link alone is the first hit for `python`
+            self.sb.commit("deal-%d.md" % i, "memo for %s\n" % TERM)
+            self.assertBlockedByRealScan(*self.sb.push())
+
+    def test_planted_python_does_not_block_a_clean_push(self):
+        # The real interpreter later on PATH is still found once the planted entries are gone.
+        self.plant(self.sb.work)
+        self.set_path(".")
+        self.sb.commit("notes.md", "nothing confidential here\n")
+        rc, err = self.sb.push()
+        self.assertEqual(rc, 0, "push should have been allowed:\n" + err)
+        self.assertFalse(os.path.exists(self.marker), "the planted python ran:\n" + err)
+
+    def test_untracked_module_beside_scanner_is_not_imported(self):
+        # The scanner runs isolated (-I): an untracked json.py beside the tracked scanner copy
+        # is not imported in its place. Both layouts (tools/ and scripts/) carry the copy.
+        dirs = [os.path.join(self.sb.work, d) for d in ("tools", "scripts")]
+        for d in dirs:
+            os.makedirs(d, exist_ok=True)
+            shutil.copyfile(SCAN, os.path.join(d, "prepush_confidential_scan.py"))
+        self.sb.git(self.sb.work, "add", "-A")
+        self.sb.git(self.sb.work, "commit", "-q", "--no-verify", "-m", "add scanner")
+        for d in dirs:
+            with open(os.path.join(d, "json.py"), "w", newline="\n") as f:
+                f.write("import sys\nopen(%r, 'w').close()\nsys.exit(0)\n" % self.marker)
+        self.set_path()
+        self.sb.commit("deal.md", "memo for %s\n" % TERM)
+        self.assertBlockedByRealScan(*self.sb.push())
+
+    def wrap_python(self):
+        """A python/python3/py OUTSIDE the worktree, first on PATH, that logs how the hook calls
+        it and then runs the real interpreter. Proves -I and the Windows no-cwd-search variable
+        reach every interpreter call (2026-11-14 refute: deleting either passed every test).
+        The inherited variable is removed so only the hook's own export can supply it."""
+        wrap = os.path.join(self.sb.root, "wrap")
+        os.makedirs(wrap)
+        log = os.path.join(self.sb.root, "wrap.log")
+        real = os.path.abspath(sys.executable).replace("\\", "/")
+        body = ('#!/bin/sh\n'
+                'printf \'%s|%s|%s\\n\' "${NoDefaultCurrentDirectoryInExePath-}" "$1" "$2" >> \'@LOG@\'\n'
+                'exec \'@REAL@\' "$@"\n').replace("@LOG@", log.replace("\\", "/")).replace("@REAL@", real)
+        for n in ("python", "python3", "py"):
+            path = os.path.join(wrap, n)
+            with open(path, "w", newline="\n") as f:
+                f.write(body)
+            os.chmod(path, 0o755)
+        for k in [k for k in self.sb.env if k.upper() == "NODEFAULTCURRENTDIRECTORYINEXEPATH"]:
+            del self.sb.env[k]
+        self.set_path(wrap)
+        return log
+
+    def test_every_interpreter_call_is_isolated_with_cwd_exe_search_off(self):
+        log = self.wrap_python()
+        self.sb.commit("deal.md", "memo for %s\n" % TERM)
+        self.assertBlockedByRealScan(*self.sb.push())
+        with open(log, encoding="utf-8") as f:
+            calls = [line.rstrip("\n").split("|") for line in f if line.strip()]
+        scans = [c for c in calls if c[2] != "-c"]
+        self.assertTrue(scans, "the scanner never ran through the logged interpreter: %r" % calls)
+        for c in calls:
+            self.assertEqual(c[0], "1", "NoDefaultCurrentDirectoryInExePath not exported: %r" % c)
+            self.assertEqual(c[1], "-I", "interpreter called without -I: %r" % c)
+
+    def test_committed_scanner_runs_even_when_fallback_copy_is_noop(self):
+        # HEAD tracks the real scanner, so its blob must be what runs, not the copy beside the
+        # hook (2026-11-14 refute: dropping SCAN=$TMPSCAN passed every test).
+        dst = os.path.join(self.sb.work, *self.sb.rel.split("/"))
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copyfile(SCAN, dst)
+        self.sb.git(self.sb.work, "add", "-A")
+        self.sb.git(self.sb.work, "commit", "-q", "--no-verify", "-m", "add scanner")
+        self.sb.commit("deal.md", "memo for %s\n" % TERM)
+        self.plant_noop_scanner(os.path.dirname(self.sb.fallback))
+        if os.path.basename(self.sb.fallback) != "prepush_confidential_scan.py":
+            os.replace(os.path.join(os.path.dirname(self.sb.fallback), "prepush_confidential_scan.py"),
+                       self.sb.fallback)
+        self.set_path()
+        self.assertBlockedByRealScan(*self.sb.push())
+
+    def plant_noop_scanner(self, d):
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "prepush_confidential_scan.py"), "w", newline="\n") as f:
+            f.write("import sys\nopen(%r, 'w').close()\nsys.exit(0)\n" % self.marker)
+
+    def test_untracked_scanner_in_worktree_is_not_used(self):
+        # The tree does not track the scanner; a planted copy must not replace the hook's own.
+        for d in ("tools", "scripts"):
+            self.plant_noop_scanner(os.path.join(self.sb.work, d))
+        self.set_path()
+        self.sb.commit("deal.md", "memo for %s\n" % TERM)   # commit -A would track them: undo
+        self.sb.git(self.sb.work, "rm", "-q", "--cached", "-r", "tools", "scripts")
+        self.sb.git(self.sb.work, "commit", "-q", "--no-verify", "--amend", "--no-edit")
+        self.assertBlockedByRealScan(*self.sb.push())
+
+    def test_edited_tracked_scanner_in_worktree_is_not_used(self):
+        dirs = [os.path.join(self.sb.work, d) for d in ("tools", "scripts")]
+        for d in dirs:
+            os.makedirs(d, exist_ok=True)
+            shutil.copyfile(SCAN, os.path.join(d, "prepush_confidential_scan.py"))
+        self.sb.git(self.sb.work, "add", "-A")
+        self.sb.git(self.sb.work, "commit", "-q", "--no-verify", "-m", "add scanner")
+        self.sb.commit("deal.md", "memo for %s\n" % TERM)
+        # Age the files and refresh the index so it is not "racily clean" (a checkout made
+        # earlier than the index write): then only size+mtime decide in git's stat cache.
+        for d in dirs:
+            path = os.path.join(d, "prepush_confidential_scan.py")
+            old = os.stat(path).st_mtime_ns - 3600 * 10 ** 9
+            os.utime(path, ns=(old, old))
+        self.sb.git(self.sb.work, "update-index", "-q", "--really-refresh")
+        for d in dirs:
+            # Same size and mtime restored: git's stat cache would call this file unmodified
+            # (2026-11-13 refute round 2), so the hook must not trust `git diff` either.
+            path = os.path.join(d, "prepush_confidential_scan.py")
+            st = os.stat(path)
+            payload = ("import sys\nopen(%r, 'w').close()\nsys.exit(0)\n" % self.marker).encode()
+            payload += b"#" * (st.st_size - len(payload))
+            with open(path, "wb") as f:
+                f.write(payload)
+            os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+        self.set_path()
+        self.assertBlockedByRealScan(*self.sb.push())
+
+    def test_edited_tracked_scanner_in_worktree_is_not_used_size_change(self):
+        dirs = [os.path.join(self.sb.work, d) for d in ("tools", "scripts")]
+        for d in dirs:
+            os.makedirs(d, exist_ok=True)
+            shutil.copyfile(SCAN, os.path.join(d, "prepush_confidential_scan.py"))
+        self.sb.git(self.sb.work, "add", "-A")
+        self.sb.git(self.sb.work, "commit", "-q", "--no-verify", "-m", "add scanner")
+        self.sb.commit("deal.md", "memo for %s\n" % TERM)
+        for d in dirs:
+            self.plant_noop_scanner(d)          # uncommitted edit after the commit
+        self.set_path()
+        self.assertBlockedByRealScan(*self.sb.push())
+
+
+HOOK_FILE = HOOKSPATH_SHIM if os.path.isfile(HOOKSPATH_SHIM) else os.path.join(HERE, "git-hooks", "pre-push")
+
+
+def _posix(p):
+    """POSIX spelling sh understands without any conversion (C:\\x\\y -> /c/x/y on Windows)."""
+    p = os.path.abspath(p)
+    if os.name == "nt":
+        drive, rest = os.path.splitdrive(p)
+        return "/" + drive[0].lower() + rest.replace("\\", "/")
+    return p
+
+
+def _sh():
+    """The sh git runs hooks with: on PATH, else beside Git for Windows' exec path."""
+    found = shutil.which("sh")
+    if not found:
+        exec_path = subprocess.run(["git", "--exec-path"], capture_output=True,
+                                   text=True).stdout.strip()
+        cand = os.path.join(exec_path, "..", "..", "..", "usr", "bin", "sh.exe")
+        found = os.path.normpath(cand) if os.path.isfile(cand) else None
+    assert found, "no sh found to run the hook's PATH block"
+    return found
+
+
+class PathBlock(unittest.TestCase):
+    """The hook's PATH block run on its own in sh, with PATH set INSIDE sh: a native process
+    handing PATH to MSYS sh has '.' and '..' segments normalised away first, so a real push
+    on Windows never shows the block those spellings (2026-11-14 refute). Each case pins one
+    filter line: deleting it makes the case fail. Never skips."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="ora-pathblock-")
+        self.work = os.path.join(self.root, "work")
+        os.makedirs(os.path.join(self.work, "bin"))
+        with open(HOOK_FILE, encoding="utf-8") as f:
+            lines = f.read().replace("\r\n", "\n").split("\n")
+        start = lines.index("NoDefaultCurrentDirectoryInExePath=1")
+        end = next(i for i, ln in enumerate(lines) if "no usable PATH entry outside the worktree" in ln)
+        self.assertEqual(lines[end + 1:end + 3], ["  exit 1", "fi"])
+        self.block = "\n".join(lines[start:end + 3])
+
+    def tearDown(self):
+        _rmtree(self.root)
+
+    def run_block(self, path_value, cwd, cdpath=""):
+        """Returns (rc, [entries kept], stderr). PATH and CDPATH come from a file read with the
+        `read` built-in, so nothing outside sh rewrites them."""
+        vals = os.path.join(self.root, "vals")
+        with open(vals, "w", newline="\n") as f:
+            f.write(path_value + "\n" + cdpath + "\n")
+        script = os.path.join(self.root, "block.sh")
+        with open(script, "w", newline="\n") as f:
+            f.write('{ IFS= read -r PATH; IFS= read -r CDPATH; } < "$1"\n'
+                    '[ -n "$CDPATH" ] && export CDPATH || unset CDPATH\n'
+                    + self.block + '\nprintf "%s\\n" "$PATH"\n')
+        env = dict(os.environ)
+        env.pop("CDPATH", None)
+        p = subprocess.run([_sh(), script, vals.replace("\\", "/")], cwd=cwd, env=env,
+                           capture_output=True, text=True)
+        out = p.stdout.strip().splitlines()
+        kept = out[-1].split(":") if p.returncode == 0 and out else []
+        return p.returncode, kept, p.stderr
+
+    def test_relative_entry_is_dropped_even_when_cdpath_resolves_it_outside(self):
+        # With CDPATH set, `cd -P bin` lands OUTSIDE the worktree, but exec lookup of the
+        # relative entry `bin` still means <worktree>/bin: only the absolute-only filter stops it.
+        outside = os.path.join(self.root, "outside")
+        os.makedirs(os.path.join(outside, "bin"))
+        rc, kept, err = self.run_block("bin:/usr/bin", self.work, cdpath=_posix(outside))
+        self.assertNotIn("bin", kept, err)
+
+    def test_dotdot_entry_is_dropped_even_when_it_resolves_outside(self):
+        outside = os.path.join(self.root, "outside", "bin")
+        os.makedirs(outside)
+        dotted = _posix(os.path.join(self.root, "outside")) + "/../outside/bin"
+        rc, kept, err = self.run_block(dotted + ":/usr/bin", self.work)
+        self.assertNotIn(dotted, kept, err)
+
+    def test_filesystem_root_as_cwd_drops_everything_under_it(self):
+        # The parent walk must reach '/' (and 'C:/'): the line that turns '' or 'C:' into a
+        # root is what lets a worktree at a filesystem root contain anything.
+        root = os.path.abspath(os.sep)
+        rc, kept, err = self.run_block("/usr/bin:/tmp", root)
+        self.assertNotIn("/usr/bin", kept, err)
+        self.assertNotIn("/tmp", kept, err)
+
+    def test_mount_whose_real_folder_is_inside_the_worktree_is_dropped(self):
+        # Git for Windows mounts /tmp on the user's temp folder: run from that folder's parent,
+        # /tmp's MSYS path shares no prefix with the cwd and only its Windows spelling
+        # (pwd -W) shows it is inside. Elsewhere /tmp sits under the cwd (/) anyway.
+        cwd = os.path.dirname(os.path.realpath(tempfile.gettempdir()))
+        rc, kept, err = self.run_block("/tmp:/usr/bin", cwd)
+        self.assertNotIn("/tmp", kept, err)
+
+    def test_no_usable_entry_blocks(self):
+        rc, kept, err = self.run_block("bin:.:" + _posix(self.work), self.work)
+        self.assertEqual(rc, 1, err)
+        self.assertIn("no usable PATH entry", err)
+
+    def test_an_ordinary_outside_entry_is_kept(self):
+        outside = os.path.join(self.root, "outside", "bin")
+        os.makedirs(outside)
+        rc, kept, err = self.run_block(_posix(outside) + ":/usr/bin", self.work)
+        self.assertEqual(rc, 0, err)
+        self.assertIn(_posix(outside), kept)
 
 
 if __name__ == "__main__":

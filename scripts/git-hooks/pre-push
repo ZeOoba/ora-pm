@@ -1,14 +1,73 @@
 #!/bin/sh
 # ORA-PREPUSH-CONFIDENTIAL-SCAN -- git pre-push shim (Hard Invariant 3, fail-closed).
 # Tracked source: scripts/git-hooks/pre-push. Installed by: python scripts/install_prepush_hook.py
-# Runs the tracked confidentiality scan from the tree being pushed; if that tree predates
+# Runs the confidentiality scan as committed at HEAD (never the worktree file); if HEAD predates
 # the scan, falls back to the copy the installer placed beside this hook. No scan script or no usable
-# Python 3 => the push is BLOCKED. git's ref lines reach the scan on stdin unchanged.
+# Python 3.8+ => the push is BLOCKED. git's ref lines reach the scan on stdin unchanged.
 # Emergency bypass (only after verifying the push is clean): git push --no-verify
+# PATH is rebuilt FIRST, with shell built-ins only, before this hook runs any external command
+# or picks an interpreter (refute runs wf_39e200e8-462 and the 2026-11-13 shim refute; same
+# pattern as the oxford-command-center pre-push wrapper). git runs this hook in the worktree
+# root. Kept: absolute entries with no '.' or '..' segment whose PHYSICAL path (cd -P, so a
+# junction or symlink is followed) is neither the current directory nor inside it, checked up to
+# and including '/'. Parents are compared with test -ef, so case variants match; on MSYS the
+# Windows spelling (pwd -W) is walked too, so a mount such as /usr/bin whose real folder sits
+# inside the worktree is caught. Dropped: empty, '.', relative, '..' and unenterable entries. So
+# nothing untracked in the worktree (a planted python, sh, git) can stand in for the real tool.
+# Windows: children (python, git) must not search the current directory either.
+NoDefaultCurrentDirectoryInExePath=1
+export NoDefaultCurrentDirectoryInExePath
+here=$(pwd -P) || exit 1
+_inside() {
+  _p=$1
+  while [ -n "$_p" ]; do
+    [ "$_p" -ef "$here" ] && return 0
+    _next=${_p%/*}
+    case "$_next" in ''|*:) _next=$_next/ ;; esac
+    [ "$_next" = "$_p" ] && return 1
+    _p=$_next
+  done
+  return 1
+}
+_safe=
+_ifs=$IFS
+IFS=:
+set -f
+for _d in $PATH; do
+  case "$_d" in /*) ;; *) continue ;; esac
+  case "$_d/" in */./*|*/../*) continue ;; esac
+  cd -P -- "$_d" 2>/dev/null || continue
+  _phys=$PWD
+  _win=$(pwd -W 2>/dev/null) || _win=
+  cd -P -- "$here" || exit 1
+  _inside "$_phys" && continue
+  [ -n "$_win" ] && _inside "$_win" && continue
+  _safe=${_safe:+$_safe:}$_d
+done
+set +f
+IFS=$_ifs
+PATH=$_safe
+export PATH
+if [ -z "$PATH" ]; then
+  echo "pre-push BLOCKED (fail-closed): no usable PATH entry outside the worktree." >&2
+  exit 1
+fi
 HOOK_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
-SCAN="$ROOT/scripts/prepush_confidential_scan.py"
-[ -n "$ROOT" ] && [ -f "$SCAN" ] || SCAN="$HOOK_DIR/ora_prepush_confidential_scan.py"
+REL=scripts/prepush_confidential_scan.py
+# When HEAD tracks the scan, its committed blob is extracted to a temp file and run, so an
+# untracked, edited or stat-cache-hidden worktree copy at $REL never stands in for it. Otherwise
+# (or on any failure) the copy beside the hook runs.
+SCAN="$HOOK_DIR/ora_prepush_confidential_scan.py"
+TMPSCAN=
+trap '[ -n "$TMPSCAN" ] && rm -f "$TMPSCAN"' EXIT
+trap '[ -n "$TMPSCAN" ] && rm -f "$TMPSCAN"; exit 1' INT TERM HUP
+if [ -n "$ROOT" ] && git --no-replace-objects -C "$ROOT" cat-file -e "HEAD:$REL" 2>/dev/null &&
+   TMPSCAN=$(mktemp "${TMPDIR:-/tmp}/ora-prepush-scan.XXXXXX" 2>/dev/null); then
+  if git --no-replace-objects -C "$ROOT" cat-file blob "HEAD:$REL" > "$TMPSCAN" 2>/dev/null && [ -s "$TMPSCAN" ]; then
+    SCAN=$TMPSCAN
+  fi
+fi
 if [ ! -f "$SCAN" ]; then
   echo "pre-push BLOCKED (fail-closed): confidentiality scan script not found." >&2
   exit 1
@@ -16,8 +75,8 @@ fi
 PY=
 for c in python python3 py; do
   if command -v "$c" >/dev/null 2>&1 &&
-     "$c" -c "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)" </dev/null >/dev/null 2>&1; then
-    PY=$c
+     "$c" -I -c "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)" </dev/null >/dev/null 2>&1; then
+    PY=$(command -v "$c")
     break
   fi
 done
@@ -25,4 +84,7 @@ if [ -z "$PY" ]; then
   echo "pre-push BLOCKED (fail-closed): no Python 3.8+ found to run the confidentiality scan." >&2
   exit 1
 fi
-exec "$PY" "$SCAN" "$@"
+# -I: isolated, so PYTHON* variables and an untracked module beside the scan cannot load.
+# Not exec: the EXIT trap removes the temp copy. git's ref lines still reach it on stdin.
+"$PY" -I "$SCAN" "$@"
+exit $?
