@@ -10,9 +10,11 @@
 into the clone's shared hooks directory (`git rev-parse --git-path hooks`, which every linked
 worktree also uses):
   pre-push                         <- scripts/git-hooks/pre-push (the shim)
-  ora_prepush_confidential_scan.py <- scripts/prepush_confidential_scan.py (fallback copy,
-                                      used when the tree being pushed predates the scan)
-Re-run after the tracked scan changes; `--check` reports drift.
+  ora_prepush_confidential_scan.py <- scripts/prepush_confidential_scan.py (PINNED copy)
+The hook ALWAYS runs the pinned copy first (missing copy, no Python 3.8+ or nonzero => blocked),
+then the scan committed at HEAD, which can only add blocks. The hook and the pinned copy live in
+the untracked hooks directory, so no commit (not even one swapping the tracked scan for a no-op)
+can turn the gate off. Re-run after the tracked scan or shim changes; `--check` reports drift.
 """
 import argparse
 import os

@@ -1,9 +1,11 @@
 #!/bin/sh
 # ORA-PREPUSH-CONFIDENTIAL-SCAN -- git pre-push shim (Hard Invariant 3, fail-closed).
 # Tracked source: scripts/git-hooks/pre-push. Installed by: python scripts/install_prepush_hook.py
-# Runs the confidentiality scan as committed at HEAD (never the worktree file); if HEAD predates
-# the scan, falls back to the copy the installer placed beside this hook. No scan script or no usable
-# Python 3.8+ => the push is BLOCKED. git's ref lines reach the scan on stdin unchanged.
+# 1) ALWAYS runs the PINNED scan copy the installer placed beside this hook (untracked, so no
+#    commit can change it). Missing copy, no usable Python 3.8+, or any nonzero => BLOCKED.
+# 2) Then, when HEAD tracks the scan, runs HEAD's committed blob (never the worktree file) on the
+#    same input. It can only ADD blocks: a no-op committed at HEAD cannot turn the gate off.
+# git's ref lines are buffered once and reach both stages on stdin unchanged.
 # Emergency bypass (only after verifying the push is clean): git push --no-verify
 # PATH is rebuilt FIRST, with shell built-ins only, before this hook runs any external command
 # or picks an interpreter (refute runs wf_39e200e8-462 and the 2026-11-13 shim refute; same
@@ -53,26 +55,11 @@ if [ -z "$PATH" ]; then
   echo "pre-push BLOCKED (fail-closed): no usable PATH entry outside the worktree." >&2
   exit 1
 fi
-HOOK_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
-REL=scripts/prepush_confidential_scan.py
-# When HEAD tracks the scan, its committed blob is extracted to a temp file and run, so an
-# untracked, edited or stat-cache-hidden worktree copy at $REL never stands in for it. Otherwise
-# (or on any failure) the copy beside the hook runs.
-SCAN="$HOOK_DIR/ora_prepush_confidential_scan.py"
-TMPSCAN=
-trap '[ -n "$TMPSCAN" ] && rm -f "$TMPSCAN"' EXIT
-trap '[ -n "$TMPSCAN" ] && rm -f "$TMPSCAN"; exit 1' INT TERM HUP
-if [ -n "$ROOT" ] && git --no-replace-objects -C "$ROOT" cat-file -e "HEAD:$REL" 2>/dev/null &&
-   TMPSCAN=$(mktemp "${TMPDIR:-/tmp}/ora-prepush-scan.XXXXXX" 2>/dev/null); then
-  if git --no-replace-objects -C "$ROOT" cat-file blob "HEAD:$REL" > "$TMPSCAN" 2>/dev/null && [ -s "$TMPSCAN" ]; then
-    SCAN=$TMPSCAN
-  fi
-fi
-if [ ! -f "$SCAN" ]; then
-  echo "pre-push BLOCKED (fail-closed): confidentiality scan script not found." >&2
-  exit 1
-fi
+block() { echo "pre-push BLOCKED (fail-closed): $1" >&2; exit 1; }
+HOOK_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || block "cannot resolve the hooks directory."
+PINNED="$HOOK_DIR/ora_prepush_confidential_scan.py"
+[ -f "$PINNED" ] ||
+  block "pinned scanner $PINNED is missing; re-run python scripts/install_prepush_hook.py."
 PY=
 for c in python python3 py; do
   if command -v "$c" >/dev/null 2>&1 &&
@@ -81,11 +68,26 @@ for c in python python3 py; do
     break
   fi
 done
-if [ -z "$PY" ]; then
-  echo "pre-push BLOCKED (fail-closed): no Python 3.8+ found to run the confidentiality scan." >&2
-  exit 1
-fi
+[ -n "$PY" ] || block "no Python 3.8+ found to run the confidentiality scan."
+REFS=
+TMPSCAN=
+trap 'rm -f -- ${REFS:+"$REFS"} ${TMPSCAN:+"$TMPSCAN"}' EXIT
+trap 'rm -f -- ${REFS:+"$REFS"} ${TMPSCAN:+"$TMPSCAN"}; exit 1' INT TERM HUP
+REFS=$(mktemp "${TMPDIR:-/tmp}/ora-prepush-refs.XXXXXX") || block "cannot create a temp file for the ref lines."
+cat > "$REFS" || block "cannot buffer the ref lines from git."
 # -I: isolated, so PYTHON* variables and an untracked module beside the scan cannot load.
-# Not exec: the EXIT trap removes the temp copy. git's ref lines still reach it on stdin.
-"$PY" -I "$SCAN" "$@"
-exit $?
+# Not exec: the EXIT trap removes the temp files.
+"$PY" -I "$PINNED" "$@" < "$REFS" || exit 1
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+REL=scripts/prepush_confidential_scan.py
+# HEAD's committed blob is extracted to a temp file, so an untracked, edited or stat-cache-hidden
+# worktree copy at $REL never stands in for it. Any failure once HEAD tracks it => BLOCKED.
+if [ -n "$ROOT" ] && git --no-replace-objects -C "$ROOT" cat-file -e "HEAD:$REL" 2>/dev/null; then
+  TMPSCAN=$(mktemp "${TMPDIR:-/tmp}/ora-prepush-scan.XXXXXX") ||
+    block "cannot create a temp file for HEAD's scanner."
+  git --no-replace-objects -C "$ROOT" cat-file blob "HEAD:$REL" > "$TMPSCAN" 2>/dev/null && [ -s "$TMPSCAN" ] ||
+    block "cannot extract HEAD's $REL (or it is empty)."
+  "$PY" -I "$TMPSCAN" "$@" < "$REFS"
+  exit $?
+fi
+exit 0

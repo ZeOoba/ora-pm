@@ -1235,25 +1235,27 @@ class PlantedInterpreter(unittest.TestCase):
             self.assertEqual(c[1], "-I", "interpreter called without -I: %r" % c)
 
     def test_committed_scanner_runs_even_when_fallback_copy_is_noop(self):
-        # HEAD tracks the real scanner, so its blob must be what runs, not the copy beside the
-        # hook (2026-11-14 refute: dropping SCAN=$TMPSCAN passed every test).
+        # HEAD tracks the real scanner, so its blob must run, not only the copy beside the hook
+        # (2026-11-14 refute: dropping SCAN=$TMPSCAN passed every test). In the default-hooks
+        # layout that copy is a pinned FIRST stage and runs too, so it must leave no marker.
         dst = os.path.join(self.sb.work, *self.sb.rel.split("/"))
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         shutil.copyfile(SCAN, dst)
         self.sb.git(self.sb.work, "add", "-A")
         self.sb.git(self.sb.work, "commit", "-q", "--no-verify", "-m", "add scanner")
         self.sb.commit("deal.md", "memo for %s\n" % TERM)
-        self.plant_noop_scanner(os.path.dirname(self.sb.fallback))
+        self.plant_noop_scanner(os.path.dirname(self.sb.fallback), marker=False)
         if os.path.basename(self.sb.fallback) != "prepush_confidential_scan.py":
             os.replace(os.path.join(os.path.dirname(self.sb.fallback), "prepush_confidential_scan.py"),
                        self.sb.fallback)
         self.set_path()
         self.assertBlockedByRealScan(*self.sb.push())
 
-    def plant_noop_scanner(self, d):
+    def plant_noop_scanner(self, d, marker=True):
         os.makedirs(d, exist_ok=True)
+        touch = "open(%r, 'w').close()\n" % self.marker if marker else ""
         with open(os.path.join(d, "prepush_confidential_scan.py"), "w", newline="\n") as f:
-            f.write("import sys\nopen(%r, 'w').close()\nsys.exit(0)\n" % self.marker)
+            f.write("import sys\n" + touch + "sys.exit(0)\n")
 
     def test_untracked_scanner_in_worktree_is_not_used(self):
         # The tree does not track the scanner; a planted copy must not replace the hook's own.
