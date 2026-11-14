@@ -1158,7 +1158,8 @@ class PlantedInterpreter(unittest.TestCase):
     def test_dotdot_entry_back_into_worktree_is_dropped(self):
         sub = os.path.join(self.sb.work, "sub")
         self.plant(sub)
-        # hk/ must exist, or `cd` fails on it and this never reaches the '..' filter.
+        # End-to-end only: MSYS normalises '..' away before the hook sees it on Windows, and
+        # the physical-path check drops the entry anyway. PathBlock pins the '..' filter.
         os.makedirs(os.path.join(self.sb.root, "hk"), exist_ok=True)
         self.push_term_with_path(os.path.join(self.sb.root, "hk", "..", "work", "sub"))
 
@@ -1382,6 +1383,14 @@ class PathBlock(unittest.TestCase):
         dotted = _posix(os.path.join(self.root, "outside")) + "/../outside/bin"
         rc, kept, err = self.run_block(dotted + ":/usr/bin", self.work)
         self.assertNotIn(dotted, kept, err)
+
+    def test_filesystem_root_as_cwd_drops_everything_under_it(self):
+        # The parent walk must reach '/' (and 'C:/'): the line that turns '' or 'C:' into a
+        # root is what lets a worktree at a filesystem root contain anything.
+        root = os.path.abspath(os.sep)
+        rc, kept, err = self.run_block("/usr/bin:/tmp", root)
+        self.assertNotIn("/usr/bin", kept, err)
+        self.assertNotIn("/tmp", kept, err)
 
     def test_mount_whose_real_folder_is_inside_the_worktree_is_dropped(self):
         # Git for Windows mounts /tmp on the user's temp folder: run from that folder's parent,
