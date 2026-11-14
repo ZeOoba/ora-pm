@@ -1305,5 +1305,104 @@ class PlantedInterpreter(unittest.TestCase):
         self.assertBlockedByRealScan(*self.sb.push())
 
 
+HOOK_FILE = HOOKSPATH_SHIM if os.path.isfile(HOOKSPATH_SHIM) else os.path.join(HERE, "git-hooks", "pre-push")
+
+
+def _posix(p):
+    """POSIX spelling sh understands without any conversion (C:\\x\\y -> /c/x/y on Windows)."""
+    p = os.path.abspath(p)
+    if os.name == "nt":
+        drive, rest = os.path.splitdrive(p)
+        return "/" + drive[0].lower() + rest.replace("\\", "/")
+    return p
+
+
+def _sh():
+    """The sh git runs hooks with: on PATH, else beside Git for Windows' exec path."""
+    found = shutil.which("sh")
+    if not found:
+        exec_path = subprocess.run(["git", "--exec-path"], capture_output=True,
+                                   text=True).stdout.strip()
+        cand = os.path.join(exec_path, "..", "..", "..", "usr", "bin", "sh.exe")
+        found = os.path.normpath(cand) if os.path.isfile(cand) else None
+    assert found, "no sh found to run the hook's PATH block"
+    return found
+
+
+class PathBlock(unittest.TestCase):
+    """The hook's PATH block run on its own in sh, with PATH set INSIDE sh: a native process
+    handing PATH to MSYS sh has '.' and '..' segments normalised away first, so a real push
+    on Windows never shows the block those spellings (2026-11-14 refute). Each case pins one
+    filter line: deleting it makes the case fail. Never skips."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="ora-pathblock-")
+        self.work = os.path.join(self.root, "work")
+        os.makedirs(os.path.join(self.work, "bin"))
+        with open(HOOK_FILE, encoding="utf-8") as f:
+            lines = f.read().replace("\r\n", "\n").split("\n")
+        start = lines.index("NoDefaultCurrentDirectoryInExePath=1")
+        end = next(i for i, ln in enumerate(lines) if "no usable PATH entry outside the worktree" in ln)
+        self.assertEqual(lines[end + 1:end + 3], ["  exit 1", "fi"])
+        self.block = "\n".join(lines[start:end + 3])
+
+    def tearDown(self):
+        _rmtree(self.root)
+
+    def run_block(self, path_value, cwd, cdpath=""):
+        """Returns (rc, [entries kept], stderr). PATH and CDPATH come from a file read with the
+        `read` built-in, so nothing outside sh rewrites them."""
+        vals = os.path.join(self.root, "vals")
+        with open(vals, "w", newline="\n") as f:
+            f.write(path_value + "\n" + cdpath + "\n")
+        script = os.path.join(self.root, "block.sh")
+        with open(script, "w", newline="\n") as f:
+            f.write('{ IFS= read -r PATH; IFS= read -r CDPATH; } < "$1"\n'
+                    '[ -n "$CDPATH" ] && export CDPATH || unset CDPATH\n'
+                    + self.block + '\nprintf "%s\\n" "$PATH"\n')
+        env = dict(os.environ)
+        env.pop("CDPATH", None)
+        p = subprocess.run([_sh(), script, vals.replace("\\", "/")], cwd=cwd, env=env,
+                           capture_output=True, text=True)
+        out = p.stdout.strip().splitlines()
+        kept = out[-1].split(":") if p.returncode == 0 and out else []
+        return p.returncode, kept, p.stderr
+
+    def test_relative_entry_is_dropped_even_when_cdpath_resolves_it_outside(self):
+        # With CDPATH set, `cd -P bin` lands OUTSIDE the worktree, but exec lookup of the
+        # relative entry `bin` still means <worktree>/bin: only the absolute-only filter stops it.
+        outside = os.path.join(self.root, "outside")
+        os.makedirs(os.path.join(outside, "bin"))
+        rc, kept, err = self.run_block("bin:/usr/bin", self.work, cdpath=_posix(outside))
+        self.assertNotIn("bin", kept, err)
+
+    def test_dotdot_entry_is_dropped_even_when_it_resolves_outside(self):
+        outside = os.path.join(self.root, "outside", "bin")
+        os.makedirs(outside)
+        dotted = _posix(os.path.join(self.root, "outside")) + "/../outside/bin"
+        rc, kept, err = self.run_block(dotted + ":/usr/bin", self.work)
+        self.assertNotIn(dotted, kept, err)
+
+    def test_mount_whose_real_folder_is_inside_the_worktree_is_dropped(self):
+        # Git for Windows mounts /tmp on the user's temp folder: run from that folder's parent,
+        # /tmp's MSYS path shares no prefix with the cwd and only its Windows spelling
+        # (pwd -W) shows it is inside. Elsewhere /tmp sits under the cwd (/) anyway.
+        cwd = os.path.dirname(os.path.realpath(tempfile.gettempdir()))
+        rc, kept, err = self.run_block("/tmp:/usr/bin", cwd)
+        self.assertNotIn("/tmp", kept, err)
+
+    def test_no_usable_entry_blocks(self):
+        rc, kept, err = self.run_block("bin:.:" + _posix(self.work), self.work)
+        self.assertEqual(rc, 1, err)
+        self.assertIn("no usable PATH entry", err)
+
+    def test_an_ordinary_outside_entry_is_kept(self):
+        outside = os.path.join(self.root, "outside", "bin")
+        os.makedirs(outside)
+        rc, kept, err = self.run_block(_posix(outside) + ":/usr/bin", self.work)
+        self.assertEqual(rc, 0, err)
+        self.assertIn(_posix(outside), kept)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
