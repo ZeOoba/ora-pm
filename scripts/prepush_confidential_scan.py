@@ -481,13 +481,37 @@ def _is_sha(s):
     return len(s) in (40, 64) and all(c in "0123456789abcdef" for c in s.lower())
 
 
+class MalformedPushRefs(Exception):
+    """A non-empty pre-push stdin line that is not '<ref> <sha> <ref> <sha>'."""
+
+
+def _git_lines(text):
+    """Lines of git output split on "\\n" ONLY (one trailing "\\r" dropped), empty ones
+    skipped. Never str.splitlines(): it also breaks on U+0085 / U+2028 / U+2029 / \\x0b /
+    \\x0c / \\x1c-\\x1e, and git allows the first three in ref names, so one ref line would
+    become fragments."""
+    for line in text.split("\n"):
+        if line.endswith("\r"):
+            line = line[:-1]
+        if line:
+            yield line
+
+
 def parse_pushrefs(text):
-    """Pre-push stdin lines: '<local_ref> <local_sha> <remote_ref> <remote_sha>'."""
+    """Pre-push stdin lines: '<local_ref> <local_sha> <remote_ref> <remote_sha>', separated by
+    single ASCII spaces. <local_ref> is the push source AS TYPED and may hold spaces
+    (`HEAD^{/fix typo}`, `HEAD@{1 minute ago}`); the other three fields cannot (a ref name
+    has no space, a sha is hex), so the line is split from the right. Never str.split(): it
+    also splits on U+00A0, U+3000, U+2000-U+200A, ..., which ref names may hold. RAISES
+    MalformedPushRefs on any non-empty line that does not parse (fail-closed: a dropped line
+    is an unscanned ref)."""
     refs = []
-    for line in text.splitlines():
-        parts = line.split()
-        if len(parts) == 4 and _is_sha(parts[1]) and _is_sha(parts[3]):
-            refs.append(tuple(parts))
+    for n, line in enumerate(_git_lines(text), 1):
+        parts = line.rsplit(" ", 3)
+        if len(parts) != 4 or not all(parts) or not _is_sha(parts[1]) \
+                or not _is_sha(parts[3]):
+            raise MalformedPushRefs("stdin ref line %d is not '<ref> <sha> <ref> <sha>'" % n)
+        refs.append(tuple(parts))
     return refs
 
 
@@ -519,9 +543,13 @@ def destination_bound(remote, url, cwd=None):
     if p.returncode != 0:
         return []
     advertised = []
-    for line in p.stdout.decode("utf-8", "surrogateescape").splitlines():
-        sha = line.split("\t", 1)[0].strip()
-        if _is_sha(sha) and sha not in advertised:
+    for line in _git_lines(p.stdout.decode("utf-8", "surrogateescape")):
+        # "<sha>\t<ref>". A ref NAME is destination-controlled text: any line that does not
+        # parse drops the whole bound (full history is scanned) rather than being skipped.
+        sha, tab, ref = line.partition("\t")
+        if not tab or not ref or not _is_sha(sha):
+            return []
+        if sha not in advertised:
             advertised.append(sha)
     if not advertised:
         return []
@@ -530,8 +558,8 @@ def destination_bound(remote, url, cwd=None):
     if q.returncode != 0:
         return []
     out = []
-    for line in q.stdout.decode("ascii", "replace").splitlines():
-        parts = line.split()
+    for line in _git_lines(q.stdout.decode("ascii", "replace")):
+        parts = line.split(" ")
         if len(parts) >= 2 and parts[1] == "commit" and _is_sha(parts[0]) \
                 and parts[0] not in out:
             out.append(parts[0])
@@ -917,7 +945,7 @@ def tag_chain_hits(local_sha, roster, cwd=None):
         for text in text_views(data):
             one.update(roster.scan(text))
         found.update(roster.blocking(one))
-        first = data.split(b"\n", 1)[0].decode("ascii", "replace").split()
+        first = data.split(b"\n", 1)[0].decode("ascii", "replace").split(" ")
         if len(first) != 2 or first[0] != "object" or not _is_sha(first[1]):
             raise Unscannable("unparseable tag object")
         sha = first[1]
@@ -1012,7 +1040,12 @@ def main(stdin_text=None, roster=None, cwd=None, remote=None, url=None):
         # Bytes, decoded as UTF-8: on Windows text-mode stdin is cp1252, which would mangle a
         # non-ASCII ref name past both the name check and the withholding of its label.
         stdin_text = sys.stdin.buffer.read().decode("utf-8", "surrogateescape")
-    pushrefs = parse_pushrefs(stdin_text)
+    try:
+        pushrefs = parse_pushrefs(stdin_text)
+    except MalformedPushRefs as e:  # the message names a line number, never its text
+        sys.stderr.write("pre-push BLOCKED (fail-closed): %s -- cannot tell which refs are "
+                         "being pushed.\n" % e)
+        return 1
     # git runs pre-push with EMPTY stdin on an up-to-date push, so zero refs cannot block
     # unconditionally; a caller that guarantees >= 1 ref opts in to the stricter rule.
     if not pushrefs and os.environ.get("ORA_PREPUSH_REQUIRE_REFS") == "1":
