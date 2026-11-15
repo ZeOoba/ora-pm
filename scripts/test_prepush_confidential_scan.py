@@ -585,6 +585,46 @@ class PushGate(unittest.TestCase):
         self.sb.git(self.sb.work, "push", "-q", "--no-verify", "origin", "HEAD:refs/heads/tmp")
         self.assertAllowed(*self.sb.push(":refs/heads/tmp"))
 
+    # --- ref names with Unicode line / space separators ----------------------------------
+    # git accepts these in ref names (check-ref-format rc=0). str.splitlines() breaks a line
+    # on U+0085 / U+2028 / U+2029 and str.split() on U+00A0 / U+3000 / ..., so a ref line
+    # holding one was once dropped as "not 4 fields" and the push went out unscanned.
+    SEPARATORS = ("\u0085", " ", " ", " ", "　", " ", " ")
+
+    def test_term_pushed_to_ref_with_unicode_separator_is_blocked(self):
+        self.sb.commit("notes.md", "memo %s\n" % TERM, msg="memo")
+        for ch in self.SEPARATORS:
+            with self.subTest(ch=repr(ch)):
+                self.assertBlocked(*self.sb.push("HEAD:refs/heads/f%sx" % ch))
+                self.assertBlocked(*self.sb.push("HEAD:refs/tags/t%sx" % ch))
+
+    def test_clean_push_to_ref_with_unicode_separator_is_allowed(self):
+        self.sb.commit("notes.md", "nothing confidential here\n")
+        for ch in self.SEPARATORS:
+            with self.subTest(ch=repr(ch)):
+                self.assertAllowed(*self.sb.push("HEAD:refs/heads/f%sx" % ch))
+
+    def test_push_source_expression_with_spaces(self):
+        # git puts the source expression on stdin verbatim; one with a space was once dropped
+        # (term-bearing push went out) and must neither leak nor over-block a clean push.
+        self.sb.commit("clean.md", "nothing confidential here\n", msg="fix typo")
+        self.assertAllowed(*self.sb.push("HEAD^{/fix typo}:refs/heads/clean"))
+        self.sb.commit("notes.md", "memo %s\n" % TERM, msg="memo line")
+        self.assertBlocked(*self.sb.push("HEAD^{/memo line}:refs/heads/x1"))
+
+    def test_remote_ref_name_cannot_smuggle_a_sha_into_the_bound(self):
+        # ls-remote prints "<sha>\t<ref>". A destination ref whose NAME holds U+2028 + the sha
+        # of the local commit carrying the term must not make that commit look advertised.
+        w = self.sb.work
+        self.sb.git(w, "checkout", "-q", "-b", "feature")
+        self.sb.commit("notes.md", "memo %s\n" % TERM, msg="memo")
+        bad = self.sb.out("rev-parse", "HEAD")
+        seed = self.sb.out("rev-parse", "main")
+        for ch in ("\u0085", " ", " "):
+            self.sb.git(self.sb.remote, "update-ref", "refs/heads/x%s%s" % (ch, bad), seed)
+        self.assertNotIn(bad, scan.destination_bound("origin", self.sb.remote, w))
+        self.assertBlocked(*self.sb.push("HEAD:refs/heads/feature"))
+
     # --- roster states -------------------------------------------------------------------
     def test_missing_roster_blocks(self):
         os.remove(os.path.join(self.sb.home, ".claude", "hooks", "confidential-terms.json"))
@@ -1075,6 +1115,50 @@ class Units(unittest.TestCase):
             else:
                 os.environ["ORA_PREPUSH_REQUIRE_REFS"] = old
         self.assertEqual(scan.main(stdin_text="", roster=p), 0)
+
+    def test_parse_pushrefs_splits_on_newline_and_ascii_space_only(self):
+        a, b = "a" * 40, "b" * 64
+        for ch in ("\u0085", " ", " ", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e",
+                   " ", "　", " ", " ", "\x1f"):
+            ref = "refs/heads/f%sx" % ch
+            line = "%s %s %s %s" % (ref, a, ref, b)
+            self.assertEqual(scan.parse_pushrefs(line + "\n"), [(ref, a, ref, b)], repr(ch))
+        two = "r %s r %s\r\n\nq %s q %s" % (a, b, b, a)       # CRLF, blank line, no final \n
+        self.assertEqual(scan.parse_pushrefs(two), [("r", a, "r", b), ("q", b, "q", a)])
+        self.assertEqual(scan.parse_pushrefs(""), [])
+        self.assertEqual(scan.parse_pushrefs("\n\r\n"), [])
+        # git copies the push SOURCE as typed: it may hold spaces; the other fields cannot
+        for src in ("HEAD^{/fix typo}", "HEAD@{1 minute ago}", "a  b", "x %s y" % a):
+            self.assertEqual(scan.parse_pushrefs("%s %s r %s\n" % (src, a, b)),
+                             [(src, a, "r", b)], src)
+
+    def test_parse_pushrefs_rejects_every_malformed_non_empty_line(self):
+        a, z = "a" * 40, "0" * 40
+        good = "r %s r %s\n" % (a, z)
+        for bad in (" ", "\t", "r %s r" % a, "r %s r %s x" % (a, z), "r %s  %s" % (a, z),
+                    "r %s r  %s" % (a, z), "r\t%s r %s" % (a, z), "r %s r %s" % ("g" * 40, z),
+                    "r %s r %s" % (a, "a" * 39), "r %s r %s " % (a, z), "r %s r %s\r\r" % (a, z),
+                    " %s r %s" % (a, z), "r %s r %s" % (a, z), "r %s r %s" % (a, z),
+                    "\u0085"):
+            with self.subTest(bad=repr(bad)):
+                with self.assertRaises(scan.MalformedPushRefs):
+                    scan.parse_pushrefs(good + bad + "\n" + good)
+
+    def test_malformed_stdin_line_blocks_without_echoing_it(self):
+        p = self._roster(ROSTER)
+        for rost in (p, self._roster({"d": {"active": False, "always": [TERM]}})):
+            for line in ("refs/heads/%s %s\n" % (TERM, "a" * 40), "garbage\n",
+                         "x %s x %s %s\n" % ("a" * 40, "0" * 40, TERM)):
+                err = io.StringIO()
+                old, sys.stderr = sys.stderr, err
+                try:
+                    rc = scan.main(stdin_text=line, roster=rost)
+                finally:
+                    sys.stderr = old
+                self.assertEqual(rc, 1, repr(line))
+                self.assertIn("pre-push BLOCKED", err.getvalue())
+                self.assertNotIn(TERM.lower(), err.getvalue().lower())
+                self.assertNotIn("garbage", err.getvalue())
 
 
 class PlantedInterpreter(unittest.TestCase):
