@@ -378,6 +378,13 @@ describe('quote verification', () => {
     const r = run(w)
     expect(r.flags.some((f) => f.path === 'rent_type' && /Quote not found/.test(f.message))).toBe(true)
   })
+  it.each([
+    ['security_deposit', '10000'], ['pro_rata_share', '0.25'], ['expense_stop_psf_annual', '4.5'], ['base_year', '2026'],
+  ])('REFUTE C1b: %s never accepts a stitched quote', (field, value) => {
+    const w = good()
+    w.facts.push(fact(field, value, 2, 'Base Rent shall increase ... Tenant shall pay estimated CAM'))
+    expect(run(w).flags.some((f) => f.path === field && /Quote not found/.test(f.message))).toBe(true)
+  })
   it('REFUTE C2b: an accepted shortened quote always raises a warning', () => {
     const w = good()
     ;(w as Obj).provisions = [{ category: 'renewal_option', summary: 'x', notice_deadline: '', exercise_window_start: '', exercise_window_end: '', ...src(3, 'Tenant shall have one option ... for five (5) years upon written notice') }]

@@ -89,7 +89,7 @@ export function AbstractReview({ result, filename, pdfBase64, unitId, unitLabel,
       const seq = editSeq.current
       const r = await withOneRetry(() => api.post<AbstractResponse>('/intake/lease/recheck', { abstract: a, pdfBase64 }))
       // Edited meanwhile: keep the newer edits (still dirty) and let the next re-check cover them.
-      if (editSeq.current !== seq) return null
+      if (editSeq.current !== seq) { setError('You edited the abstract while it was being re-checked; re-check again to include your edits.'); return null }
       setA(r.abstract); setFlags(r.flags); setConfs(r.confirmations); setProblems(r.billing_problems ?? [])
       if (r.warnings.length > 0) setError(r.warnings.join(' '))
       // Keys are content: a tick survives only for a confirmation that is byte-identical to what was checked.
