@@ -57,7 +57,8 @@ export const PG_MEM_SKIP: RegExp[] = [
   /^CREATE (OR REPLACE )?FUNCTION\b/i,
   // 0034: functions are never created on pg-mem (above), so dropping one is equally untestable here; the
   // real-Postgres suite (tests/db/activate-pending-leases-0034.test.ts) runs it.
-  /^DROP FUNCTION IF EXISTS\b/i,
+  // Anchored on the closing paren so a DROP ... CASCADE (which also drops dependents) is never skipped silently.
+  /^DROP FUNCTION IF EXISTS\b[^;]*\)$/i,
   /^(GRANT|REVOKE)\b/i,
   /^DO\s+\$\$/i,
   // 0020: btree_gist backs the EXCLUDE USING gist overlap guards (themselves inside a DO block above);
