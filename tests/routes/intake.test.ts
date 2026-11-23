@@ -480,6 +480,29 @@ describe("mode: 'abstract' (lease abstraction v2)", () => {
     } finally { env.CONFIDENTIAL_TERMS = prev }
   })
 
+  it('REFUTE plain-JSON R-C5: model prose outside the abstract is scrubbed like every other model string', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'Note: this is the Zeta portfolio lease.\n' + JSON.stringify(modelJson()) }] }),
+    }))
+    const res = await post(await buildTextPdf(LEASE_TEXT))
+    expect(res.status).toBe(200)
+    const raw = await res.text()
+    expect(raw.toLowerCase()).not.toContain('zeta')
+    expect(raw).toContain('withheld by the confidentiality guard')
+  })
+
+  it('REFUTE plain-JSON R-C5 round 3: a denylist term across the old 300-character cut is still withheld', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'x'.repeat(296) + ' Zeta portfolio note.\n' + JSON.stringify(modelJson()) }] }),
+    }))
+    const res = await post(await buildTextPdf(LEASE_TEXT))
+    const raw = (await res.text()).toLowerCase()
+    expect(raw).not.toContain('zet')
+    expect(raw).toContain('withheld by the confidentiality guard')
+  })
+
   it('rejects an unknown mode before any egress', async () => {
     const fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock)
     const res = await post(await buildTextPdf(LEASE_TEXT), { mode: 'full' })
@@ -501,14 +524,14 @@ describe("mode: 'abstract' (lease abstraction v2)", () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('egress is scanned text with structured outputs (no forced tool_choice, no PDF), and returns abstract + flags', async () => {
+  it('egress is scanned text with the schema in the prompt (no grammar, no forced tool_choice, no PDF), and returns abstract + flags', async () => {
     const fetchMock = abstractFetch(modelJson()); vi.stubGlobal('fetch', fetchMock)
     const pdf = await buildTextPdf(LEASE_TEXT)
     const res = await post(pdf)
     expect(res.status).toBe(200)
     const { raw } = sentBody(fetchMock)
     const sent = JSON.parse(raw) as { output_config?: { format?: { type?: string } }; tool_choice?: unknown; messages: Array<{ content: Array<{ type: string }> }> }
-    expect(sent.output_config?.format?.type).toBe('json_schema')
+    expect(sent.output_config?.format).toBeUndefined() // schema travels in the prompt; no grammar compiled
     expect(sent.tool_choice).toBeUndefined()
     expect(sent.messages[0].content.every((b) => b.type === 'text')).toBe(true)
     expect(raw).not.toContain(toBase64(pdf).slice(0, 40))

@@ -123,6 +123,14 @@ const INSTRUCTIONS = [
   '- provisions: tenant rights and special rules (options, ROFR/ROFO, termination, exclusives, use, signage, parking, assignment, insurance requirements, maintenance split, HVAC, holdover, guaranty, relocation). summary is one plain sentence. notice_deadline, exercise_window_start and exercise_window_end are YYYY-MM-DD, or "" when the lease does not let you determine them.',
 ].join('\n')
 
+/** INSTRUCTIONS plus the wire schema as text (no structured outputs; see buildAbstractRequest). */
+const SYSTEM_PROMPT = [
+  INSTRUCTIONS,
+  '',
+  'Output: return only one JSON object and nothing else (no prose, no code fence). It must match this JSON schema exactly: every key present, no extra keys, dates as YYYY-MM-DD strings, field and category names spelled exactly as listed in their descriptions.',
+  JSON.stringify(ABSTRACT_SCHEMA),
+].join('\n')
+
 /**
  * Convert the WIRE form (sentinels, fact list) into the internal shape coerceAbstract validates.
  * Sentinels: 0 → null for optional numbers; "" → null for optional dates; first escalation / late fee.
@@ -154,7 +162,7 @@ function provisionCategory(v: unknown, warnings: string[]): unknown {
   const n = normalizeName(v.replace(/\(s\)/gi, '')).replace(/[/&]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '')
   const c = CATEGORY_ALIASES[n] ?? n
   if ((PROVISION_CATEGORIES as readonly string[]).includes(c)) return c
-  warnings.push(`A provision category "${v.slice(0, 40)}" is not recognised; it was filed as "other".`)
+  warnings.push(`A provision category "${v}" is not recognised; it was filed as "other".`)
   return 'other'
 }
 
@@ -227,8 +235,13 @@ export function buildAbstractRequest(pages: readonly string[], model: string) {
   return {
     model,
     max_tokens: ABSTRACT_MAX_TOKENS,
-    output_config: { effort: 'high', format: { type: 'json_schema', schema: ABSTRACT_SCHEMA } },
-    system: INSTRUCTIONS,
+    // NO structured outputs (live runs 2026-11-23, twice): the API refused this schema with 400 "The compiled
+    // grammar is too large", even after dates and the large enums became plain strings. The schema travels
+    // as text in the system prompt instead; nothing is trusted from the shape: wireToShape + zod, the
+    // quote/page checks, money re-derivation, cross-checks, human confirmation and the unreadable-item
+    // blocks validate every value, and text that is not one JSON object fails closed (bad_json).
+    output_config: { effort: 'high' },
+    system: SYSTEM_PROMPT,
     messages: [{ role: 'user', content: [{ type: 'text', text: body }] }],
   }
 }
@@ -287,7 +300,7 @@ function unreadableBillingItems(shaped: unknown): UnreadableItem[] {
     items.forEach((item, index) => {
       if ((zs as z.ZodTypeAny).safeParse(item).success) return
       const o = item && typeof item === 'object' ? (item as Record<string, unknown>) : {}
-      out.push({ list, index, page: Number.isInteger(o.page) ? (o.page as number) : null, quote: typeof o.quote === 'string' ? o.quote.slice(0, 200) : null })
+      out.push({ list, index, page: Number.isInteger(o.page) ? (o.page as number) : null, quote: typeof o.quote === 'string' ? o.quote : null })
     })
   }
   return out
@@ -442,11 +455,69 @@ export function parseAbstractResponse(json: unknown): unknown {
   if (res.stop_reason === 'max_tokens') throw new ExtractionStopped('max_tokens')
   const text = (res.content ?? []).filter((b) => b.type === 'text').map((b) => b.text ?? '').join('')
   if (!text.trim()) throw new ExtractionStopped('no_output')
-  try {
-    return JSON.parse(text)
-  } catch {
-    throw new ExtractionStopped('bad_json')
+  const obj = extractJsonObject(text)
+  if (obj === null) throw new ExtractionStopped('bad_json')
+  // No grammar enforces the top-level shape any more (REFUTE plain-JSON C1/C2): a misnamed, missing, null,
+  // non-list or duplicated list would silently empty that list and lose every billing item in it, so the
+  // shape is checked here and any violation fails closed like unparseable output.
+  if (!hasWireShape(obj) || hasDuplicateTopLevelKey(text)) throw new ExtractionStopped('bad_json')
+  // Prose outside the object can be the model saying the abstract is partial; surface it (REFUTE C4).
+  const outside = text.replace(JSON_SPAN_RE, '').replace(/```(json)?/gi, '').trim()
+  // Stored whole: the route scrubs warnings for confidential terms FIRST and only then shortens them, so a
+  // term cannot slip through as a fragment cut at the boundary (REFUTE plain-JSON R-C5 round 3).
+  if (outside) proseOutside.set(obj, outside)
+  return obj
+}
+
+/** The seven top-level lists the wire schema requires, each present and an array, nothing else. */
+export const WIRE_LISTS = ['facts', 'rent_schedule', 'escalations', 'concessions', 'recurring_charges', 'late_fees', 'provisions'] as const
+
+export function hasWireShape(o: Record<string, unknown>): boolean {
+  const keys = Object.keys(o)
+  return keys.length === WIRE_LISTS.length && WIRE_LISTS.every((k) => Object.hasOwn(o, k) && Array.isArray(o[k]))
+}
+
+/** JSON.parse keeps the LAST of duplicate keys, so `"concessions": []` repeated after the real list would
+ *  empty it. Scans the JSON span string by string (each match consumes one whole JSON string literal, escapes
+ *  included, so the scan never starts inside a string), DECODES every string followed by `:` (a key) — so
+ *  `"concessions"` counts as concessions (REFUTE plain-JSON R-C2b) — and fails closed when any wire
+ *  list name is a key more than once. No item key is a list name, so nested objects cannot collide. */
+export function hasDuplicateTopLevelKey(text: string): boolean {
+  const a = text.indexOf('{')
+  const b = text.lastIndexOf('}')
+  if (a < 0 || b <= a) return false
+  const span = text.slice(a, b + 1)
+  const counts = new Map<string, number>()
+  for (const m of span.matchAll(/"((?:[^"\\]|\\.)*)"(\s*:)?/g)) {
+    if (!m[2]) continue // a string value, not a key
+    let key: string
+    try { key = JSON.parse(`"${m[1]}"`) as string } catch { return true } // undecodable key: fail closed
+    if ((WIRE_LISTS as readonly string[]).includes(key)) counts.set(key, (counts.get(key) ?? 0) + 1)
   }
+  return [...counts.values()].some((n) => n > 1)
+}
+
+const JSON_SPAN_RE = /\{[\s\S]*\}/
+/** Text the model wrote outside the JSON object, keyed by the parsed object (read once by finalizeAbstract). */
+const proseOutside = new WeakMap<object, string>()
+
+/** The single JSON object in a text reply: the whole text, else the span from the first '{' to the last '}'
+ *  (tolerates a ```json fence or a sentence around it). Anything that does not parse to a plain object is
+ *  null, so the caller fails closed. */
+export function extractJsonObject(text: string): Record<string, unknown> | null {
+  const tryParse = (t: string): Record<string, unknown> | null => {
+    try {
+      const v = JSON.parse(t) as unknown
+      return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null
+    } catch {
+      return null
+    }
+  }
+  const whole = tryParse(text.trim())
+  if (whole) return whole
+  const a = text.indexOf('{')
+  const b = text.lastIndexOf('}')
+  return a >= 0 && b > a ? tryParse(text.slice(a, b + 1)) : null
 }
 
 // ── citation verification ─────────────────────────────────────────────────────
@@ -1041,6 +1112,8 @@ export function crossCheck(a: LeaseAbstract): AbstractFlag[] {
 /** Coerce + verify + cross-check a parsed model output against the pages it was extracted from. Pure. */
 export function finalizeAbstract(raw: unknown, pages: readonly string[]): AbstractResult {
   const wireWarnings: string[] = []
+  const prose = raw && typeof raw === 'object' ? proseOutside.get(raw) : undefined
+  if (prose) wireWarnings.push(`The extraction added a note outside the abstract; check the lease for anything it left out: "${prose}"`)
   const shaped = wireToShape(raw, wireWarnings)
   const { abstract, warnings: coerceWarnings } = coerceAbstract(shaped)
   abstract.unreadable = unreadableBillingItems(shaped)
@@ -1050,7 +1123,7 @@ export function finalizeAbstract(raw: unknown, pages: readonly string[]): Abstra
     const sentEsc = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>).escalations : undefined
     if (Array.isArray(sentEsc) && ((sentEsc.length > 0 && abstract.escalation === null) || sentEsc.length > 1)) {
       const o = sentEsc[0] && typeof sentEsc[0] === 'object' ? (sentEsc[0] as Record<string, unknown>) : {}
-      abstract.unreadable.push({ list: 'escalation', index: 0, page: Number.isInteger(o.page) ? (o.page as number) : null, quote: typeof o.quote === 'string' ? o.quote.slice(0, 200) : null })
+      abstract.unreadable.push({ list: 'escalation', index: 0, page: Number.isInteger(o.page) ? (o.page as number) : null, quote: typeof o.quote === 'string' ? o.quote : null })
     }
   }
   const warnings = [...wireWarnings, ...coerceWarnings]
@@ -1122,7 +1195,7 @@ export function revalidateAbstract(raw: unknown, pages: readonly string[]): Abst
   const rawEsc = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>).escalation : undefined
   if (rawEsc && abstract.escalation === null && !abstract.unreadable.some((u) => u.list === 'escalation')) {
     const o = typeof rawEsc === 'object' ? (rawEsc as Record<string, unknown>) : {}
-    abstract.unreadable.push({ list: 'escalation', index: 0, page: Number.isInteger(o.page) ? (o.page as number) : null, quote: typeof o.quote === 'string' ? o.quote.slice(0, 200) : null })
+    abstract.unreadable.push({ list: 'escalation', index: 0, page: Number.isInteger(o.page) ? (o.page as number) : null, quote: typeof o.quote === 'string' ? o.quote : null })
   }
   // Never trust a computed figure from the client (REFUTE C1d): resolveAmounts re-derives each one.
   for (const r of abstract.rent_schedule) { r.base_rent_monthly = null; r.rent_psf_annual = null }

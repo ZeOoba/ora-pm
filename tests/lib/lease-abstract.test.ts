@@ -73,11 +73,15 @@ const mutate = (f: (raw: Wire) => void, pages = PAGES) => { const raw = good(); 
 const withPage = (i: number, from: string, to: string) => PAGES.map((p, k) => (k === i ? p.replace(from, to) : p))
 
 describe('buildAbstractRequest', () => {
-  it('sends scanned page text only, with structured outputs and no forced tool_choice', () => {
+  it('sends scanned page text only, the schema as prompt text (no structured outputs) and no forced tool_choice', () => {
     const req = buildAbstractRequest(PAGES, 'claude-opus-5') as Obj
     expect(req).not.toHaveProperty('tool_choice')
     expect(req).not.toHaveProperty('tools')
-    expect(req.output_config).toEqual({ effort: 'high', format: { type: 'json_schema', schema: ABSTRACT_SCHEMA } })
+    // Live run 2026-11-23: structured outputs refused the schema twice ("compiled grammar is too large"), so the
+    // schema is sent as text and every value is validated server-side; no grammar is compiled.
+    expect(req.output_config).toEqual({ effort: 'high' })
+    expect(String(req.system)).toContain(JSON.stringify(ABSTRACT_SCHEMA))
+    expect(String(req.system)).toMatch(/only one JSON object/i)
     const text = JSON.stringify(req.messages)
     expect(text).toContain('--- Page 2 of 4 ---')
     expect(text).not.toMatch(/"type":"document"|base64/)
@@ -215,8 +219,48 @@ describe('buildAbstractRequest', () => {
 })
 
 describe('parseAbstractResponse', () => {
+  // Minimal wire object with every required top-level list (REFUTE plain-JSON C1/C2).
+  const W = { facts: [], rent_schedule: [], escalations: [], concessions: [], recurring_charges: [], late_fees: [], provisions: [] }
+  const reply = (text: string) => ({ stop_reason: 'end_turn', content: [{ type: 'text', text }] })
+  const reason = (fn: () => unknown) => { try { fn() } catch (e) { return (e as ExtractionStopped).reason } return 'ok' }
+  it('tolerates a code fence or stray prose around the JSON object (no structured outputs)', () => {
+    expect(parseAbstractResponse(reply('```json\n' + JSON.stringify(W) + '\n```'))).toEqual(W)
+    const withBrace = { ...W, provisions: [{ category: 'other', summary: '}', notice_deadline: '', exercise_window_start: '', exercise_window_end: '', page: 1, quote: 'q', confidence: 1 }] }
+    expect(parseAbstractResponse(reply('Here is the abstract:\n' + JSON.stringify(withBrace) + '\nDone.'))).toEqual(withBrace)
+  })
+  it('still fails closed on text that is not one JSON object', () => {
+    expect(reason(() => parseAbstractResponse(reply('I could not read the lease.')))).toBe('bad_json')
+    expect(reason(() => parseAbstractResponse(reply('[1,2]')))).toBe('bad_json')
+  })
   it('parses the JSON text block', () => {
-    expect(parseAbstractResponse({ stop_reason: 'end_turn', content: [{ type: 'thinking' }, { type: 'text', text: '{"a":1}' }] })).toEqual({ a: 1 })
+    expect(parseAbstractResponse({ stop_reason: 'end_turn', content: [{ type: 'thinking' }, { type: 'text', text: JSON.stringify(W) }] })).toEqual(W)
+  })
+  it('REFUTE plain-JSON C2: a misnamed, missing, null or non-list top-level list fails closed', () => {
+    const { concessions: _c, ...missing } = W
+    for (const bad of [
+      { ...missing, concession: [] },          // misnamed
+      missing,                                  // missing
+      { ...W, concessions: null },             // null
+      { ...W, concessions: {} },               // object, not a list
+      { ...W, escalations: { kind: 'cpi' } },  // object, not a list
+      { ...W, notes: [] },                      // unknown extra key
+    ]) expect(reason(() => parseAbstractResponse(reply(JSON.stringify(bad))))).toBe('bad_json')
+  })
+  it('REFUTE plain-JSON C1: a duplicated top-level list key fails closed (JSON.parse keeps the last)', () => {
+    const real = JSON.stringify({ ...W, concessions: [{ charge_type: 'rent' }] })
+    const dup = real.slice(0, -1) + ',"concessions":[]}'
+    expect(reason(() => parseAbstractResponse(reply(dup)))).toBe('bad_json')
+    // R-C2b: a Unicode-escaped duplicate key decodes to the same name.
+    const escaped = real.slice(0, -1) + ',"\\u0063oncessions":[]}'
+    expect(reason(() => parseAbstractResponse(reply(escaped)))).toBe('bad_json')
+    // A key name inside a quoted string is not a key.
+    const quoted = { ...W, provisions: [{ category: 'other', summary: 'says "concessions": none', notice_deadline: '', exercise_window_start: '', exercise_window_end: '', page: 1, quote: 'q', confidence: 1 }] }
+    expect(reason(() => parseAbstractResponse(reply(JSON.stringify(quoted))))).toBe('ok')
+  })
+  it('REFUTE plain-JSON C4: prose outside the object becomes a warning on the abstract', () => {
+    const parsed = parseAbstractResponse(reply('Pages 5-7 were illegible, so I omitted the concessions there.\n' + JSON.stringify(W)))
+    const r = finalizeAbstract(parsed, ['page one'])
+    expect(r.warnings.some((w) => /Pages 5-7 were illegible/.test(w))).toBe(true)
   })
   it.each([
     [{ stop_reason: 'refusal', content: [] }, 'refusal'],
