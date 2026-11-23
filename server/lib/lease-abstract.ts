@@ -546,8 +546,19 @@ export const MAX_ELIDED_SPAN = 600
  * order starting on the cited page, and the whole run spans at most MAX_ELIDED_SPAN characters.
  */
 export function quoteOnPage(pages: readonly string[], page: number, quote: string, opts: { allowElision?: boolean } = {}): boolean {
+  return quoteMatch(pages, page, quote, opts) !== false
+}
+
+/** How a quote matched: 'exact', 'elided' (only when allowed, and only after the exact match failed, so a
+ *  verbatim quote with dot leaders still matches exactly), or false. */
+export function quoteMatch(pages: readonly string[], page: number, quote: string, opts: { allowElision?: boolean } = {}): 'exact' | 'elided' | false {
   if (!Number.isInteger(page) || page < 1 || page > pages.length) return false
-  if (opts.allowElision && /\.\.\.|…/.test(quote)) return elidedQuoteOnPage(pages, page, quote)
+  if (exactQuoteOnPage(pages, page, quote)) return 'exact'
+  if (opts.allowElision && /\.\.\.|…/.test(quote) && elidedQuoteOnPage(pages, page, quote)) return 'elided'
+  return false
+}
+
+function exactQuoteOnPage(pages: readonly string[], page: number, quote: string): boolean {
   const q = normalizeForMatch(quote)
   // REFUTE C3: a 3-character quote ("100", "net") matches almost any page and proves nothing.
   if (q.length < MIN_QUOTE_CHARS) return false
@@ -572,10 +583,12 @@ function elidedQuoteOnPage(pages: readonly string[], page: number, quote: string
   for (let start = text.indexOf(pieces[0]); start !== -1 && start < here.length; start = text.indexOf(pieces[0], start + 1)) {
     let at = start + pieces[0].length
     let ok = true
+    // Search only inside the window (REFUTE C2c: an unbounded indexOf per start was quadratic on long pages).
+    const windowEnd = start + MAX_ELIDED_SPAN
     for (const p of pieces.slice(1)) {
-      const i = text.indexOf(p, at)
-      if (i === -1 || i + p.length - start > MAX_ELIDED_SPAN) { ok = false; break }
-      at = i + p.length
+      const rel = text.slice(at, windowEnd).indexOf(p)
+      if (rel === -1) { ok = false; break }
+      at = at + rel + p.length
     }
     if (ok) return true
   }
@@ -587,6 +600,11 @@ function elidedQuoteOnPage(pages: readonly string[], page: number, quote: string
  * so the intake route's post-egress "withheld billing value" rule uses the same list (merge gate O-1).
  */
 export const BILLING_PATH = /^(rent_schedule|escalation|concessions|recurring_charges|commencement_date|rent_commencement_date|expiration_date|premises_rsf)\b/
+
+/** Paths whose quote must be one contiguous passage (no "..." elision): every billing value, plus the lease
+ *  terms the CAM true-up reads (REFUTE C1b). Kept separate from BILLING_PATH so block severity and the
+ *  withheld-billing-value rule are unchanged. */
+export const NO_ELISION_PATH = new RegExp(`${BILLING_PATH.source}|^(rent_type|security_deposit|pro_rata_share|expense_stop_psf_annual|base_year)$`)
 
 /** Every number written in a quote ("$1,250.00" → 1250; "10,000 RSF" → 10000). Commas stripped first. */
 export function numbersInQuote(quote: string): number[] {
@@ -904,7 +922,12 @@ function verifyCitations(a: LeaseAbstract, pages: readonly string[], flags: Abst
     }
     // Elided quotes ("...") are accepted only off the billing paths: a billing figure must be quoted as one
     // contiguous passage, so its period and amount cannot be stitched from separate sentences.
-    if (!quoteOnPage(pages, s.page, s.quote, { allowElision: !BILLING_PATH.test(path) })) {
+    const how = quoteMatch(pages, s.page, s.quote, { allowElision: !NO_ELISION_PATH.test(path) })
+    if (how === 'elided') {
+      // Accepted, but never silently: dropped words can change the meaning (REFUTE C2b, e.g. a dropped "not").
+      push('warn', path, 'This quote was shortened with "..."; check it reads the same as the lease.')
+    }
+    if (how === false) {
       s.confidence = 0
       push(BILLING_PATH.test(path) ? 'block' : 'warn', path, `Quote not found on cited page ${s.page}; verify this value against the lease.`)
       return false
@@ -1102,6 +1125,13 @@ export function crossCheck(a: LeaseAbstract): AbstractFlag[] {
   })
   a.provisions.forEach((pv, i) => {
     if ((pv.exercise_window_start === null) !== (pv.exercise_window_end === null)) block(`provisions[${i}]`, 'An exercise window needs both a start and an end date.')
+    // REFUTE C3b: an inverted window used to reach the database CHECK and fail as an opaque 500.
+    if (pv.exercise_window_start && pv.exercise_window_end && pv.exercise_window_end < pv.exercise_window_start) {
+      block(`provisions[${i}]`, `The exercise window closes (${pv.exercise_window_end}) before it opens (${pv.exercise_window_start}).`)
+    }
+    if (term && pv.notice_deadline && (pv.notice_deadline < term.start || pv.notice_deadline > term.end)) {
+      flags.push({ severity: 'warn', path: `provisions[${i}]`, message: `The notice deadline ${pv.notice_deadline} falls outside the lease term (${term.start} to ${term.end}); check it.` })
+    }
     if (pv.category === 'other' && pv.notice_deadline) flags.push({ severity: 'warn', path: `provisions[${i}]`, message: `This provision has a notice deadline (${pv.notice_deadline}) but no recognised category; it will be calendared as "other". Check whether it is a renewal, termination or other option.` })
   })
 

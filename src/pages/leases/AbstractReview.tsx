@@ -70,7 +70,11 @@ export function AbstractReview({ result, filename, pdfBase64, unitId, unitLabel,
   const blocks = flags.filter((f) => f.severity === 'block')
   const unconfirmed = confs.filter((c) => !checked.has(confirmationKey(c)))
 
+  // Counts edits so a re-check response never overwrites edits typed while it was in flight (REFUTE: the
+  // retry's 1.5 s delay widened that window).
+  const editSeq = useRef(0)
   function edit(next: (draft: LeaseAbstract) => void) {
+    editSeq.current++
     setA((prev) => { const d = structuredClone(prev); next(d); return d })
     setDirty(true)
   }
@@ -82,7 +86,10 @@ export function AbstractReview({ result, filename, pdfBase64, unitId, unitLabel,
     try {
       // One retry on a server or network error (live run 2026-11-23: the on-open re-check got a transient 503
       // right after a long extraction and left the confirmations locked). A 4xx is a real answer: no retry.
+      const seq = editSeq.current
       const r = await withOneRetry(() => api.post<AbstractResponse>('/intake/lease/recheck', { abstract: a, pdfBase64 }))
+      // Edited meanwhile: keep the newer edits (still dirty) and let the next re-check cover them.
+      if (editSeq.current !== seq) return null
       setA(r.abstract); setFlags(r.flags); setConfs(r.confirmations); setProblems(r.billing_problems ?? [])
       if (r.warnings.length > 0) setError(r.warnings.join(' '))
       // Keys are content: a tick survives only for a confirmation that is byte-identical to what was checked.

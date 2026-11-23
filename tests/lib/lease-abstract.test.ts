@@ -372,6 +372,34 @@ describe('quote verification', () => {
     expect(r.flags.some((f) => f.path === 'provisions[0]' && /Quote not found/.test(f.message))).toBe(false)
     expect(r.flags.some((f) => f.severity === 'block' && f.path === 'recurring_charges[0]' && /Quote not found/.test(f.message))).toBe(true)
   })
+  it('REFUTE C1b: CAM true-up inputs (rent type, deposit, share...) never accept a stitched quote', () => {
+    const w = good()
+    w.facts.push(fact('rent_type', 'nnn', 2, 'Base Rent shall increase ... Tenant shall pay estimated CAM'))
+    const r = run(w)
+    expect(r.flags.some((f) => f.path === 'rent_type' && /Quote not found/.test(f.message))).toBe(true)
+  })
+  it('REFUTE C2b: an accepted shortened quote always raises a warning', () => {
+    const w = good()
+    ;(w as Obj).provisions = [{ category: 'renewal_option', summary: 'x', notice_deadline: '', exercise_window_start: '', exercise_window_end: '', ...src(3, 'Tenant shall have one option ... for five (5) years upon written notice') }]
+    expect(run(w).flags.some((f) => f.severity === 'warn' && f.path === 'provisions[0]' && /shortened/.test(f.message))).toBe(true)
+  })
+  it('a verbatim quote with dot leaders still matches exactly when elision is allowed', () => {
+    const pages = ['Schedule of terms. Security Deposit.......$5,000.00 due at signing.']
+    expect(quoteOnPage(pages, 1, 'Security Deposit.......$5,000.00', { allowElision: true })).toBe(true)
+  })
+  it('REFUTE C2c: the elided matcher stays fast on a long repetitive page', () => {
+    const page = ['_'.repeat(200_000)]
+    const t0 = Date.now()
+    expect(quoteOnPage(page, 1, '____________ ... ___________x', { allowElision: true })).toBe(false)
+    expect(Date.now() - t0).toBeLessThan(2000)
+  })
+  it('REFUTE C3b: an inverted exercise window blocks; a notice deadline outside the term warns', () => {
+    const w = good()
+    ;(w as Obj).provisions = [{ category: 'renewal_option', summary: 'x', notice_deadline: '1999-01-01', exercise_window_start: '2028-06-30', exercise_window_end: '2027-01-01', ...src(3, 'one option to renew for five (5) years') }]
+    const r = run(w)
+    expect(r.flags.some((f) => f.severity === 'block' && f.path === 'provisions[0]' && /closes/.test(f.message))).toBe(true)
+    expect(r.flags.some((f) => f.severity === 'warn' && f.path === 'provisions[0]' && /outside the lease term/.test(f.message))).toBe(true)
+  })
   it('quotes of MIN_QUOTE_CHARS - 1 are rejected and of MIN_QUOTE_CHARS accepted', () => {
     expect(MIN_QUOTE_CHARS).toBe(12)
     expect(quoteOnPage(PAGES, 1, 'Premises: S')).toBe(false) // 11
