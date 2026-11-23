@@ -170,6 +170,23 @@ describe('buildAbstractRequest', () => {
     const third = revalidateAbstract(JSON.parse(JSON.stringify(again.abstract)), PAGES)
     expect(third.flags.some((f) => f.severity === 'block' && f.path === 'unreadable')).toBe(true)
   })
+  it('REFUTE grammar round 3 (probe5): a billing item that becomes invalid during review stays blocked', () => {
+    const w = good()
+    ;(w as Obj).concessions = [{ charge_type: 'rent', period_start: '2026-01-01', period_end: '2026-01-31', kind: 'pct', value_as_written: '50%', value_period: 'none', reason: 'Abatement', ...src(2, 'fifty percent (50%) abatement of Base Rent for January 2026') }]
+    const a = JSON.parse(JSON.stringify(run(w).abstract))
+    expect(a.unreadable).toEqual([])
+    // As the confidentiality scrub would: null model-written text fields.
+    a.concessions[0].reason = null
+    a.recurring_charges[0].description = null
+    a.escalation.kind = null
+    let cur = a
+    for (let k = 0; k < 3; k++) {
+      const again = revalidateAbstract(cur, PAGES)
+      const paths = again.flags.filter((f) => f.severity === 'block').map((f) => f.path)
+      expect(paths).toEqual(expect.arrayContaining(['concessions[0]', 'recurring_charges[0]', 'escalation']))
+      cur = JSON.parse(JSON.stringify(again.abstract))
+    }
+  })
   it('extra category aliases and (s)', () => {
     const w = good()
     const prov = (category: string) => ({ category, summary: 'x', notice_deadline: '', exercise_window_start: '', exercise_window_end: '', ...src(3, 'one option to renew for five (5) years') })

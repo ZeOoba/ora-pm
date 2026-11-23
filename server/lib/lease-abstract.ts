@@ -1115,6 +1115,15 @@ function stripReviewerMarker(a: LeaseAbstract): void {
 
 export function revalidateAbstract(raw: unknown, pages: readonly string[]): AbstractResult {
   const { abstract, warnings } = coerceAbstract(raw)
+  // REFUTE grammar round 3 (probe5): ANY billing item that fails validation HERE (e.g. a field nulled by the
+  // post-egress confidentiality scrub) is recorded as unreadable, so it keeps blocking across re-checks
+  // instead of silently disappearing from the abstract the client stores.
+  abstract.unreadable.push(...unreadableBillingItems(raw))
+  const rawEsc = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>).escalation : undefined
+  if (rawEsc && abstract.escalation === null && !abstract.unreadable.some((u) => u.list === 'escalation')) {
+    const o = typeof rawEsc === 'object' ? (rawEsc as Record<string, unknown>) : {}
+    abstract.unreadable.push({ list: 'escalation', index: 0, page: Number.isInteger(o.page) ? (o.page as number) : null, quote: typeof o.quote === 'string' ? o.quote.slice(0, 200) : null })
+  }
   // Never trust a computed figure from the client (REFUTE C1d): resolveAmounts re-derives each one.
   for (const r of abstract.rent_schedule) { r.base_rent_monthly = null; r.rent_psf_annual = null }
   for (const r of abstract.recurring_charges) r.amount_monthly = null
