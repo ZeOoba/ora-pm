@@ -1,23 +1,18 @@
 import { describe, it, expect } from 'vitest'
 import { finalizeAbstract, revalidateAbstract, REVIEWER_QUOTE_SUFFIX, type LeaseAbstract } from '../../server/lib/lease-abstract'
-import { buildApprovalPayload, divergenceSignature, legacyBillingDivergence, ApprovalInputError, BillingDivergenceError, OverBillingError, type ApproveInputs } from '../../server/lib/lease-approve'
+import { buildApprovalPayload, scheduleBillingProblems, ApprovalInputError, ScheduleUnbillableError, type ApproveInputs } from '../../server/lib/lease-approve'
 import { PAGES, reviewed, wire } from '../fixtures/lease-abstract-approve'
 
 const inputs = (over: Partial<ApproveInputs> = {}): ApproveInputs => ({
   unitId: '20000000-0000-0000-0000-000000000001', today: '2026-11-23',
   tenant: { mode: 'new', name: 'Acme Fabrication' }, replace: null, notes: 'Holdover 150%.',
   storagePath: 'abstracts/x.pdf', fileSha256: 'a'.repeat(64), filename: 'Acme.pdf', model: 'm', approvedBy: 'admin@x', warnings: [],
-  acknowledgedDivergence: null,
   ...over,
 })
 type Row = Record<string, unknown>
 type P = { tenant: Row; lease: Row; escalation: Row; replace: Row; rent_schedule: Row[]; concessions: Row[]; recurring_charges: Row[]; provisions: Row[]; critical_dates: Array<{ kind: string; critical_date: string; description: string }> }
-const pay = (a: LeaseAbstract, i: ApproveInputs) => buildApprovalPayload(a, { ...i, acknowledgedDivergence: i.acknowledgedDivergence ?? sigFor(a) }) as unknown as P
+const pay = (a: LeaseAbstract, i: ApproveInputs) => buildApprovalPayload(a, i) as unknown as P
 const clone = <T>(x: T): T => JSON.parse(JSON.stringify(x))
-/** Signature of the under-bill months for the lease row buildApprovalPayload will derive (no throw = none). */
-function sigFor(a: LeaseAbstract): string | null {
-  try { buildApprovalPayload(a, inputs()); return null } catch (e) { return e instanceof BillingDivergenceError ? e.signature : null }
-}
 const abs = () => clone(reviewed().abstract)
 const blocksOf = (r: ReturnType<typeof revalidateAbstract>) => r.flags.filter((f) => f.severity === 'block')
 
@@ -114,57 +109,52 @@ describe('revalidateAbstract (approval-time re-check against the approved PDF)',
   })
 })
 
-const LEASE_ROW = { start_date: '2026-01-01', end_date: '2028-12-31', base_rent_monthly: 8333.33, cam_estimate_monthly: 1250 }
-const sig = (a: LeaseAbstract) => divergenceSignature(legacyBillingDivergence(a, LEASE_ROW))
+const LEASE_ROW = { start_date: '2026-01-01', end_date: '2028-12-31', cam_estimate_monthly: 1250 }
 
-describe('legacy billing divergence (REFUTE C4)', () => {
-  it('an abatement month is an OVER-bill and refuses approval with no acknowledgement escape', () => {
+// Phase 7: monthly billing bills the lease's own schedule (cron passes the 0020 rows), so abatements, steps
+// and charges that end bill as the lease states. Approval no longer compares against flat billing; it refuses
+// only a schedule the billing engine cannot bill in some month of the term (it would bill nothing there).
+describe('schedule billing check (Phase 7)', () => {
+  it('an abatement lease approves; its concession is stored for billing', () => {
     const a = revalidateAbstract(clone(reviewed({ abatement: true }).abstract), PAGES).abstract
-    const jan = legacyBillingDivergence(a, LEASE_ROW).find((x) => x.period === '2026-01')!
-    expect(jan.billed).toBe(9583.33)
-    expect(jan.due).toBeLessThan(jan.billed)
-    expect(() => buildApprovalPayload(a, inputs({ acknowledgedDivergence: sig(a) }))).toThrow(OverBillingError)
+    expect(scheduleBillingProblems(a, LEASE_ROW)).toEqual([])
+    const p = pay(a, inputs())
+    expect(p.concessions.length).toBeGreaterThan(0)
   })
 
-  it('CAM that ends before the term does is an over-bill (refused)', () => {
+  it('CAM that ends before the term does approves', () => {
     const a = revalidateAbstract(abs(), PAGES).abstract
     a.recurring_charges[0].effective_end = '2026-12-31'
-    expect(() => buildApprovalPayload(a, inputs({ acknowledgedDivergence: sig(a) }))).toThrow(OverBillingError)
+    expect(() => pay(a, inputs())).not.toThrow()
   })
 
-  it('escalation steps are UNDER-bills: refused until acknowledged, and only the exact month list passes', () => {
+  it('escalation steps approve with no hand-billing review dates', () => {
     const a = revalidateAbstract(abs(), PAGES).abstract
-    const d = legacyBillingDivergence(a, LEASE_ROW)
-    expect(d.length).toBeGreaterThan(0)
-    expect(d.every((x) => x.due > x.billed)).toBe(true)
-    expect(() => buildApprovalPayload(a, inputs({ acknowledgedDivergence: null }))).toThrow(BillingDivergenceError)
-    expect(() => buildApprovalPayload(a, inputs({ acknowledgedDivergence: sig(a) + ',2099-01:1.00:2.00' }))).toThrow(BillingDivergenceError)
-    const p = pay(a, inputs({ acknowledgedDivergence: sig(a) }))
-    expect(p.critical_dates.some((c) => c.critical_date === '2027-01-01' && /Billing review 2027-01/.test(c.description))).toBe(true)
+    const p = pay(a, inputs())
+    expect(p.critical_dates.some((c) => /Billing review/.test(c.description))).toBe(false)
   })
 
-  it('REFUTE round 3 P7: a rent over-bill cannot net against a CAM under-bill in the same month', () => {
+  it('a rent schedule that stops before the term ends is refused, naming the first month billing would skip', () => {
     const a = revalidateAbstract(abs(), PAGES).abstract
-    a.rent_schedule = [{ ...a.rent_schedule[0], end: '2028-12-31' }]
-    a.escalation = null
-    a.recurring_charges = [
-      { ...a.recurring_charges[0], effective_end: '2026-12-31' },
-      { ...a.recurring_charges[0], amount_monthly: 1400, effective_start: '2027-01-01', effective_end: '2028-12-31' },
-    ]
-    a.concessions = [{ charge_type: 'rent', period_start: '2027-02-01', period_end: '2027-02-28', kind: 'fixed_amount', value_as_written: '$100.00', value_period: 'month', value: 100, reason: 'Credit', page: 2, quote: 'q', confidence: 1 }]
-    const feb = legacyBillingDivergence(a, LEASE_ROW).find((d) => d.period === '2027-02')!
-    expect(feb.due).toBeGreaterThan(feb.billed) // the month TOTAL is an under-bill...
-    expect(feb.over).toBe(true)                 // ...but rent alone is over-billed
-    expect(feb.by_type.find((t) => t.type === 'rent')).toMatchObject({ billed: 8333.33, due: 8233.33 })
-    expect(() => buildApprovalPayload(a, inputs({ acknowledgedDivergence: sig(a) }))).toThrow(OverBillingError)
+    a.rent_schedule = a.rent_schedule.slice(0, 2)
+    const problems = scheduleBillingProblems(a, LEASE_ROW)
+    expect(problems[0]).toMatchObject({ period: '2028-01', code: 'schedule_gap' })
+    expect(() => buildApprovalPayload(a, inputs())).toThrow(ScheduleUnbillableError)
+    try { buildApprovalPayload(a, inputs()) } catch (e) { expect((e as ScheduleUnbillableError).reason).toMatch(/2028-01/) }
   })
 
-  it('a flat lease with no steps, concessions or ending charges has no divergence', () => {
+  it('two concessions on the same charge and day are refused (the engine cannot pick one)', () => {
     const a = revalidateAbstract(abs(), PAGES).abstract
-    a.rent_schedule = [{ ...a.rent_schedule[0], end: '2028-12-31' }]
-    a.escalation = null
-    expect(legacyBillingDivergence(a, LEASE_ROW)).toEqual([])
-    expect(() => buildApprovalPayload(a, inputs({ acknowledgedDivergence: null }))).not.toThrow()
+    const c = { charge_type: 'rent' as const, period_start: '2026-02-01', period_end: '2026-02-28', kind: 'full_waiver' as const, value_as_written: '', value_period: 'none' as const, value: null, reason: 'Free', page: 2, quote: 'q', confidence: 1 }
+    a.concessions = [c, { ...c, charge_type: 'all' }]
+    expect(scheduleBillingProblems(a, LEASE_ROW).map((x) => x.code)).toContain('concession_conflict')
+    expect(() => buildApprovalPayload(a, inputs())).toThrow(ScheduleUnbillableError)
+  })
+
+  it("an 'all' + fixed_amount concession is refused with how to split it (plan §5a item 6)", () => {
+    const a = revalidateAbstract(abs(), PAGES).abstract
+    a.concessions = [{ charge_type: 'all', period_start: '2026-02-01', period_end: '2026-02-28', kind: 'fixed_amount', value_as_written: '$500.00', value_period: 'month', value: 500, reason: 'Credit', page: 2, quote: 'q', confidence: 1 }]
+    expect(() => buildApprovalPayload(a, inputs())).toThrow(/one for rent and one for CAM/)
   })
 })
 

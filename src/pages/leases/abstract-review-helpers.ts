@@ -38,7 +38,8 @@ export function confirmationKey(c: Confirmation): string {
   return [c.path, c.as_written, c.period, c.monthly, c.start, c.end, c.charge, c.rsf, c.first_adjustment_date, c.cadence_months, c.page, c.quote].join('|')
 }
 
-export interface Divergence { period: string; billed: number; due: number; by_type: Array<{ type: string; billed: number; due: number }>; over: boolean }
+/** A month monthly billing cannot bill the lease's schedule (server/lib/lease-approve.ts BillingProblem). */
+export interface BillingProblem { period: string; code: string; detail: string }
 
 /** Set a cited scalar to a reviewer-entered value (null clears it). */
 export function setCited<T>(v: T | null, prev: Cited<T>): Cited<T> {

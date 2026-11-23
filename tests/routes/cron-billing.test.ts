@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import Stripe from 'stripe'
 import { createApp } from '../../server/index'
 
@@ -83,6 +83,7 @@ const inChargesSpy = vi.hoisted(() => vi.fn())
 const inArLedgerSpy = vi.hoisted(() => vi.fn())
 const inIdemRecheckSpy = vi.hoisted(() => vi.fn())
 const paymentsUpdateSpy = vi.hoisted(() => vi.fn())
+const priorChargesSpy = vi.hoisted(() => vi.fn())
 
 const state = {
   leases: [] as Record<string, unknown>[],
@@ -103,6 +104,16 @@ const state = {
   balanceForwardsError: null as { code?: string; message: string } | null,
   reserveRpcError: null as { code?: string; message: string } | null,
   writeBackError: null as { code?: string; message: string } | null,
+  // Phase 7: 0020 schedule rows (all three tables), the activation RPC, the variance-guard read.
+  rentSchedule: [] as Record<string, unknown>[],
+  recurringCharges: [] as Record<string, unknown>[],
+  concessions: [] as Record<string, unknown>[],
+  scheduleError: null as { code?: string; message: string } | null,
+  activation: null as Record<string, unknown> | null,
+  activationError: null as { code?: string; message: string } | null,
+  priorChargesError: null as { code?: string; message: string } | null,
+  baselinePriorMonth: true,
+  syncError: null as { code?: string; message: string } | null,
 }
 
 function paymentCounts(p: PaymentRow): boolean {
@@ -138,14 +149,18 @@ const leasesPageSpy = vi.hoisted(() => vi.fn())
 function leasesTable() {
   const calls: { method: string; args: unknown[] }[] = []
   const b: Record<string, unknown> = {}
-  for (const m of ['select', 'eq', 'gt', 'order', 'limit']) {
+  for (const m of ['select', 'eq', 'in', 'gt', 'gte', 'lte', 'order', 'limit']) {
     b[m] = (...args: unknown[]) => { calls.push({ method: m, args }); return b }
   }
   b.then = (resolve: (v: unknown) => void) => {
     leasesPageSpy(calls)
-    let rows = [...state.leases] as { id: string }[]
+    let rows = state.leases.map((l) => ({ status: 'active', ...l })) as unknown as { id: string }[]
     for (const c of calls) {
       if (c.method === 'gt') rows = rows.filter(r => (r as Record<string, unknown>)[c.args[0] as string] as string > (c.args[1] as string))
+      if (c.method === 'in') rows = rows.filter(r => (c.args[1] as unknown[]).includes((r as Record<string, unknown>)[c.args[0] as string]))
+      if (c.method === 'eq') rows = rows.filter(r => (r as Record<string, unknown>)[c.args[0] as string] === c.args[1])
+      if (c.method === 'gte') rows = rows.filter(r => String((r as Record<string, unknown>)[c.args[0] as string]) >= String(c.args[1]))
+      if (c.method === 'lte') rows = rows.filter(r => String((r as Record<string, unknown>)[c.args[0] as string]) <= String(c.args[1]))
     }
     const order = calls.find(c => c.method === 'order')
     if (order) {
@@ -157,6 +172,29 @@ function leasesTable() {
     return resolve({ data: capped(rows), error: null })
   }
   return b
+}
+
+// Keyset-paged whole-table read (0020 schedule tables): .select().gt('id', after).order('id').limit(n).
+const scheduleSelectSpy = vi.hoisted(() => vi.fn())
+function keysetTable(table: string, rowsOf: () => Record<string, unknown>[]) {
+  return {
+    select: (cols: string) => {
+      scheduleSelectSpy(table, cols)
+      const calls: { method: string; args: unknown[] }[] = []
+      const b: Record<string, unknown> = {}
+      for (const m of ['gt', 'order', 'limit']) b[m] = (...args: unknown[]) => { calls.push({ method: m, args }); return b }
+      b.then = (resolve: (v: unknown) => void) => {
+        if (state.scheduleError) return resolve({ data: null, error: state.scheduleError })
+        let rows = [...rowsOf()].sort((x, y) => (String(x.id) < String(y.id) ? -1 : 1))
+        const gt = calls.find(c => c.method === 'gt')
+        if (gt) rows = rows.filter(r => String(r.id) > String(gt.args[1]))
+        const limit = calls.find(c => c.method === 'limit')
+        if (limit) rows = rows.slice(0, limit.args[0] as number)
+        return resolve({ data: capped(rows), error: null })
+      }
+      return b
+    },
+  }
 }
 
 // JS stand-in for reserve_autopay_payment() (supabase/migrations/0031_autopay_reservation.sql),
@@ -194,13 +232,24 @@ function reserveAutopayStandIn(args: { p_lease_id: string; p_period_start: strin
 }
 
 function installDbMock() {
-  mockRpc.mockImplementation(async (fn: string, args: Parameters<typeof reserveAutopayStandIn>[0]) => {
+  mockRpc.mockImplementation(async (fn: string, args: Parameters<typeof reserveAutopayStandIn>[0] & { p_dry_run?: boolean }) => {
+    if (fn === 'activate_pending_leases') {
+      if (state.activationError) return { data: null, error: state.activationError }
+      return { data: state.activation ?? { activated: [], blocked: [], dry_run: args.p_dry_run ?? false }, error: null }
+    }
+    if (fn === 'sync_scheduled_lease_amounts') {
+      if (state.syncError) return { data: null, error: state.syncError }
+      return { data: { rent_updated: 0, cam_updated: 0 }, error: null }
+    }
     if (fn !== 'reserve_autopay_payment') return { data: null, error: { message: `unexpected rpc ${fn}` } }
     if (state.reserveRpcError) return { data: null, error: state.reserveRpcError }
     return { data: reserveAutopayStandIn(args), error: null }
   })
   mockFrom.mockImplementation((table: string) => {
     if (table === 'leases') return leasesTable()
+    if (table === 'lease_rent_schedule') return keysetTable(table, () => state.rentSchedule)
+    if (table === 'lease_recurring_charges') return keysetTable(table, () => state.recurringCharges)
+    if (table === 'lease_concessions') return keysetTable(table, () => state.concessions)
     if (table === 'balance_forwards') {
       return {
         select: vi.fn().mockReturnValue({
@@ -235,6 +284,33 @@ function installDbMock() {
         //   - Step 3's open-charges lookup: 'lease_id, amount'
         //   - The PR #42 review-follow-up voided-charge re-check: 'idempotency_key, voided_at'
         select: vi.fn().mockImplementation((cols?: string) => {
+          if (cols === 'lease_id, amount, type, voided_at, period_start, idempotency_key') {
+            // Phase 7 autopay variance guard: last AND this period's auto charges.
+            //   .in('lease_id', ids).in('period_start', [prior, current]).eq('source', 'auto')
+            // state.baselinePriorMonth (default true) stands for "last month was billed normally": each lease
+            // gets a synthetic 2026-05 auto rent row at its flat rent + CAM, unless a test seeds May itself.
+            return {
+              in: priorChargesSpy.mockImplementation((_col: string, leaseIds: string[]) => ({
+                in: (c1: string, periods: string[]) => ({
+                  eq: async (c2: string, v2: string) => {
+                    if (state.priorChargesError) return { data: null, error: state.priorChargesError }
+                    const synthetic = state.baselinePriorMonth
+                      ? (state.leases as { id: string; base_rent_monthly: number; cam_estimate_monthly?: number }[])
+                        .filter(l => !state.charges.some(c => c.lease_id === l.id && c.period_start === '2026-05-01'))
+                        .map(l => ({ lease_id: l.id, amount: l.base_rent_monthly + (l.cam_estimate_monthly ?? 0), type: 'rent', voided_at: null, period_start: '2026-05-01', source: 'auto', idempotency_key: `auto:${l.id}:2026-05-01:rent` }))
+                      : []
+                    const rows: Record<string, unknown>[] = [...state.charges.map(c => ({ ...c, voided_at: c.voided_at ?? null })), ...synthetic]
+                    return {
+                      data: capped(rows
+                        .filter(c => leaseIds.includes(c.lease_id as string) &&periods.includes(c[c1] as string) && c[c2] === v2)
+                        .map(c => ({ lease_id: c.lease_id, amount: c.amount, type: c.type, voided_at: c.voided_at, period_start: c.period_start, idempotency_key: c.idempotency_key }))),
+                      error: null,
+                    }
+                  },
+                }),
+              })),
+            }
+          }
           if (cols === 'idempotency_key') {
             // Balance-forward existence check for charges kept out of the batch.
             return {
@@ -439,6 +515,15 @@ beforeEach(() => {
   state.balanceForwardsError = null
   state.reserveRpcError = null
   state.writeBackError = null
+  state.rentSchedule = []
+  state.recurringCharges = []
+  state.concessions = []
+  state.scheduleError = null
+  state.activation = null
+  state.activationError = null
+  state.priorChargesError = null
+  state.baselinePriorMonth = true
+  state.syncError = null
   installDbMock()
   mockStripe.paymentIntents.create.mockResolvedValue({ id: 'pi_auto_1', status: 'processing' })
 })
@@ -1167,8 +1252,11 @@ describe('POST /api/cron/monthly-billing', () => {
       expect(new Set(state.charges.map(c => c.lease_id)).size).toBe(N)
       expect(body.posted).toBe(N)
       // Keyset-paged, each page within the cap — not one oversized request.
-      expect(leasesPageSpy).toHaveBeenCalledTimes(2)
-      for (const [calls] of leasesPageSpy.mock.calls as [{ method: string; args: unknown[] }[]][]) {
+      // Only the billing select (status active/pending); the past-month catch-up report is a separate read.
+      const billingPages = (leasesPageSpy.mock.calls as [{ method: string; args: unknown[] }[]][])
+        .filter(([calls]) => calls.some(c => c.method === 'in' && (c.args[1] as string[]).includes('active')))
+      expect(billingPages).toHaveLength(2)
+      for (const [calls] of billingPages) {
         expect(calls.find(c => c.method === 'order')?.args[0]).toBe('id')
         const limit = calls.find(c => c.method === 'limit')
         expect(limit).toBeDefined()
@@ -1420,7 +1508,10 @@ describe('monthly-billing: in-flight portal ACH (audit 2026-11-12 #1)', () => {
   })
 
   it('a concurrent run that already reserved the period is skipped without a Stripe call', async () => {
-    mockRpc.mockImplementationOnce(async () => ({ data: { outcome: 'existing', payment_id: 'pay_other', stripe_payment_intent_id: null, stripe_status: 'pending', amount_cents: 500000 }, error: null }))
+    const base = mockRpc.getMockImplementation()!
+    mockRpc.mockImplementation(async (fn: string, args: unknown) => fn === 'reserve_autopay_payment'
+      ? ({ data: { outcome: 'existing', payment_id: 'pay_other', stripe_payment_intent_id: null, stripe_status: 'pending', amount_cents: 500000 }, error: null })
+      : base(fn, args))
 
     const res = await postBilling()
     expect(res.status).toBe(200)
@@ -1563,5 +1654,329 @@ describe('monthly-billing: in-flight portal ACH (audit 2026-11-12 #1)', () => {
     expect(body.errorMessages[0]).toMatch(/autopay lease lease_1: payment pi_orphan created but not written back to reservation pay_res_\d+: internal error/)
     // The reservation row is the recoverable trace: still pending, still blocking a second debit.
     expect(state.payments.filter(p => p.method === 'ach_stripe')).toMatchObject([{ stripe_status: 'pending', autopay_period: '2026-06-01' }])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Lease abstraction Phase 7: billing reads the 0020 schedule; activation; variance guard; dry run.
+// ---------------------------------------------------------------------------
+describe('monthly-billing: lease schedule (Phase 7)', () => {
+  type Body = {
+    posted: number; errors: number; chargeErrors: number; autopayErrors: number; remaining: number; errorMessages: string[]
+    leaseExceptions: { lease_id: string; reason: string; code?: string; detail?: string }[]
+    autopayHeld: { lease_id: string; reason: string }[]
+  }
+  const rentRow = (id: string, lease_id: string, effective_start: string, effective_end: string, base_rent_monthly: number | string, superseded_at: string | null = null) =>
+    ({ id, lease_id, effective_start, effective_end, base_rent_monthly, superseded_at })
+  const rentOf = (lease: string) => state.charges.filter(c => c.lease_id === lease && c.type === 'rent')
+
+  it('bills the schedule row in effect, not leases.base_rent_monthly', async () => {
+    state.leases = [nonAutopayLease('lease_s', 4000)]
+    state.rentSchedule = [rentRow('r1', 'lease_s', '2025-01-01', '2026-05-31', 4000), rentRow('r2', 'lease_s', '2026-06-01', '2030-12-31', 4120)]
+    const res = await postBilling()
+    expect(res.status).toBe(200)
+    expect(rentOf('lease_s').map(c => c.amount)).toEqual([4120])
+  })
+
+  it('reads every schedule table, keyset-paged, superseded rows included', async () => {
+    await postBilling()
+    const tables = scheduleSelectSpy.mock.calls.map(c => c[0]).sort()
+    expect(tables).toEqual(['lease_concessions', 'lease_recurring_charges', 'lease_rent_schedule'])
+    for (const [, cols] of scheduleSelectSpy.mock.calls) expect(String(cols)).toMatch(/\bsuperseded_at\b/)
+  })
+
+  it('a full abatement month posts no rent and debits nothing', async () => {
+    state.rentSchedule = [rentRow('r1', 'lease_1', '2025-01-01', '2030-12-31', 5000)]
+    state.concessions = [{ id: 'c1', lease_id: 'lease_1', charge_type: 'rent', period_start: '2026-06-01', period_end: '2026-06-30', kind: 'full_waiver', value: null, reason: 'Free rent', clause_ref: '§4.3', superseded_at: null }]
+    const res = await postBilling()
+    expect(res.status).toBe(200)
+    expect(rentOf('lease_1')).toEqual([])
+    expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
+  })
+
+  it('a 50% abatement bills half with the reason in the description (string NUMERICs coerced)', async () => {
+    state.leases = [nonAutopayLease('lease_s', 4000)]
+    state.rentSchedule = [rentRow('r1', 'lease_s', '2025-01-01', '2030-12-31', '4000.00')]
+    state.concessions = [{ id: 'c1', lease_id: 'lease_s', charge_type: 'rent', period_start: '2026-06-01', period_end: '2026-06-30', kind: 'pct', value: '0.5', reason: 'Half rent', clause_ref: '§4.3', superseded_at: null }]
+    await postBilling()
+    expect(rentOf('lease_s').map(c => [c.amount, c.description])).toEqual([[2000, 'Rent – June 2026 (abatement: Half rent, §4.3)']])
+  })
+
+  it('a schedule gap bills nothing and debits nothing for that lease, and is reported (200)', async () => {
+    state.leases = [AUTOPAY_LEASE, nonAutopayLease('lease_ok')]
+    state.rentSchedule = [rentRow('r1', 'lease_1', '2025-01-01', '2026-05-31', 5000)]
+    const res = await postBilling()
+    expect(res.status).toBe(200)
+    const body = await res.json() as Body
+    expect(state.charges.filter(c => c.lease_id === 'lease_1')).toEqual([])
+    expect(rentOf('lease_ok')).toHaveLength(1)
+    expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
+    expect(body.leaseExceptions).toEqual([expect.objectContaining({ lease_id: 'lease_1', reason: 'schedule_exception', code: 'schedule_gap' })])
+    expect(body.errorMessages.join(' ')).toMatch(/schedule that cannot bill/)
+  })
+
+  it('a superseded-only schedule fails closed instead of billing the flat rent (plan §5a item 3)', async () => {
+    state.rentSchedule = [rentRow('r1', 'lease_1', '2025-01-01', '2030-12-31', 5000, '2026-05-20T00:00:00Z')]
+    const body = await (await postBilling()).json() as Body
+    expect(state.charges).toEqual([])
+    expect(body.leaseExceptions[0]).toMatchObject({ reason: 'schedule_exception', code: 'schedule_missing_rent' })
+  })
+
+  it("an 'all' + fixed_amount concession is refused (plan §5a item 6)", async () => {
+    state.rentSchedule = [rentRow('r1', 'lease_1', '2025-01-01', '2030-12-31', 5000)]
+    state.concessions = [{ id: 'c1', lease_id: 'lease_1', charge_type: 'all', period_start: '2026-06-01', period_end: '2026-06-30', kind: 'fixed_amount', value: 100, reason: 'x', clause_ref: null, superseded_at: null }]
+    const body = await (await postBilling()).json() as Body
+    expect(state.charges).toEqual([])
+    expect(body.leaseExceptions[0]).toMatchObject({ code: 'invalid_row' })
+  })
+
+  it('a failed schedule read posts ZERO charges, defers autopay, and answers 500', async () => {
+    state.leases = [AUTOPAY_LEASE, nonAutopayLease('lease_ok')]
+    state.scheduleError = { message: 'boom' }
+    const res = await postBilling()
+    expect(res.status).toBe(500)
+    const body = await res.json() as Body
+    expect(upsertChargesSpy).not.toHaveBeenCalled()
+    expect(state.charges).toEqual([])
+    expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
+    expect(body.errorMessages.join(' ')).toMatch(/schedule lookup failed/)
+  })
+
+  it('REFUTE C4 (R1): a failed schedule read counts the autopay lease in remaining and autopayErrors', async () => {
+    state.scheduleError = { message: 'boom' }
+    const body = await (await postBilling()).json() as Body
+    expect(body.remaining).toBe(1)
+    expect(body.autopayErrors).toBe(1)
+  })
+})
+
+describe('monthly-billing: autopay variance guard (Phase 7)', () => {
+  type Body = { remaining: number; autopayHeld: { lease_id: string; reason: string }[]; errorMessages: string[] }
+  const priorRent = (amount: number, extra: Record<string, unknown> = {}) => state.charges.push({
+    lease_id: 'lease_1', idempotency_key: 'auto:lease_1:2026-05-01:rent', amount, due_date: '2026-05-05', period_start: '2026-05-01', type: 'rent', source: 'auto', ...extra,
+  })
+  const paidMay = () => state.payments.push({ lease_id: 'lease_1', amount: 5000, method: 'check', payment_date: '2026-05-03' })
+  beforeEach(() => { state.baselinePriorMonth = false })
+
+  it('holds the debit when the rent moved >15% unexplained by the lease inputs; the charge still posts', async () => {
+    state.leases = [{ ...AUTOPAY_LEASE, base_rent_monthly: 6000 }]
+    priorRent(5000); paidMay()
+    const res = await postBilling()
+    expect(res.status).toBe(200)
+    const body = await res.json() as Body
+    expect(state.charges.some(c => c.idempotency_key === 'auto:lease_1:2026-06-01:rent' && c.amount === 6000)).toBe(true)
+    expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
+    expect(body.autopayHeld).toEqual([{ lease_id: 'lease_1', reason: expect.stringMatching(/15%/) }])
+    expect(body.remaining).toBe(0)
+  })
+
+  it('debits a step the approved schedule explains', async () => {
+    state.rentSchedule = [
+      { id: 'r1', lease_id: 'lease_1', effective_start: '2025-01-01', effective_end: '2026-05-31', base_rent_monthly: 5000, superseded_at: null },
+      { id: 'r2', lease_id: 'lease_1', effective_start: '2026-06-01', effective_end: '2030-12-31', base_rent_monthly: 6000, superseded_at: null },
+    ]
+    priorRent(5000); paidMay()
+    const body = await (await postBilling()).json() as Body
+    expect(body.autopayHeld).toEqual([])
+    expect(mockStripe.paymentIntents.create).toHaveBeenCalledWith(expect.objectContaining({ amount: 600000 }), expect.anything())
+  })
+
+  it('a prior month whose charges were all voided is a $0 baseline (held), not a missing one', async () => {
+    priorRent(5000, { voided_at: '2026-05-10T00:00:00Z' })
+    const body = await (await postBilling()).json() as Body
+    expect(body.autopayHeld.map(h => h.lease_id)).toEqual(['lease_1'])
+    expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
+  })
+
+  it('REFUTE C5 (R2): checks what the debit will draw on — a stale posted amount is held even after the lease is corrected', async () => {
+    priorRent(5000); paidMay()
+    // An earlier run posted June at $50,000 and its debit was held; the lease row is then corrected to $5,000.
+    state.charges.push({ lease_id: 'lease_1', idempotency_key: 'auto:lease_1:2026-06-01:rent', amount: 50000, due_date: '2026-06-05', period_start: '2026-06-01', type: 'rent', source: 'auto' })
+    const body = await (await postBilling()).json() as Body
+    expect(body.autopayHeld.map(h => h.lease_id)).toEqual(['lease_1'])
+    expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
+  })
+
+  it('REFUTE C5 (R3): no baseline last month is held when the lease was already in term', async () => {
+    const body = await (await postBilling()).json() as Body
+    expect(body.autopayHeld).toEqual([{ lease_id: 'lease_1', reason: expect.stringMatching(/no monthly auto charge/) }])
+    expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
+  })
+
+  it('REFUTE round 3: the first app-billed month after a QuickBooks cutover is held once (no baseline), whatever was keyed', async () => {
+    state.leases = [{ ...AUTOPAY_LEASE, base_rent_monthly: 50000 }]
+    state.balanceForwards = [{ lease_id: 'lease_1', as_of: '2026-05-31' }]
+    const body = await (await postBilling()).json() as Body
+    expect(body.autopayHeld.map(h => h.lease_id)).toEqual(['lease_1'])
+    expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
+  })
+
+  it('no baseline is fine for a lease whose term began this period', async () => {
+    state.leases = [{ ...AUTOPAY_LEASE, start_date: '2026-06-01' }]
+    const body = await (await postBilling()).json() as Body
+    expect(body.autopayHeld).toEqual([])
+    expect(mockStripe.paymentIntents.create).toHaveBeenCalledTimes(1)
+  })
+
+  it('a failed variance read defers ALL autopay, counts it remaining, and answers 500 (charges still post)', async () => {
+    state.priorChargesError = { message: 'down' }
+    const res = await postBilling()
+    expect(res.status).toBe(500)
+    const body = await res.json() as Body
+    expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
+    expect(body.remaining).toBe(1)
+    expect(state.charges.some(c => c.idempotency_key === 'auto:lease_1:2026-06-01:rent')).toBe(true)
+  })
+})
+
+describe('monthly-billing: pending → active (Phase 7)', () => {
+  type Body = { leaseExceptions: { lease_id: string; reason: string; code?: string }[]; errorMessages: string[] }
+  afterEach(() => { vi.useRealTimers() })
+  const at = (iso: string) => { vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date(`${iso}T12:00:00Z`)) }
+
+  it('selects active AND pending leases', async () => {
+    await postBilling()
+    const calls = leasesPageSpy.mock.calls[0][0] as { method: string; args: unknown[] }[]
+    expect(calls.find(c => c.method === 'in')!.args).toEqual(['status', ['active', 'pending']])
+    expect(String(calls.find(c => c.method === 'select')!.args[0])).toMatch(/\bstatus\b/)
+  })
+
+  it('calls activate_pending_leases with today, live', async () => {
+    at('2026-06-01')
+    await postBilling()
+    expect(mockRpc).toHaveBeenCalledWith('activate_pending_leases', { p_today: '2026-06-01', p_dry_run: false, p_as_of: '2026-06-01' })
+  })
+
+  it('a pending lease starting later this month bills its prorated days but is never autopay-debited', async () => {
+    at('2026-06-01')
+    state.leases = [{ ...AUTOPAY_LEASE, status: 'pending', start_date: '2026-06-16' }]
+    const res = await postBilling()
+    expect(res.status).toBe(200)
+    expect(state.charges.map(c => c.amount)).toEqual([2500])
+    expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
+  })
+
+  it('a pending lease the activation step activated bills as active', async () => {
+    at('2026-06-01')
+    state.leases = [{ ...AUTOPAY_LEASE, status: 'pending', start_date: '2026-06-01' }]
+    state.activation = { activated: [{ lease_id: 'lease_1', unit_id: 'u', start_date: '2026-06-01', prior_lease_id: null }], blocked: [], dry_run: false }
+    await postBilling()
+    expect(state.charges.map(c => c.amount)).toEqual([5000])
+  })
+
+  it('a started pending lease the activation step blocked is not billed and is surfaced', async () => {
+    at('2026-06-20')
+    state.leases = [{ ...AUTOPAY_LEASE, status: 'pending', start_date: '2026-06-01' }]
+    state.activation = { activated: [], blocked: [{ lease_id: 'lease_1', unit_id: 'u', reason: 'unit_has_active_lease', blocking_lease_id: 'old', blocking_end_date: '2027-12-31' }], dry_run: false }
+    const res = await postBilling()
+    expect(res.status).toBe(200)
+    const body = await res.json() as Body
+    expect(state.charges).toEqual([])
+    expect(body.leaseExceptions).toEqual([expect.objectContaining({ lease_id: 'lease_1', reason: 'pending_not_activated', code: 'unit_has_active_lease' })])
+  })
+
+  it('REFUTE C8b: activation runs as of the billing month start, so a catch-up run bills the prior tenant to its end AND the successor from its start', async () => {
+    at('2026-06-20')
+    state.leases = [
+      { ...nonAutopayLease('lease_old', 3000), unit_id: 'u1', end_date: '2026-06-15' },
+      { ...nonAutopayLease('lease_new', 3000), unit_id: 'u1', status: 'pending', start_date: '2026-06-16' },
+    ]
+    const res = await postBilling()
+    expect(res.status).toBe(200)
+    expect(mockRpc).toHaveBeenCalledWith('activate_pending_leases', { p_today: '2026-06-20', p_dry_run: false, p_as_of: '2026-06-01' })
+    expect(state.charges.map(c => [c.lease_id, c.amount]).sort()).toEqual([['lease_new', 1500], ['lease_old', 1500]])
+  })
+
+  it('REFUTE C8a (R4): a pending lease overlapping another lease on its unit is never billed and is surfaced', async () => {
+    at('2026-06-01')
+    state.leases = [
+      { ...nonAutopayLease('lease_cur', 4000), unit_id: 'u1' },
+      { ...nonAutopayLease('lease_new', 3000), unit_id: 'u1', status: 'pending', start_date: '2026-06-16' },
+    ]
+    const res = await postBilling()
+    expect(res.status).toBe(200)
+    const body = await res.json() as Body
+    expect(state.charges.map(c => c.lease_id)).toEqual(['lease_cur'])
+    expect(body.leaseExceptions).toEqual([expect.objectContaining({ lease_id: 'lease_new', reason: 'pending_overlaps_unit_lease' })])
+  })
+
+  it('REFUTE round 2 (C8b residual): a catch-up run for a past month reports leases closed out since, with days in that month', async () => {
+    at('2026-07-20')
+    state.leases = [
+      { ...nonAutopayLease('lease_P', 3000), unit_id: 'u1', status: 'expired', end_date: '2026-06-14' },
+      { ...nonAutopayLease('lease_S', 3000), unit_id: 'u1', start_date: '2026-06-15' },
+    ]
+    const res = await postBilling()
+    expect(res.status).toBe(200)
+    const body = await res.json() as Body
+    expect(state.charges.map(c => c.lease_id)).toEqual(['lease_S'])
+    expect(body.leaseExceptions).toEqual([expect.objectContaining({ lease_id: 'lease_P', reason: 'closed_in_period_not_billed', code: 'expired' })])
+  })
+
+  it('a current-month run does not run the catch-up check', async () => {
+    at('2026-06-01')
+    state.leases = [{ ...nonAutopayLease('lease_P', 3000), status: 'expired', end_date: '2026-06-14' }]
+    const body = await (await postBilling()).json() as Body
+    expect(body.leaseExceptions).toEqual([])
+  })
+
+  it('an activation failure answers 500, bills active leases, and does not bill started pending ones', async () => {
+    at('2026-06-20')
+    state.leases = [nonAutopayLease('lease_a'), { ...nonAutopayLease('lease_p'), status: 'pending', start_date: '2026-06-01' }]
+    state.activationError = { message: 'missing function' }
+    const res = await postBilling()
+    expect(res.status).toBe(500)
+    expect(state.charges.map(c => c.lease_id)).toEqual(['lease_a'])
+  })
+})
+
+describe('monthly-billing: ?dryRun=1 (Phase 7)', () => {
+  type Dry = {
+    dryRun: boolean
+    leases: { lease_id: string; path: string; total: number; legacy_total: number; autopay: boolean; charges: { idempotency_key: string; amount: number }[] }[]
+  }
+  const dry = (q = 'dryRun=1') => app.request(`/api/cron/monthly-billing?year=2026&month=6&${q}`, { method: 'POST', headers: { Authorization: 'Bearer test' } }, env)
+
+  it('writes nothing: no activation, no charge, no reservation, no Stripe call', async () => {
+    state.leases = [AUTOPAY_LEASE, nonAutopayLease('lease_2')]
+    const res = await dry()
+    expect(res.status).toBe(200)
+    expect(upsertChargesSpy).not.toHaveBeenCalled()
+    expect(state.charges).toEqual([])
+    expect(state.payments).toEqual([])
+    expect(mockRpc).toHaveBeenCalledWith('activate_pending_leases', expect.objectContaining({ p_dry_run: true }))
+    expect(mockRpc).not.toHaveBeenCalledWith('reserve_autopay_payment', expect.anything())
+    expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
+  })
+
+  it("lists each lease's charges next to what flat billing would post", async () => {
+    state.leases = [nonAutopayLease('lease_2', 4000), AUTOPAY_LEASE]
+    state.rentSchedule = [{ id: 'r1', lease_id: 'lease_2', effective_start: '2025-01-01', effective_end: '2030-12-31', base_rent_monthly: 4120, superseded_at: null }]
+    const body = await (await dry()).json() as Dry
+    expect(body.dryRun).toBe(true)
+    const byId = Object.fromEntries(body.leases.map(l => [l.lease_id, l]))
+    expect(byId.lease_2).toMatchObject({ path: 'schedule', total: 4120, legacy_total: 4000, autopay: false })
+    expect(byId.lease_1).toMatchObject({ path: 'legacy', total: 5000, legacy_total: 5000, autopay: true })
+    expect(byId.lease_1.charges[0].idempotency_key).toBe('auto:lease_1:2026-06-01:rent')
+  })
+
+  it('does not sync lease display amounts in a dry run; a live run does', async () => {
+    await dry()
+    expect(mockRpc).not.toHaveBeenCalledWith('sync_scheduled_lease_amounts', expect.anything())
+    await postBilling()
+    expect(mockRpc).toHaveBeenCalledWith('sync_scheduled_lease_amounts', { p_as_of: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/) })
+  })
+
+  it('a display-sync failure is reported but billing proceeds (200)', async () => {
+    state.syncError = { message: 'nope' }
+    const res = await postBilling()
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as { errorMessages: string[] }).errorMessages.join(' ')).toMatch(/display sync failed/)
+    expect(state.charges.length).toBeGreaterThan(0)
+  })
+
+  it('rejects any dryRun value other than 0 or 1', async () => {
+    expect((await dry('dryRun=true')).status).toBe(400)
+    expect(upsertChargesSpy).not.toHaveBeenCalled()
   })
 })
