@@ -44,7 +44,14 @@ type JsonSchema = Record<string, unknown>
 const STR: JsonSchema = { type: 'string' }
 const NUM: JsonSchema = { type: 'number' }
 const INT: JsonSchema = { type: 'integer' }
-const DATE: JsonSchema = { type: 'string', format: 'date' }
+// GRAMMAR BUDGET (first live run, 2026-11-23): the API refused this schema with 400 "The compiled grammar
+// is too large". Structured outputs compile the schema into a grammar; `format: 'date'` (calendar-valid
+// dates, 8 fields) and the two large enums (20 fact names, 17 provision categories) were the bulk of it.
+// Dates and those two names are therefore plain strings ON THE WIRE ONLY: the server still enforces them
+// exactly (zod isoDate for every date; wireToShape normalizes fact names, dropping unknown ones with a
+// warning, and provision categories, mapping unknown ones to 'other' with a warning). Small enums (≤ 6
+// values) stay. tests/lib/lease-abstract.test.ts pins: no `format`, no enum over 6 values.
+const DATE: JsonSchema = { type: 'string', description: 'YYYY-MM-DD' }
 const enumOf = (values: readonly string[]): JsonSchema => ({ type: 'string', enum: [...values] })
 const obj = (properties: Record<string, JsonSchema>): JsonSchema =>
   ({ type: 'object', properties, required: Object.keys(properties), additionalProperties: false })
@@ -76,7 +83,7 @@ export const FACT_FIELDS = {
 // quote") leaked in rounds 1 and 2 and are gone.
 export const AMOUNT_PERIODS = ['month', 'year', 'psf_year'] as const
 export const ABSTRACT_SCHEMA: JsonSchema = obj({
-  facts: list(obj({ field: enumOf(Object.keys(FACT_FIELDS)), value: STR, ...SOURCE })),
+  facts: list(obj({ field: { type: 'string', description: `One of: ${Object.keys(FACT_FIELDS).join(', ')}` }, value: STR, ...SOURCE })),
   rent_schedule: list(obj({ start: DATE, end: DATE, amount_as_written: STR, amount_period: enumOf(AMOUNT_PERIODS), ...SOURCE })),
   escalations: list(obj({
     kind: enumOf(['fixed_pct', 'fixed_amount', 'cpi']), value_as_written: STR, value_period: enumOf([...AMOUNT_PERIODS, 'none']),
@@ -92,7 +99,7 @@ export const ABSTRACT_SCHEMA: JsonSchema = obj({
   })),
   late_fees: list(obj({ amount: NUM, pct: NUM, grace_days: INT, ...SOURCE })),
   provisions: list(obj({
-    category: enumOf(PROVISION_CATEGORIES), summary: STR, notice_deadline: STR,
+    category: { type: 'string', description: `One of: ${PROVISION_CATEGORIES.join(', ')}` }, summary: STR, notice_deadline: STR,
     exercise_window_start: STR, exercise_window_end: STR, ...SOURCE,
   })),
 })
@@ -110,7 +117,8 @@ const INSTRUCTIONS = [
   '- rent_schedule: one row per rent period across the whole term, contiguous, no gaps or overlaps. If a period\'s rent is printed, give it as written. If it is NOT printed and follows only from a stated escalation, set amount_as_written to "" and amount_period to "month"; the server derives it from the escalation. The first period\'s rent must be printed.',
   '- escalations: at most one entry, only if the lease states a rule; first_adjustment_date is always a real date. fixed_pct: value_as_written is the printed percentage ("3%"), value_period "none". fixed_amount: value_as_written is the printed dollar increase, value_period its period. cpi: value_as_written "", value_period "none"; cpi_floor is -1 when not stated (0 means a stated 0% floor); cpi_cap is 0 when not stated. For fixed rules, cpi_floor is -1 and cpi_cap is 0.',
   '- concessions: free rent, abatements, waivers. full_waiver: value_as_written "" and value_period "none". pct: value_as_written is the printed percentage waived ("50%"), value_period "none". fixed_amount: value_as_written is the printed dollar amount waived, value_period its period. charge_type "all" only when the lease says the waiver covers rent AND CAM/operating expenses; a dollar waiver over both is two entries. Never "all" with fixed_amount.',
-  '- recurring_charges: amounts other than base rent (CAM estimate, utilities, tax or insurance escrow as type "other"), each as written with its period.',
+  '- recurring_charges: amounts other than base rent (CAM estimate, utilities, tax or insurance escrow as type "other"), each as written with its period. effective_start and effective_end are always real YYYY-MM-DD dates: a charge that runs for the whole term starts on the commencement (or rent commencement) date and ends on the expiration date.',
+  '- concessions: period_start and period_end are always real YYYY-MM-DD dates (never "").',
   '- late_fees: at most one entry; amount and pct are 0 when not stated; grace_days is -1 when not stated (0 means no grace period).',
   '- provisions: tenant rights and special rules (options, ROFR/ROFO, termination, exclusives, use, signage, parking, assignment, insurance requirements, maintenance split, HVAC, holdover, guaranty, relocation). summary is one plain sentence. notice_deadline, exercise_window_start and exercise_window_end are YYYY-MM-DD, or "" when the lease does not let you determine them.',
 ].join('\n')
@@ -120,6 +128,36 @@ const INSTRUCTIONS = [
  * Sentinels: 0 → null for optional numbers; "" → null for optional dates; first escalation / late fee.
  * Anything not in the expected wire form is passed through so the zod layer rejects it with a warning.
  */
+/** 'Commencement Date' / 'commencement-date' → 'commencement_date' (names are plain strings on the wire). */
+function normalizeName(s: string): string {
+  return s.trim().toLowerCase().replace(/[\s-]+/g, '_')
+}
+
+/** A provision category is a plain string on the wire: normalize it; an unknown one keeps the provision as
+ *  'other' (its summary and quote are still worth having) with a warning, rather than dropping it. */
+/** Near-miss spellings the model may use now that category is a plain string (REFUTE schema-grammar C3):
+ *  filing these as 'other' would store a renewal or termination notice deadline under the wrong kind. */
+const CATEGORY_ALIASES: Record<string, string> = {
+  renewal: 'renewal_option', renewal_options: 'renewal_option', option_to_renew: 'renewal_option', extension_option: 'renewal_option',
+  option_to_extend: 'renewal_option', extension_options: 'renewal_option', options_to_renew: 'renewal_option', termination_rights: 'termination',
+  expansion_option: 'expansion', expansion_right: 'expansion',
+  rofr: 'rofr_rofo', rofo: 'rofr_rofo', right_of_first_refusal: 'rofr_rofo', right_of_first_offer: 'rofr_rofo',
+  early_termination: 'termination', termination_option: 'termination', termination_right: 'termination',
+  exclusive: 'exclusive_use', use: 'permitted_use', permitted_uses: 'permitted_use',
+  assignment: 'assignment_sublet', sublet: 'assignment_sublet', subletting: 'assignment_sublet', assignment_and_subletting: 'assignment_sublet', assignment_subletting: 'assignment_sublet',
+  insurance: 'insurance_req', insurance_requirements: 'insurance_req', maintenance: 'maintenance_split', repairs_and_maintenance: 'maintenance_split',
+  late_fees: 'late_fee', late_charge: 'late_fee', guarantee: 'guaranty', personal_guaranty: 'guaranty',
+}
+
+function provisionCategory(v: unknown, warnings: string[]): unknown {
+  if (typeof v !== 'string') return v // zod rejects it and drops the item with its own warning
+  const n = normalizeName(v.replace(/\(s\)/gi, '')).replace(/[/&]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '')
+  const c = CATEGORY_ALIASES[n] ?? n
+  if ((PROVISION_CATEGORIES as readonly string[]).includes(c)) return c
+  warnings.push(`A provision category "${v.slice(0, 40)}" is not recognised; it was filed as "other".`)
+  return 'other'
+}
+
 export function wireToShape(raw: unknown, warnings: string[]): unknown {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw
   const r = raw as Record<string, unknown>
@@ -137,9 +175,9 @@ export function wireToShape(raw: unknown, warnings: string[]): unknown {
   if (Array.isArray(r.facts)) {
     for (const [i, f] of r.facts.entries()) {
       const fact = f as Record<string, unknown> | null
-      const name = fact?.field
-      if (typeof name !== 'string' || !(name in FACT_FIELDS)) { warnings.push(`facts[${i}] names an unknown field and was dropped.`); continue }
-      if (name in out) { warnings.push(`Field "${name}" was stated more than once; the first value was kept.`); continue }
+      const name = typeof fact?.field === 'string' ? normalizeName(fact.field) : fact?.field
+      if (typeof name !== 'string' || !Object.hasOwn(FACT_FIELDS, name)) { warnings.push(`facts[${i}] names an unknown field and was dropped.`); continue }
+      if (Object.hasOwn(out, name)) { warnings.push(`Field "${name}" was stated more than once; the first value was kept.`); continue }
       const kind = FACT_FIELDS[name as keyof typeof FACT_FIELDS]
       const text = typeof fact?.value === 'string' ? fact.value.trim() : fact?.value
       let value: unknown = text
@@ -156,7 +194,7 @@ export function wireToShape(raw: unknown, warnings: string[]): unknown {
   out.concessions = mapItems(r.concessions, (o) => ({ ...o, value: null }))
   out.recurring_charges = mapItems(r.recurring_charges, (o) => ({ ...o, amount_monthly: null }))
   out.provisions = mapItems(r.provisions, (o) => ({
-    ...o, notice_deadline: blankToNull(o.notice_deadline),
+    ...o, category: provisionCategory(o.category, warnings), notice_deadline: blankToNull(o.notice_deadline),
     exercise_window_start: blankToNull(o.exercise_window_start), exercise_window_end: blankToNull(o.exercise_window_end),
   }))
   const firstOf = (key: string, label: string) => {
@@ -227,6 +265,34 @@ const ProvisionZ = z.object({
   exercise_window_start: isoDate.nullable(), exercise_window_end: isoDate.nullable(), ...source,
 })
 
+const UnreadableZ = z.object({ list: z.enum(['concessions', 'recurring_charges', 'escalation', 'unknown']), index: z.number().int(), page: z.number().int().nullable(), quote: z.string().nullable() })
+
+/** Every concession / recurring charge the model sent that its zod schema rejects (dropped by coerceAbstract). */
+const UNREADABLE_LABEL: Record<UnreadableItem['list'], string> = {
+  concessions: 'a concession', recurring_charges: 'a recurring charge', escalation: 'an escalation rule that could not be applied', unknown: 'a billing term',
+}
+/** Block for a billing item the model returned unreadably. Path: the item, or the list when there is no index. */
+function unreadableBlock(u: UnreadableItem): AbstractFlag {
+  const path = u.list === 'escalation' ? 'escalation' : u.list === 'unknown' ? 'unreadable' : `${u.list}[${u.index}]`
+  return { severity: 'block', path, message: `The lease states ${UNREADABLE_LABEL[u.list]}${u.page ? ` (p. ${u.page})` : ''} that could not be read; enter this lease manually.` }
+}
+
+function unreadableBillingItems(shaped: unknown): UnreadableItem[] {
+  if (!shaped || typeof shaped !== 'object' || Array.isArray(shaped)) return []
+  const r = shaped as Record<string, unknown>
+  const out: UnreadableItem[] = []
+  for (const [list, zs] of [['concessions', ConcessionZ], ['recurring_charges', RecurringZ]] as const) {
+    const items = r[list]
+    if (!Array.isArray(items)) continue
+    items.forEach((item, index) => {
+      if ((zs as z.ZodTypeAny).safeParse(item).success) return
+      const o = item && typeof item === 'object' ? (item as Record<string, unknown>) : {}
+      out.push({ list, index, page: Number.isInteger(o.page) ? (o.page as number) : null, quote: typeof o.quote === 'string' ? o.quote.slice(0, 200) : null })
+    })
+  }
+  return out
+}
+
 const SCALARS = {
   tenant_legal_name: citedZ(z.string()),
   tenant_dba: citedZ(z.string()),
@@ -265,7 +331,13 @@ export type LeaseAbstract = { -readonly [K in keyof typeof SCALARS]: z.infer<(ty
   recurring_charges: RecurringItem[]
   late_fee: LateFee | null
   provisions: ProvisionItem[]
+  /** Billing items the model returned that failed validation (e.g. a blank or non-ISO date) and were dropped.
+   *  Carried in the abstract so approval keeps refusing it after the review screen re-checks (REFUTE
+   *  schema-grammar C1): a lost abatement over-bills, a lost CAM line never bills. */
+  unreadable: UnreadableItem[]
 }
+
+export interface UnreadableItem { list: 'concessions' | 'recurring_charges' | 'escalation' | 'unknown'; index: number; page: number | null; quote: string | null }
 
 export interface AbstractFlag {
   severity: 'block' | 'warn'
@@ -306,7 +378,7 @@ export interface AbstractResult {
 
 export function emptyAbstract(): LeaseAbstract {
   const a = Object.fromEntries(Object.keys(SCALARS).map((k) => [k, null])) as unknown as LeaseAbstract
-  return { ...a, rent_schedule: [], escalation: null, concessions: [], recurring_charges: [], late_fee: null, provisions: [] }
+  return { ...a, rent_schedule: [], escalation: null, concessions: [], recurring_charges: [], late_fee: null, provisions: [], unreadable: [] }
 }
 
 /**
@@ -341,6 +413,11 @@ export function coerceAbstract(raw: unknown): { abstract: LeaseAbstract; warning
   out.concessions = list('concessions', ConcessionZ)
   out.recurring_charges = list('recurring_charges', RecurringZ)
   out.provisions = list('provisions', ProvisionZ)
+  // Never dropped (REFUTE grammar round 2): a malformed entry would silently lift its block, so it is kept
+  // as a placeholder that still blocks approval.
+  out.unreadable = Array.isArray(r.unreadable)
+    ? r.unreadable.map((u) => { const p = UnreadableZ.safeParse(u); return p.success ? p.data : { list: 'unknown' as const, index: -1, page: null, quote: null } })
+    : []
   for (const [key, zs] of [['escalation', EscalationZ], ['late_fee', LateFeeZ]] as const) {
     const v = r[key]
     if (v === undefined || v === null) continue
@@ -924,6 +1001,7 @@ export function crossCheck(a: LeaseAbstract): AbstractFlag[] {
   })
   a.provisions.forEach((pv, i) => {
     if ((pv.exercise_window_start === null) !== (pv.exercise_window_end === null)) block(`provisions[${i}]`, 'An exercise window needs both a start and an end date.')
+    if (pv.category === 'other' && pv.notice_deadline) flags.push({ severity: 'warn', path: `provisions[${i}]`, message: `This provision has a notice deadline (${pv.notice_deadline}) but no recognised category; it will be calendared as "other". Check whether it is a renewal, termination or other option.` })
   })
 
   // Final gate: the billing engine must bill every month of the term from this abstract without an
@@ -965,6 +1043,16 @@ export function finalizeAbstract(raw: unknown, pages: readonly string[]): Abstra
   const wireWarnings: string[] = []
   const shaped = wireToShape(raw, wireWarnings)
   const { abstract, warnings: coerceWarnings } = coerceAbstract(shaped)
+  abstract.unreadable = unreadableBillingItems(shaped)
+  // REFUTE grammar round 2 C1b: a stated escalation that could not be read (e.g. a blank first adjustment
+  // date), or more than one rule, travels in `unreadable` too, so the block survives the review re-check.
+  {
+    const sentEsc = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>).escalations : undefined
+    if (Array.isArray(sentEsc) && ((sentEsc.length > 0 && abstract.escalation === null) || sentEsc.length > 1)) {
+      const o = sentEsc[0] && typeof sentEsc[0] === 'object' ? (sentEsc[0] as Record<string, unknown>) : {}
+      abstract.unreadable.push({ list: 'escalation', index: 0, page: Number.isInteger(o.page) ? (o.page as number) : null, quote: typeof o.quote === 'string' ? o.quote.slice(0, 200) : null })
+    }
+  }
   const warnings = [...wireWarnings, ...coerceWarnings]
   const flags: AbstractFlag[] = []
   // REFUTE round 2 C1a: the reviewer marker must only ever come from a human edit. A model quote carrying
@@ -975,6 +1063,9 @@ export function finalizeAbstract(raw: unknown, pages: readonly string[]): Abstra
   // crossCheck skips value checks on unresolved (null) amounts (resolveAmounts already blocked them), and
   // its billing-engine dry run runs only when every amount is resolved and it raised no block itself.
   flags.push(...crossCheck(abstract))
+  for (const u of abstract.unreadable) {
+    flags.push(unreadableBlock(u))
+  }
   // Re-REFUTE 3: the lease states an escalation the model returned malformed. Treating it as "no rule"
   // would skip the schedule-vs-rule comparison, so it blocks until entered by hand.
   const sent = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>).escalations : undefined
@@ -1024,6 +1115,15 @@ function stripReviewerMarker(a: LeaseAbstract): void {
 
 export function revalidateAbstract(raw: unknown, pages: readonly string[]): AbstractResult {
   const { abstract, warnings } = coerceAbstract(raw)
+  // REFUTE grammar round 3 (probe5): ANY billing item that fails validation HERE (e.g. a field nulled by the
+  // post-egress confidentiality scrub) is recorded as unreadable, so it keeps blocking across re-checks
+  // instead of silently disappearing from the abstract the client stores.
+  abstract.unreadable.push(...unreadableBillingItems(raw))
+  const rawEsc = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>).escalation : undefined
+  if (rawEsc && abstract.escalation === null && !abstract.unreadable.some((u) => u.list === 'escalation')) {
+    const o = typeof rawEsc === 'object' ? (rawEsc as Record<string, unknown>) : {}
+    abstract.unreadable.push({ list: 'escalation', index: 0, page: Number.isInteger(o.page) ? (o.page as number) : null, quote: typeof o.quote === 'string' ? o.quote.slice(0, 200) : null })
+  }
   // Never trust a computed figure from the client (REFUTE C1d): resolveAmounts re-derives each one.
   for (const r of abstract.rent_schedule) { r.base_rent_monthly = null; r.rent_psf_annual = null }
   for (const r of abstract.recurring_charges) r.amount_monthly = null
@@ -1038,6 +1138,9 @@ export function revalidateAbstract(raw: unknown, pages: readonly string[]): Abst
   // REFUTE round 3 C1: the multiple-rule and malformed-rule blocks exist only at extraction (they read the
   // raw model output), so a rent period DERIVED from the escalation cannot be trusted at approval. Every
   // rent period must be printed in the lease or entered (and confirmed) by the reviewer.
+  for (const u of abstract.unreadable) {
+    flags.push(unreadableBlock(u))
+  }
   abstract.rent_schedule.forEach((r, i) => {
     if (!r.amount_as_written.trim()) flags.push({ severity: 'block', path: `rent_schedule[${i}]`, message: 'This rent period is derived from the escalation, not printed in the lease; enter its amount as you have verified it.' })
   })

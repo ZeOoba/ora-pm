@@ -465,6 +465,21 @@ describe("mode: 'abstract' (lease abstraction v2)", () => {
     json: async () => ({ stop_reason: stop, content: [{ type: 'text', text: JSON.stringify(payload) }] }),
   })
 
+  it('REFUTE grammar round 2: the confidentiality scrub never lifts an unreadable-item block', async () => {
+    // A denylist term inside a fixed server string ("recurring_charges") must not null the entry.
+    const prev = env.CONFIDENTIAL_TERMS
+    env.CONFIDENTIAL_TERMS = 'zeta,99999,charges'
+    try {
+      const unreadableCam = { type: 'cam_estimate', description: 'CAM', amount_as_written: '$500.00', amount_period: 'month', effective_start: '2026-01-01', effective_end: '', page: 1, quote: 'Base rent $4,500.00 per month', confidence: 0.9 }
+      vi.stubGlobal('fetch', abstractFetch(modelJson({ recurring_charges: [unreadableCam] })))
+      const res = await post(await buildTextPdf(LEASE_TEXT))
+      expect(res.status).toBe(200)
+      const j = await res.json() as { abstract: { unreadable: Array<{ list: string; index: number }> }; flags: Array<{ severity: string; path: string }> }
+      expect(j.abstract.unreadable).toEqual([expect.objectContaining({ list: 'recurring_charges', index: 0 })])
+      expect(j.flags.some((f) => f.severity === 'block' && f.path === 'recurring_charges[0]')).toBe(true)
+    } finally { env.CONFIDENTIAL_TERMS = prev }
+  })
+
   it('rejects an unknown mode before any egress', async () => {
     const fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock)
     const res = await post(await buildTextPdf(LEASE_TEXT), { mode: 'full' })

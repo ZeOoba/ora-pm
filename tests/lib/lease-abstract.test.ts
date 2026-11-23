@@ -16,6 +16,7 @@ import {
   parseWrittenPercent,
   periodWordingMismatch,
   quoteOnPage,
+  revalidateAbstract,
   wireToShape,
   writtenInQuote,
 } from '../../server/lib/lease-abstract'
@@ -105,6 +106,105 @@ describe('buildAbstractRequest', () => {
     walk(ABSTRACT_SCHEMA)
     expect(unions).toBe(0)
     expect(optional).toBe(0)
+  })
+  // First live run (2026-11-23): 400 "The compiled grammar is too large". Grammar budget guard.
+  it('stays inside the grammar budget: no string formats and no enum over 6 values', () => {
+    const big: string[] = []
+    const walk = (s: unknown, path: string): void => {
+      if (!s || typeof s !== 'object') return
+      const o = s as Obj
+      expect(o, path).not.toHaveProperty('format')
+      if (Array.isArray(o.enum) && o.enum.length > 6) big.push(`${path} (${o.enum.length})`)
+      Object.entries(o).forEach(([k, v]) => (Array.isArray(v) ? v.forEach((x, i) => walk(x, `${path}.${k}[${i}]`)) : walk(v, `${path}.${k}`)))
+    }
+    walk(ABSTRACT_SCHEMA, '$')
+    expect(big).toEqual([])
+  })
+  it('server-side validation still holds for the plain-string wire fields', () => {
+    const w = good()
+    ;(w.facts[0] as Obj).field = 'Tenant Legal Name' // normalized
+    w.facts.push(fact('lease_signing_mood', 'happy', 1, 'Acme Fabrication LLC, an Ohio limited liability company')) // unknown → dropped
+    ;(w.rent_schedule[0] as Obj).start = '2026-02-30' // invalid calendar date → row rejected by zod
+    ;(w as Obj).provisions = [{ category: 'Renewal Option', summary: 'One 5-year renewal option.', notice_deadline: '', exercise_window_start: '', exercise_window_end: '', ...src(3, 'one option to renew for five (5) years') },
+      { category: 'Parking Lot Rules', summary: 'Ten spaces.', notice_deadline: '', exercise_window_start: '', exercise_window_end: '', ...src(3, 'one option to renew for five (5) years') }]
+    const r = run(w)
+    expect(r.abstract.tenant_legal_name?.value).toBe('Acme Fabrication LLC')
+    expect(r.warnings.some((x) => /unknown field/.test(x))).toBe(true)
+    expect(r.abstract.rent_schedule).toHaveLength(2)
+    expect(r.warnings.some((x) => /rent_schedule\[0\] was malformed/.test(x))).toBe(true)
+    expect(r.abstract.provisions.map((p) => p.category)).toEqual(['renewal_option', 'other'])
+    expect(r.warnings.some((x) => /Parking Lot Rules/.test(x))).toBe(true)
+  })
+  it('REFUTE grammar C1: a concession or recurring charge with an unreadable date blocks, at extraction and again at approval', () => {
+    const w = good()
+    ;(w.concessions[0] as Obj).period_end = ''
+    ;(w.recurring_charges[0] as Obj).effective_end = 'end of term'
+    const r = run(w)
+    expect(r.abstract.concessions).toHaveLength(0)
+    expect(r.abstract.unreadable.map((u) => `${u.list}[${u.index}]`)).toEqual(['concessions[0]', 'recurring_charges[0]'])
+    expect(blocks(r).map((f) => f.path)).toEqual(expect.arrayContaining(['concessions[0]', 'recurring_charges[0]']))
+    // The review screen re-checks the abstract it holds: the block must survive that round trip.
+    const again = revalidateAbstract(JSON.parse(JSON.stringify(r.abstract)), PAGES)
+    expect(again.flags.filter((f) => f.severity === 'block').map((f) => f.path)).toEqual(expect.arrayContaining(['concessions[0]', 'recurring_charges[0]']))
+  })
+  it('REFUTE grammar round 2 C1b: an unreadable escalation keeps blocking after every re-check', () => {
+    const w = good()
+    ;(esc(w) as Obj).first_adjustment_date = ''
+    const r = run(w)
+    expect(r.abstract.escalation).toBeNull()
+    let a = JSON.parse(JSON.stringify(r.abstract))
+    for (let k = 0; k < 3; k++) {
+      const again = revalidateAbstract(a, PAGES)
+      expect(again.flags.some((f) => f.severity === 'block' && f.path === 'escalation')).toBe(true)
+      a = JSON.parse(JSON.stringify(again.abstract))
+    }
+  })
+  it('REFUTE grammar round 2 C1: a malformed unreadable entry is kept as a blocking placeholder, never dropped', () => {
+    const w = good()
+    ;(w.concessions[0] as Obj).period_end = ''
+    const a = JSON.parse(JSON.stringify(run(w).abstract))
+    a.unreadable[0].list = null // e.g. nulled by a scrub
+    const again = revalidateAbstract(a, PAGES)
+    expect(again.abstract.unreadable).toHaveLength(1)
+    expect(again.flags.some((f) => f.severity === 'block' && f.path === 'unreadable')).toBe(true)
+    const third = revalidateAbstract(JSON.parse(JSON.stringify(again.abstract)), PAGES)
+    expect(third.flags.some((f) => f.severity === 'block' && f.path === 'unreadable')).toBe(true)
+  })
+  it('REFUTE grammar round 3 (probe5): a billing item that becomes invalid during review stays blocked', () => {
+    const w = good()
+    ;(w as Obj).concessions = [{ charge_type: 'rent', period_start: '2026-01-01', period_end: '2026-01-31', kind: 'pct', value_as_written: '50%', value_period: 'none', reason: 'Abatement', ...src(2, 'fifty percent (50%) abatement of Base Rent for January 2026') }]
+    const a = JSON.parse(JSON.stringify(run(w).abstract))
+    expect(a.unreadable).toEqual([])
+    // As the confidentiality scrub would: null model-written text fields.
+    a.concessions[0].reason = null
+    a.recurring_charges[0].description = null
+    a.escalation.kind = null
+    let cur = a
+    for (let k = 0; k < 3; k++) {
+      const again = revalidateAbstract(cur, PAGES)
+      const paths = again.flags.filter((f) => f.severity === 'block').map((f) => f.path)
+      expect(paths).toEqual(expect.arrayContaining(['concessions[0]', 'recurring_charges[0]', 'escalation']))
+      cur = JSON.parse(JSON.stringify(again.abstract))
+    }
+  })
+  it('extra category aliases and (s)', () => {
+    const w = good()
+    const prov = (category: string) => ({ category, summary: 'x', notice_deadline: '', exercise_window_start: '', exercise_window_end: '', ...src(3, 'one option to renew for five (5) years') })
+    ;(w as Obj).provisions = ['Option to Extend', 'Extension Options', 'Renewal Option(s)', 'Termination Rights'].map(prov)
+    expect(run(w).abstract.provisions.map((p) => p.category)).toEqual(['renewal_option', 'renewal_option', 'renewal_option', 'termination'])
+  })
+  it('REFUTE grammar C3: near-miss provision categories map to the right category', () => {
+    const w = good()
+    const prov = (category: string) => ({ category, summary: 'x', notice_deadline: '', exercise_window_start: '', exercise_window_end: '', ...src(3, 'one option to renew for five (5) years') })
+    ;(w as Obj).provisions = ['Renewal Options', 'ROFR/ROFO', 'Early Termination', 'Right of First Refusal', 'Assignment/Sublet', 'Assignment & Subletting'].map(prov)
+    expect(run(w).abstract.provisions.map((p) => p.category)).toEqual(['renewal_option', 'rofr_rofo', 'termination', 'rofr_rofo', 'assignment_sublet', 'assignment_sublet'])
+  })
+  it('REFUTE grammar C2: prototype names are unknown fields, not duplicates', () => {
+    const w = good()
+    w.facts.push(fact('constructor', 'x', 1, 'Acme Fabrication LLC, an Ohio limited liability company'))
+    const r = run(w)
+    expect(r.warnings.some((x) => /unknown field/.test(x))).toBe(true)
+    expect(r.warnings.some((x) => /stated more than once/.test(x))).toBe(false)
   })
   it('asks for money as written plus its period, never a computed monthly figure', () => {
     const s = JSON.stringify(ABSTRACT_SCHEMA)

@@ -17,6 +17,8 @@ export interface LeaseAbstract {
   base_year: Cited<number>; cam_cap_pct: Cited<number>; admin_fee_pct: Cited<number>; holdover_rent_multiplier: Cited<number>
   rent_schedule: RentRow[]; escalation: Escalation | null; concessions: Concession[]; recurring_charges: Recurring[]
   late_fee: LateFee | null; provisions: Provision[]
+  /** Billing items the model returned unreadably; approval stays blocked while any exist (server-owned). */
+  unreadable?: Array<{ list: string; index: number; page: number | null; quote: string | null }>
 }
 export interface Flag { severity: 'block' | 'warn'; path: string; message: string }
 export interface Confirmation {
