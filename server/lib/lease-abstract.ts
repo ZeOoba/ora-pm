@@ -457,8 +457,34 @@ export function parseAbstractResponse(json: unknown): unknown {
   if (!text.trim()) throw new ExtractionStopped('no_output')
   const obj = extractJsonObject(text)
   if (obj === null) throw new ExtractionStopped('bad_json')
+  // No grammar enforces the top-level shape any more (REFUTE plain-JSON C1/C2): a misnamed, missing, null,
+  // non-list or duplicated list would silently empty that list and lose every billing item in it, so the
+  // shape is checked here and any violation fails closed like unparseable output.
+  if (!hasWireShape(obj) || hasDuplicateTopLevelKey(text)) throw new ExtractionStopped('bad_json')
+  // Prose outside the object can be the model saying the abstract is partial; surface it (REFUTE C4).
+  const outside = text.replace(JSON_SPAN_RE, '').replace(/```(json)?/gi, '').trim()
+  if (outside) proseOutside.set(obj, outside.slice(0, 300))
   return obj
 }
+
+/** The seven top-level lists the wire schema requires, each present and an array, nothing else. */
+export const WIRE_LISTS = ['facts', 'rent_schedule', 'escalations', 'concessions', 'recurring_charges', 'late_fees', 'provisions'] as const
+
+export function hasWireShape(o: Record<string, unknown>): boolean {
+  const keys = Object.keys(o)
+  return keys.length === WIRE_LISTS.length && WIRE_LISTS.every((k) => Object.hasOwn(o, k) && Array.isArray(o[k]))
+}
+
+/** JSON.parse keeps the LAST of duplicate keys, so `"concessions": []` repeated after the real list would
+ *  empty it. A key token is `"name"` followed by `:` and not preceded by a backslash (inside a JSON string
+ *  quotes are escaped), so text in quotes cannot trigger this. Any repeat of a wire list key fails closed. */
+export function hasDuplicateTopLevelKey(text: string): boolean {
+  return WIRE_LISTS.some((k) => (text.match(new RegExp(`(?<!\\\\)"${k}"\\s*:`, 'g')) ?? []).length > 1)
+}
+
+const JSON_SPAN_RE = /\{[\s\S]*\}/
+/** Text the model wrote outside the JSON object, keyed by the parsed object (read once by finalizeAbstract). */
+const proseOutside = new WeakMap<object, string>()
 
 /** The single JSON object in a text reply: the whole text, else the span from the first '{' to the last '}'
  *  (tolerates a ```json fence or a sentence around it). Anything that does not parse to a plain object is
@@ -1071,6 +1097,8 @@ export function crossCheck(a: LeaseAbstract): AbstractFlag[] {
 /** Coerce + verify + cross-check a parsed model output against the pages it was extracted from. Pure. */
 export function finalizeAbstract(raw: unknown, pages: readonly string[]): AbstractResult {
   const wireWarnings: string[] = []
+  const prose = raw && typeof raw === 'object' ? proseOutside.get(raw) : undefined
+  if (prose) wireWarnings.push(`The extraction added a note outside the abstract; check the lease for anything it left out: "${prose}"`)
   const shaped = wireToShape(raw, wireWarnings)
   const { abstract, warnings: coerceWarnings } = coerceAbstract(shaped)
   abstract.unreadable = unreadableBillingItems(shaped)
