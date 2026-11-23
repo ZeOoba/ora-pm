@@ -1803,6 +1803,14 @@ describe('monthly-billing: autopay variance guard (Phase 7)', () => {
     expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
   })
 
+  it('REFUTE round 3: the first app-billed month after a QuickBooks cutover is held once (no baseline), whatever was keyed', async () => {
+    state.leases = [{ ...AUTOPAY_LEASE, base_rent_monthly: 50000 }]
+    state.balanceForwards = [{ lease_id: 'lease_1', as_of: '2026-05-31' }]
+    const body = await (await postBilling()).json() as Body
+    expect(body.autopayHeld.map(h => h.lease_id)).toEqual(['lease_1'])
+    expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
+  })
+
   it('no baseline is fine for a lease whose term began this period', async () => {
     state.leases = [{ ...AUTOPAY_LEASE, start_date: '2026-06-01' }]
     const body = await (await postBilling()).json() as Body

@@ -70,8 +70,8 @@ export const AUTOPAY_VARIANCE_LIMIT = 0.15
  *   priorExpected — what the CURRENT lease inputs (schedule or flat fields) bill for the previous period;
  *                   null when the engine raised an exception for it.
  *   noBaselineOk  — with no baseline (priorPosted null) the debit is allowed only when this is true: the
- *                   caller sets it when the lease's term began this period, or a QuickBooks balance forward
- *                   covers last period. Otherwise a missing month (an exception, a failed run) is held
+ *                   caller sets it only when the lease's term began this period (never for a QuickBooks
+ *                   cutover: that first app-billed month is held once, REFUTE round 3). Otherwise a missing month (an exception, a failed run) is held
  *                   (REFUTE C5: that is exactly when a mis-keyed amount would go through unchecked).
  *
  * The move is EXPLAINED when the current inputs reproduce last month's posted total to the cent: it then

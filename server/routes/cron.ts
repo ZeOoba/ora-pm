@@ -329,6 +329,7 @@ cronRouter.post('/monthly-billing', async (c) => {
       for (const r of rows) {
         leaseExceptions.push({ lease_id: r.id, reason: 'closed_in_period_not_billed', start_date: r.start_date, end_date: r.end_date, code: r.status })
       }
+      if (rows.length >= POSTGREST_MAX_ROWS) errorMessages.push(`catch-up check for closed leases hit the ${POSTGREST_MAX_ROWS}-row cap; the list below is incomplete.`)
       errorMessages.push(`${rows.length} lease(s) now expired or terminated have days in this past period and were NOT billed by this catch-up run (see leaseExceptions) — check whether their final days were billed, and post any missing charge manually.`)
     }
   }
@@ -465,8 +466,8 @@ cronRouter.post('/monthly-billing', async (c) => {
   // a freshly built amount while the debit takes the stale posted one), plus any built charge not yet posted
   // (dry run). The baseline is last period's posted monthly auto charges; the move is explained only when
   // the lease's CURRENT inputs reproduce that baseline to the cent. No baseline at all (no monthly auto
-  // charge last period, voided or not) is a HOLD unless the lease's term began this period or a QuickBooks
-  // balance forward covers last period — a month that went unbilled (exception, failed run) is exactly when
+  // charge last period, voided or not) is a HOLD unless the lease's term began this period or the lease's
+  // inputs bill $0 for last period (a whole-month abatement) — a QuickBooks cutover is NOT exempt; a month that went unbilled (exception, failed run) is exactly when
   // a mis-keyed amount would otherwise go through unchecked. A failed read defers all autopay (never debit
   // blind; every candidate counts in `remaining`).
   const prior = priorPeriod(year, month)
@@ -504,8 +505,10 @@ cronRouter.post('/monthly-billing', async (c) => {
       const unposted = (builtByLease.get(lease.id) ?? []).filter((ch) => !currentKeys.has(ch.idempotency_key))
       const current = r2((currentPosted.get(lease.id) ?? 0) + total(unposted))
       const priorOut = buildMonthlyCharges(chargeInput(lease, prior.year, prior.month))
-      const cut = bfCutoff.get(lease.id)
-      const noBaselineOk = (typeof lease.start_date === 'string' && lease.start_date >= periodStartStr) || (cut !== undefined && cut >= prior.start)
+      // Only a lease whose term began this period may debit with no baseline. NOT a QuickBooks cutover (REFUTE
+      // round 3): the first app-billed month after a balance forward is when imported figures are least
+      // verified, so its first autopay is held once for a person to confirm.
+      const noBaselineOk = typeof lease.start_date === 'string' && lease.start_date >= periodStartStr
       const reason = autopayVarianceHold({
         current,
         currentExpected: total(builtByLease.get(lease.id) ?? []),

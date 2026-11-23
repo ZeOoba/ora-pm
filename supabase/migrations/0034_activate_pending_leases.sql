@@ -33,6 +33,9 @@
 --
 -- Service role only. Re-runnable.
 
+-- An earlier two-argument draft must never survive as an overload (a 2-arg call would be ambiguous).
+DROP FUNCTION IF EXISTS activate_pending_leases(date, boolean);
+
 CREATE OR REPLACE FUNCTION activate_pending_leases(p_today date, p_dry_run boolean DEFAULT false, p_as_of date DEFAULT NULL) RETURNS jsonb
 LANGUAGE plpgsql
 SET search_path = public, pg_temp
