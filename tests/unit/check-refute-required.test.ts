@@ -121,6 +121,7 @@ describe('check-refute-required — financial-source classification', () => {
       'server/lib/api-error.ts', // error-response shaping
       'server/lib/rate-limit.ts', // abuse throttle
       'server/lib/list-query.ts', // list-endpoint sort/page params (display, not totals)
+      'server/lib/upstream-error.ts', // Worker-log diagnostics for a failed Anthropic call (no imports, no money)
     ])
     // Every relative import form: `from '...'` / `from "..."` (incl. `import type` and
     // `export ... from`), bare side-effect `import '...'`, and dynamic `import('...')`. The scan
