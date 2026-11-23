@@ -179,8 +179,12 @@ intakeRouter.post('/lease', async (c) => {
     }
     // Model-derived warnings (malformed-field notes, a category echo, and prose the model wrote outside the
     // abstract) go through the same post-egress scrub as every other model string (REFUTE plain-JSON R-C5).
-    const warnings = abs.warnings.map((w, i) =>
-      scrubConfidential(w, terms, `warnings[${i}]`, []) ?? 'A note from the extraction was withheld by the confidentiality guard.')
+    // Scrub the FULL text, then shorten (REFUTE plain-JSON R-C5 round 3): truncating first could cut a
+    // confidential term into a fragment the scan no longer recognises.
+    const warnings = abs.warnings.map((w, i) => {
+      const clean = scrubConfidential(w, terms, `warnings[${i}]`, [])
+      return clean === null ? 'A note from the extraction was withheld by the confidentiality guard.' : clean.length > 600 ? `${clean.slice(0, 600)}…` : clean
+    })
     const notSent = describeNotSent(scanned)
     if (notSent) {
       warnings.push(`Only the document's extracted text was sent for extraction; ${notSent} were not. Check the extracted fields against the document.`)

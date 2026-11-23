@@ -492,6 +492,17 @@ describe("mode: 'abstract' (lease abstraction v2)", () => {
     expect(raw).toContain('withheld by the confidentiality guard')
   })
 
+  it('REFUTE plain-JSON R-C5 round 3: a denylist term across the old 300-character cut is still withheld', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'x'.repeat(296) + ' Zeta portfolio note.\n' + JSON.stringify(modelJson()) }] }),
+    }))
+    const res = await post(await buildTextPdf(LEASE_TEXT))
+    const raw = (await res.text()).toLowerCase()
+    expect(raw).not.toContain('zet')
+    expect(raw).toContain('withheld by the confidentiality guard')
+  })
+
   it('rejects an unknown mode before any egress', async () => {
     const fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock)
     const res = await post(await buildTextPdf(LEASE_TEXT), { mode: 'full' })

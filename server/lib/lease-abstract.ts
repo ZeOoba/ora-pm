@@ -162,7 +162,7 @@ function provisionCategory(v: unknown, warnings: string[]): unknown {
   const n = normalizeName(v.replace(/\(s\)/gi, '')).replace(/[/&]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '')
   const c = CATEGORY_ALIASES[n] ?? n
   if ((PROVISION_CATEGORIES as readonly string[]).includes(c)) return c
-  warnings.push(`A provision category "${v.slice(0, 40)}" is not recognised; it was filed as "other".`)
+  warnings.push(`A provision category "${v}" is not recognised; it was filed as "other".`)
   return 'other'
 }
 
@@ -300,7 +300,7 @@ function unreadableBillingItems(shaped: unknown): UnreadableItem[] {
     items.forEach((item, index) => {
       if ((zs as z.ZodTypeAny).safeParse(item).success) return
       const o = item && typeof item === 'object' ? (item as Record<string, unknown>) : {}
-      out.push({ list, index, page: Number.isInteger(o.page) ? (o.page as number) : null, quote: typeof o.quote === 'string' ? o.quote.slice(0, 200) : null })
+      out.push({ list, index, page: Number.isInteger(o.page) ? (o.page as number) : null, quote: typeof o.quote === 'string' ? o.quote : null })
     })
   }
   return out
@@ -463,7 +463,9 @@ export function parseAbstractResponse(json: unknown): unknown {
   if (!hasWireShape(obj) || hasDuplicateTopLevelKey(text)) throw new ExtractionStopped('bad_json')
   // Prose outside the object can be the model saying the abstract is partial; surface it (REFUTE C4).
   const outside = text.replace(JSON_SPAN_RE, '').replace(/```(json)?/gi, '').trim()
-  if (outside) proseOutside.set(obj, outside.slice(0, 300))
+  // Stored whole: the route scrubs warnings for confidential terms FIRST and only then shortens them, so a
+  // term cannot slip through as a fragment cut at the boundary (REFUTE plain-JSON R-C5 round 3).
+  if (outside) proseOutside.set(obj, outside)
   return obj
 }
 
@@ -1121,7 +1123,7 @@ export function finalizeAbstract(raw: unknown, pages: readonly string[]): Abstra
     const sentEsc = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>).escalations : undefined
     if (Array.isArray(sentEsc) && ((sentEsc.length > 0 && abstract.escalation === null) || sentEsc.length > 1)) {
       const o = sentEsc[0] && typeof sentEsc[0] === 'object' ? (sentEsc[0] as Record<string, unknown>) : {}
-      abstract.unreadable.push({ list: 'escalation', index: 0, page: Number.isInteger(o.page) ? (o.page as number) : null, quote: typeof o.quote === 'string' ? o.quote.slice(0, 200) : null })
+      abstract.unreadable.push({ list: 'escalation', index: 0, page: Number.isInteger(o.page) ? (o.page as number) : null, quote: typeof o.quote === 'string' ? o.quote : null })
     }
   }
   const warnings = [...wireWarnings, ...coerceWarnings]
@@ -1193,7 +1195,7 @@ export function revalidateAbstract(raw: unknown, pages: readonly string[]): Abst
   const rawEsc = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>).escalation : undefined
   if (rawEsc && abstract.escalation === null && !abstract.unreadable.some((u) => u.list === 'escalation')) {
     const o = typeof rawEsc === 'object' ? (rawEsc as Record<string, unknown>) : {}
-    abstract.unreadable.push({ list: 'escalation', index: 0, page: Number.isInteger(o.page) ? (o.page as number) : null, quote: typeof o.quote === 'string' ? o.quote.slice(0, 200) : null })
+    abstract.unreadable.push({ list: 'escalation', index: 0, page: Number.isInteger(o.page) ? (o.page as number) : null, quote: typeof o.quote === 'string' ? o.quote : null })
   }
   // Never trust a computed figure from the client (REFUTE C1d): resolveAmounts re-derives each one.
   for (const r of abstract.rent_schedule) { r.base_rent_monthly = null; r.rent_psf_annual = null }
