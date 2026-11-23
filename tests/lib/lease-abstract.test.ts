@@ -73,11 +73,15 @@ const mutate = (f: (raw: Wire) => void, pages = PAGES) => { const raw = good(); 
 const withPage = (i: number, from: string, to: string) => PAGES.map((p, k) => (k === i ? p.replace(from, to) : p))
 
 describe('buildAbstractRequest', () => {
-  it('sends scanned page text only, with structured outputs and no forced tool_choice', () => {
+  it('sends scanned page text only, the schema as prompt text (no structured outputs) and no forced tool_choice', () => {
     const req = buildAbstractRequest(PAGES, 'claude-opus-5') as Obj
     expect(req).not.toHaveProperty('tool_choice')
     expect(req).not.toHaveProperty('tools')
-    expect(req.output_config).toEqual({ effort: 'high', format: { type: 'json_schema', schema: ABSTRACT_SCHEMA } })
+    // Live run 2026-11-23: structured outputs refused the schema twice ("compiled grammar is too large"), so the
+    // schema is sent as text and every value is validated server-side; no grammar is compiled.
+    expect(req.output_config).toEqual({ effort: 'high' })
+    expect(String(req.system)).toContain(JSON.stringify(ABSTRACT_SCHEMA))
+    expect(String(req.system)).toMatch(/only one JSON object/i)
     const text = JSON.stringify(req.messages)
     expect(text).toContain('--- Page 2 of 4 ---')
     expect(text).not.toMatch(/"type":"document"|base64/)
@@ -215,6 +219,14 @@ describe('buildAbstractRequest', () => {
 })
 
 describe('parseAbstractResponse', () => {
+  it('tolerates a code fence or stray prose around the JSON object (no structured outputs)', () => {
+    expect(parseAbstractResponse({ stop_reason: 'end_turn', content: [{ type: 'text', text: '```json\n{"a":1}\n```' }] })).toEqual({ a: 1 })
+    expect(parseAbstractResponse({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'Here is the abstract:\n{"a":{"b":"}"}}\nDone.' }] })).toEqual({ a: { b: '}' } })
+  })
+  it('still fails closed on text that is not one JSON object', () => {
+    expect(() => parseAbstractResponse({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'I could not read the lease.' }] })).toThrow(ExtractionStopped)
+    expect(() => parseAbstractResponse({ stop_reason: 'end_turn', content: [{ type: 'text', text: '[1,2]' }] })).toThrow(ExtractionStopped)
+  })
   it('parses the JSON text block', () => {
     expect(parseAbstractResponse({ stop_reason: 'end_turn', content: [{ type: 'thinking' }, { type: 'text', text: '{"a":1}' }] })).toEqual({ a: 1 })
   })

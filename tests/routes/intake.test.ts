@@ -501,14 +501,14 @@ describe("mode: 'abstract' (lease abstraction v2)", () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('egress is scanned text with structured outputs (no forced tool_choice, no PDF), and returns abstract + flags', async () => {
+  it('egress is scanned text with the schema in the prompt (no grammar, no forced tool_choice, no PDF), and returns abstract + flags', async () => {
     const fetchMock = abstractFetch(modelJson()); vi.stubGlobal('fetch', fetchMock)
     const pdf = await buildTextPdf(LEASE_TEXT)
     const res = await post(pdf)
     expect(res.status).toBe(200)
     const { raw } = sentBody(fetchMock)
     const sent = JSON.parse(raw) as { output_config?: { format?: { type?: string } }; tool_choice?: unknown; messages: Array<{ content: Array<{ type: string }> }> }
-    expect(sent.output_config?.format?.type).toBe('json_schema')
+    expect(sent.output_config?.format).toBeUndefined() // schema travels in the prompt; no grammar compiled
     expect(sent.tool_choice).toBeUndefined()
     expect(sent.messages[0].content.every((b) => b.type === 'text')).toBe(true)
     expect(raw).not.toContain(toBase64(pdf).slice(0, 40))

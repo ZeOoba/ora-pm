@@ -123,6 +123,14 @@ const INSTRUCTIONS = [
   '- provisions: tenant rights and special rules (options, ROFR/ROFO, termination, exclusives, use, signage, parking, assignment, insurance requirements, maintenance split, HVAC, holdover, guaranty, relocation). summary is one plain sentence. notice_deadline, exercise_window_start and exercise_window_end are YYYY-MM-DD, or "" when the lease does not let you determine them.',
 ].join('\n')
 
+/** INSTRUCTIONS plus the wire schema as text (no structured outputs; see buildAbstractRequest). */
+const SYSTEM_PROMPT = [
+  INSTRUCTIONS,
+  '',
+  'Output: return only one JSON object and nothing else (no prose, no code fence). It must match this JSON schema exactly: every key present, no extra keys, dates as YYYY-MM-DD strings, field and category names spelled exactly as listed in their descriptions.',
+  JSON.stringify(ABSTRACT_SCHEMA),
+].join('\n')
+
 /**
  * Convert the WIRE form (sentinels, fact list) into the internal shape coerceAbstract validates.
  * Sentinels: 0 → null for optional numbers; "" → null for optional dates; first escalation / late fee.
@@ -227,8 +235,13 @@ export function buildAbstractRequest(pages: readonly string[], model: string) {
   return {
     model,
     max_tokens: ABSTRACT_MAX_TOKENS,
-    output_config: { effort: 'high', format: { type: 'json_schema', schema: ABSTRACT_SCHEMA } },
-    system: INSTRUCTIONS,
+    // NO structured outputs (live runs 2026-11-23, twice): the API refused this schema with 400 "The compiled
+    // grammar is too large", even after dates and the large enums became plain strings. The schema travels
+    // as text in the system prompt instead; nothing is trusted from the shape: wireToShape + zod, the
+    // quote/page checks, money re-derivation, cross-checks, human confirmation and the unreadable-item
+    // blocks validate every value, and text that is not one JSON object fails closed (bad_json).
+    output_config: { effort: 'high' },
+    system: SYSTEM_PROMPT,
     messages: [{ role: 'user', content: [{ type: 'text', text: body }] }],
   }
 }
@@ -442,11 +455,28 @@ export function parseAbstractResponse(json: unknown): unknown {
   if (res.stop_reason === 'max_tokens') throw new ExtractionStopped('max_tokens')
   const text = (res.content ?? []).filter((b) => b.type === 'text').map((b) => b.text ?? '').join('')
   if (!text.trim()) throw new ExtractionStopped('no_output')
-  try {
-    return JSON.parse(text)
-  } catch {
-    throw new ExtractionStopped('bad_json')
+  const obj = extractJsonObject(text)
+  if (obj === null) throw new ExtractionStopped('bad_json')
+  return obj
+}
+
+/** The single JSON object in a text reply: the whole text, else the span from the first '{' to the last '}'
+ *  (tolerates a ```json fence or a sentence around it). Anything that does not parse to a plain object is
+ *  null, so the caller fails closed. */
+export function extractJsonObject(text: string): Record<string, unknown> | null {
+  const tryParse = (t: string): Record<string, unknown> | null => {
+    try {
+      const v = JSON.parse(t) as unknown
+      return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null
+    } catch {
+      return null
+    }
   }
+  const whole = tryParse(text.trim())
+  if (whole) return whole
+  const a = text.indexOf('{')
+  const b = text.lastIndexOf('}')
+  return a >= 0 && b > a ? tryParse(text.slice(a, b + 1)) : null
 }
 
 // ── citation verification ─────────────────────────────────────────────────────
