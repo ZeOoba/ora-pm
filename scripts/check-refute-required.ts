@@ -63,6 +63,9 @@ export const FINANCIAL_SOURCE_PATHS: ReadonlySet<string> = new Set([
   // Lease abstraction Phase 7: groups the 0020 rows the cron bills from (NUMERIC coercion, superseded
   // rows kept so they fail closed) and the autopay variance guard that holds a surprise debit.
   'server/lib/billing-run.ts',
+  // Lease abstraction Phase 4/7: builds the approve payload whose rent schedule, concessions and recurring
+  // charges monthly billing then bills, and refuses a schedule the billing engine cannot bill.
+  'server/lib/lease-approve.ts',
   // Lease abstraction v2 (Phase 3): the money/date fields and cross-checks a human approves into the
   // rent schedule, plus the billing-engine dry run that gates approval.
   'server/lib/lease-abstract.ts',

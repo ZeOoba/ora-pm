@@ -33,7 +33,7 @@
 
 CREATE OR REPLACE FUNCTION activate_pending_leases(p_today date, p_dry_run boolean DEFAULT false) RETURNS jsonb
 LANGUAGE plpgsql
-SET search_path = public
+SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_id uuid;
@@ -93,10 +93,63 @@ $$;
 REVOKE EXECUTE ON FUNCTION activate_pending_leases(date, boolean) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION activate_pending_leases(date, boolean) TO service_role;
 
+-- sync_scheduled_lease_amounts(p_as_of): plan §5a item 2. Once a lease has schedule rows, billing reads the
+-- schedule and leases.base_rent_monthly / cam_estimate_monthly are display only — but the rent_roll view (0004),
+-- the UI and the portal still read them. This keeps them equal to the schedule as of p_as_of, for active and
+-- pending leases only (history is never rewritten):
+--   base_rent_monthly    ← the active rent row covering p_as_of (left alone when none covers it: billing flags
+--                          that lease as schedule_gap)
+--   cam_estimate_monthly ← ONLY for a lease whose CAM comes from cam_estimate recurring rows (rent-schedule.ts
+--                          CAM single-source rule): the active row covering p_as_of, or 0 when none does
+--                          (billing bills no CAM then). A lease with no active cam row bills this field, so it is
+--                          never touched.
+-- Called by the live monthly-billing run. Billing never reads these fields for a scheduled lease, so this
+-- function cannot change any amount billed.
+CREATE OR REPLACE FUNCTION sync_scheduled_lease_amounts(p_as_of date) RETURNS jsonb
+LANGUAGE plpgsql
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_rent int;
+  v_cam int;
+BEGIN
+  IF p_as_of IS NULL THEN
+    RAISE EXCEPTION 'sync_scheduled_lease_amounts: p_as_of is required';
+  END IF;
+
+  UPDATE leases l SET base_rent_monthly = cur.base_rent_monthly
+    FROM (SELECT DISTINCT ON (r.lease_id) r.lease_id, r.base_rent_monthly
+            FROM lease_rent_schedule r
+           WHERE r.superseded_at IS NULL AND p_as_of BETWEEN r.effective_start AND r.effective_end
+           ORDER BY r.lease_id, r.effective_start DESC) cur
+   WHERE l.id = cur.lease_id AND l.status IN ('active', 'pending')
+     AND l.base_rent_monthly IS DISTINCT FROM cur.base_rent_monthly;
+  GET DIAGNOSTICS v_rent = ROW_COUNT;
+
+  UPDATE leases l SET cam_estimate_monthly = cur.amount
+    FROM (SELECT h.lease_id,
+                 COALESCE((SELECT c.amount_monthly FROM lease_recurring_charges c
+                            WHERE c.lease_id = h.lease_id AND c.type = 'cam_estimate' AND c.superseded_at IS NULL
+                              AND p_as_of BETWEEN c.effective_start AND c.effective_end
+                            ORDER BY c.effective_start DESC LIMIT 1), 0) AS amount
+            FROM (SELECT DISTINCT lease_id FROM lease_recurring_charges
+                   WHERE type = 'cam_estimate' AND superseded_at IS NULL) h) cur
+   WHERE l.id = cur.lease_id AND l.status IN ('active', 'pending')
+     AND l.cam_estimate_monthly IS DISTINCT FROM cur.amount;
+  GET DIAGNOSTICS v_cam = ROW_COUNT;
+
+  RETURN jsonb_build_object('rent_updated', v_rent, 'cam_updated', v_cam);
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION sync_scheduled_lease_amounts(date) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION sync_scheduled_lease_amounts(date) TO service_role;
+
 ALTER TABLE lease_concessions DROP CONSTRAINT IF EXISTS lease_concessions_all_not_fixed;
 ALTER TABLE lease_concessions ADD CONSTRAINT lease_concessions_all_not_fixed
   CHECK (NOT (charge_type = 'all' AND kind = 'fixed_amount'));
 
 -- Rollback:
 --   DROP FUNCTION IF EXISTS activate_pending_leases(date, boolean);
+--   DROP FUNCTION IF EXISTS sync_scheduled_lease_amounts(date);
 --   ALTER TABLE lease_concessions DROP CONSTRAINT IF EXISTS lease_concessions_all_not_fixed;

@@ -83,7 +83,7 @@ describe('check-refute-required — financial-source classification', () => {
   it('exposes the financial path set with the expected membership', () => {
     // 25 on main (#67 ar-aging-report, #71 gl.ts lib + route, #76 qb-iif-accounts, #81 gl-opening-balance) + server/lib/lease-abstract.ts from this PR.
     // + server/lib/balance-forward-import.ts and server/routes/balance-forwards.ts (0030).
-    expect(FINANCIAL_SOURCE_PATHS.size).toBe(31)
+    expect(FINANCIAL_SOURCE_PATHS.size).toBe(32)
     for (const p of [
       'server/routes/cron.ts',
       'server/routes/stripe.ts',
@@ -97,6 +97,7 @@ describe('check-refute-required — financial-source classification', () => {
       'server/lib/billing.ts',
       'server/lib/rent-schedule.ts',
       'server/lib/billing-run.ts',
+      'server/lib/lease-approve.ts',
       'server/lib/lease-abstract.ts',
       'scripts/backfill-rent-schedule.ts',
       'server/lib/schemas.ts',

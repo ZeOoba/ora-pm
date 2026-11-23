@@ -174,6 +174,10 @@ cronRouter.post('/monthly-billing', async (c) => {
   const activationFailed = activationResult === null
   const wouldActivate = new Set((activationResult?.activated ?? []).map((a) => a.lease_id))
   const activationBlocked = new Map((activationResult?.blocked ?? []).map((b) => [b.lease_id, b]))
+  // Plan §5a item 2: keep leases.base_rent_monthly / cam_estimate_monthly (read by the rent_roll view, the UI and
+  // the portal) equal to the schedule in effect today. Display only — billing never reads them for a scheduled
+  // lease — so a failure is reported, not fatal. Live runs only.
+  const amountSync = dryRun ? null : await db.rpc('sync_scheduled_lease_amounts', { p_as_of: todayIso })
 
   const AUTOPAY_BATCH_LIMIT = 8
   const BULK_QUERY_CHUNK_SIZE = 100
@@ -204,6 +208,9 @@ cronRouter.post('/monthly-billing', async (c) => {
   let posted = 0, skipped = 0
   let chargeErrors = 0, autopayErrors = 0
   const errorMessages: string[] = []
+  if (amountSync?.error) {
+    errorMessages.push(`lease rent/CAM display sync failed (billing unaffected; the rent roll may show a superseded step): ${amountSync.error.message}`)
+  }
   if (activationFailed) {
     errorMessages.push(`pending-lease activation failed; pending leases whose start date has arrived were NOT billed this run: ${activation.error?.message ?? 'activate_pending_leases returned no result'}`)
   }
@@ -829,7 +836,7 @@ cronRouter.post('/monthly-billing', async (c) => {
   // reservationFailed (0031): a reserve_autopay_payment call failed or returned garbage, so that
   // lease's state is unknown and it got no debit attempt — the same "never debit blind" class.
   const status = (chargesBulkFailed || voidRecheckFailed || priorAutopayCheckFailed || debitInputsBulkFailed || reservationFailed || scheduleLookupFailed || activationFailed || varianceLookupFailed) ? 500 : 200
-  return c.json({ posted, skipped, errors, chargeErrors, autopayErrors, errorMessages, remaining, year, month, voidedSkipped, notStarted, expiredUnbilled, leaseExceptions, frozenByBalanceForward, autopayHeld, activation: activationResult }, status)
+  return c.json({ posted, skipped, errors, chargeErrors, autopayErrors, errorMessages, remaining, year, month, voidedSkipped, notStarted, expiredUnbilled, leaseExceptions, frozenByBalanceForward, autopayHeld, activation: activationResult, amountSync: amountSync?.data ?? null }, status)
 })
 
 // Shape returned by activate_pending_leases() (supabase/migrations/0034_activate_pending_leases.sql).

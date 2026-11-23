@@ -155,3 +155,54 @@ describe("lease_concessions refuses 'all' + fixed_amount (plan §5a item 6)", ()
       VALUES ($1, 'rent', '2026-11-01', '2026-11-30', 'fixed_amount', 500, 'x', 'manual')`, [NEW])
   })
 })
+
+describe('sync_scheduled_lease_amounts (0034, plan §5a item 2)', () => {
+  async function sync(asOf: string) {
+    return (await db.query<{ r: { rent_updated: number; cam_updated: number } }>('SELECT sync_scheduled_lease_amounts($1::date) AS r', [asOf])).rows[0].r
+  }
+  async function amounts(id: string) {
+    return (await db.query<{ base_rent_monthly: string; cam_estimate_monthly: string }>('SELECT base_rent_monthly::float8::text AS base_rent_monthly, cam_estimate_monthly::float8::text AS cam_estimate_monthly FROM leases WHERE id = $1', [id])).rows[0]
+  }
+  async function rent(lease: string, start: string, end: string, amount: number, superseded = false) {
+    await db.query(`INSERT INTO lease_rent_schedule (lease_id, effective_start, effective_end, base_rent_monthly, source, superseded_at)
+      VALUES ($1, $2, $3, $4, 'manual', ${superseded ? 'now()' : 'NULL'})`, [lease, start, end, amount])
+  }
+  async function cam(lease: string, start: string, end: string, amount: number) {
+    await db.query(`INSERT INTO lease_recurring_charges (lease_id, type, description, amount_monthly, effective_start, effective_end, source)
+      VALUES ($1, 'cam_estimate', 'CAM', $2, $3, $4, 'manual')`, [lease, amount, start, end])
+  }
+
+  it('sets the lease row to the schedule step in effect', async () => {
+    await lease(NEW, T2, UNIT2, '2026-01-01', '2028-12-31', 'active')
+    await rent(NEW, '2026-01-01', '2026-12-31', 1000)
+    await rent(NEW, '2027-01-01', '2028-12-31', 1030)
+    expect(await sync('2027-01-01')).toEqual({ rent_updated: 1, cam_updated: 0 })
+    expect((await amounts(NEW)).base_rent_monthly).toBe('1030')
+    expect(await sync('2027-01-01')).toEqual({ rent_updated: 0, cam_updated: 0 })
+  })
+
+  it('ignores superseded rows and leaves the row alone where no active row covers the date', async () => {
+    await lease(NEW, T2, UNIT2, '2026-01-01', '2028-12-31', 'active')
+    await rent(NEW, '2026-01-01', '2028-12-31', 9999, true)
+    expect(await sync('2027-01-01')).toEqual({ rent_updated: 0, cam_updated: 0 })
+    expect((await amounts(NEW)).base_rent_monthly).toBe('1000')
+  })
+
+  it('syncs CAM only for leases whose CAM comes from recurring rows, 0 once those rows end', async () => {
+    await lease(NEW, T2, UNIT2, '2026-01-01', '2028-12-31', 'active')
+    await lease(OTHER, T1, UNIT, '2026-01-01', '2028-12-31', 'active')
+    await db.query(`UPDATE leases SET cam_estimate_monthly = 300 WHERE id IN ($1, $2)`, [NEW, OTHER])
+    await cam(NEW, '2026-01-01', '2026-12-31', 450)
+    await sync('2026-06-01')
+    expect((await amounts(NEW)).cam_estimate_monthly).toBe('450')
+    expect((await amounts(OTHER)).cam_estimate_monthly).toBe('300')
+    await sync('2027-06-01')
+    expect((await amounts(NEW)).cam_estimate_monthly).toBe('0')
+  })
+
+  it('never rewrites an expired lease', async () => {
+    await lease(NEW, T2, UNIT2, '2020-01-01', '2028-12-31', 'expired')
+    await rent(NEW, '2020-01-01', '2028-12-31', 5000)
+    expect(await sync('2027-01-01')).toEqual({ rent_updated: 0, cam_updated: 0 })
+  })
+})

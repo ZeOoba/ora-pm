@@ -2,66 +2,42 @@ import { billingTerm, ENTITY_TYPES, type LeaseAbstract } from './lease-abstract'
 import { buildMonthlyCharges } from './billing'
 import { addMonthsIso, type LeaseSchedule, type RecurringChargeType } from './rent-schedule'
 
-export interface BillingDivergence {
+export interface BillingProblem {
   /** YYYY-MM */
   period: string
-  /** What monthly billing will post today (flat lease-row rent + CAM). */
-  billed: number
-  /** What the lease's own schedule, concessions and charges say is due. */
-  due: number
-  /** REFUTE round 3 C4: per charge type, so an over-bill on one type can never net against an under-bill on
-   *  another (a rent credit hidden behind a CAM step). `over` = some type bills more than the lease provides. */
-  by_type: Array<{ type: string; billed: number; due: number }>
-  over: boolean
+  /** rent-schedule.ts ScheduleExceptionCode */
+  code: string
+  detail: string
 }
 
 /**
- * REFUTE C4: monthly billing today ignores the 0020 schedule (cron passes none; wiring it is Phase 7), so
- * it bills the lease row's starting rent + CAM flat for the whole term. This lists every month where that
- * differs from what the lease says (abatements, steps, CAM that ends, utilities) using the SAME engine and
- * the SAME legacy path billing uses. The approve route refuses while any exists unless the reviewer
- * acknowledges them, and the RPC calendars each one so the charge is adjusted by hand.
+ * Phase 7: monthly billing bills the lease's own schedule (cron passes the 0020 rows to the engine), so a
+ * step, abatement or charge that ends bills as the lease states and there is nothing to compare against flat
+ * billing any more. What approval must still refuse is a schedule the engine cannot bill: in such a month
+ * billing posts NOTHING for the lease (schedule gap, overlap, conflicting concessions, a malformed row).
+ * Runs the SAME engine billing runs, over every month of the term.
  */
-export function legacyBillingDivergence(
-  a: LeaseAbstract, lease: { start_date: string; end_date: string; base_rent_monthly: number; cam_estimate_monthly: number },
-): BillingDivergence[] {
+export function scheduleBillingProblems(
+  a: LeaseAbstract, lease: { start_date: string; end_date: string; cam_estimate_monthly: number },
+): BillingProblem[] {
   const schedule: LeaseSchedule = {
-    rent: a.rent_schedule.map((r) => ({ effective_start: r.start, effective_end: r.end, base_rent_monthly: r.base_rent_monthly ?? 0 })),
-    recurring: a.recurring_charges.filter((r) => r.amount_monthly !== null).map((r, i) => ({
-      id: `abstract-${i}`, type: r.type as RecurringChargeType, description: r.description,
+    rent: a.rent_schedule.map((r) => ({ effective_start: r.start, effective_end: r.end, base_rent_monthly: r.base_rent_monthly ?? NaN })),
+    recurring: a.recurring_charges.filter((r) => r.amount_monthly !== null && r.amount_monthly > 0).map((r, i) => ({
+      id: `abstract-${i}`, type: r.type as RecurringChargeType, description: r.description.trim() || r.type,
       amount_monthly: r.amount_monthly as number, effective_start: r.effective_start, effective_end: r.effective_end,
     })),
-    concessions: a.concessions.map((c) => ({ charge_type: c.charge_type, period_start: c.period_start, period_end: c.period_end, kind: c.kind, value: c.value, reason: c.reason })),
+    concessions: a.concessions.map((c) => ({ charge_type: c.charge_type, period_start: c.period_start, period_end: c.period_end, kind: c.kind, value: c.kind === 'full_waiver' ? null : c.value, reason: c.reason })),
   }
-  const r2 = (x: number) => Math.round(x * 100) / 100
-  const total = (cs: { amount: number }[]) => r2(cs.reduce((s, x) => s + x.amount, 0))
-  const byType = (cs: { type: string; amount: number }[]) => {
-    const m = new Map<string, number>()
-    for (const c of cs) m.set(c.type, r2((m.get(c.type) ?? 0) + c.amount))
-    return m
-  }
-  const out: BillingDivergence[] = []
+  const out: BillingProblem[] = []
   const first = lease.start_date.slice(0, 7) + '-01'
   for (let k = 0; k < 1200; k++) {
     const month = addMonthsIso(first, k)
     if (month > lease.end_date) break
-    const base = {
-      leaseId: 'x', baseRentMonthly: lease.base_rent_monthly, camEstimateMonthly: lease.cam_estimate_monthly,
+    const r = buildMonthlyCharges({
+      leaseId: 'x', baseRentMonthly: 0, camEstimateMonthly: lease.cam_estimate_monthly, schedule,
       leaseStartDate: lease.start_date, leaseEndDate: lease.end_date, periodYear: Number(month.slice(0, 4)), periodMonth: Number(month.slice(5, 7)),
-    }
-    const legacy = buildMonthlyCharges(base).charges
-    const sched = buildMonthlyCharges({ ...base, schedule })
-    const billed = total(legacy)
-    const due = sched.exception ? NaN : total(sched.charges)
-    const bm = byType(legacy)
-    const dm = byType(sched.exception ? [] : sched.charges)
-    const types = [...new Set([...bm.keys(), ...dm.keys()])].sort()
-    const by_type = types
-      .map((t) => ({ type: t, billed: bm.get(t) ?? 0, due: dm.get(t) ?? 0 }))
-      .filter((x) => Math.abs(x.billed - x.due) >= 0.01)
-    // An engine exception (NaN) is treated as an over-bill: fail closed.
-    const over = Number.isNaN(due) || by_type.some((x) => x.billed > x.due)
-    if (Number.isNaN(due) || by_type.length > 0) out.push({ period: month.slice(0, 7), billed, due, by_type, over })
+    })
+    if (r.exception) out.push({ period: month.slice(0, 7), code: r.exception.code, detail: r.exception.detail })
   }
   return out
 }
@@ -69,11 +45,11 @@ export function legacyBillingDivergence(
 // Lease abstraction Phase 4: turn a REVALIDATED abstract (lease-abstract.ts revalidateAbstract — never the
 // raw client body) into the approve_lease_abstract() payload (migration 0033). Pure; no I/O.
 //
-// Billing note (as of this phase): monthly billing still bills leases.base_rent_monthly +
-// cam_estimate_monthly flat from leases.start_date (server/routes/cron.ts). So the lease row carries the rent
-// and CAM in effect at the START of the billing term, and start_date is the RENT commencement date when the
-// lease states one (a free-rent stretch before rent commencement must not bill). The full schedule, rule,
-// concessions and recurring charges are stored for the Phase 7 engine and shown on the lease.
+// Billing note (Phase 7): monthly billing bills the stored schedule, concessions and recurring charges
+// (server/routes/cron.ts → billing.ts → rent-schedule.ts); leases.base_rent_monthly is display only once a lease
+// has schedule rows, and cam_estimate_monthly bills only when there is no cam_estimate recurring row. The lease
+// row carries the rent and CAM in effect at the START of the billing term, and start_date is the RENT
+// commencement date when the lease states one (a free-rent stretch before rent commencement must not bill).
 
 export type TenantChoice =
   | { mode: 'new'; name: string; contact_name?: string | null; contact_email?: string | null; contact_phone?: string | null; notes?: string | null }
@@ -91,9 +67,6 @@ export interface ApproveInputs {
   model: string
   approvedBy: string
   warnings: string[]
-  /** divergenceSignature() of the UNDER-billing months the reviewer saw and accepts adjusting by hand; null when
-   *  none was acknowledged. Bound to the exact month list (REFUTE round 2 C4): a different list does not pass. */
-  acknowledgedDivergence: string | null
 }
 
 /** A reviewer-correctable problem; `reason` is a fixed server-authored sentence safe to show. */
@@ -101,24 +74,11 @@ export class ApprovalInputError extends Error {
   constructor(readonly reason: string) { super(reason) }
 }
 
-export class BillingDivergenceError extends ApprovalInputError {
-  constructor(readonly months: BillingDivergence[], readonly signature: string) {
-    super(`Monthly billing would charge LESS than the lease in ${months.length} month(s). Review them and acknowledge before approving.`)
+/** The lease's schedule cannot be billed in some month (billing would post nothing for it there). */
+export class ScheduleUnbillableError extends ApprovalInputError {
+  constructor(readonly months: BillingProblem[]) {
+    super(`Monthly billing cannot bill this lease's schedule in ${months.length} month(s), starting ${months[0].period}: ${months[0].detail}. Correct the rent schedule, concessions or charges.`)
   }
-}
-
-/** REFUTE round 2 C4: an OVER-bill cannot be acknowledged away. Until monthly billing reads the lease's own
- *  schedule (plan Phase 7), a lease whose abatement, CAM end or other term would make billing charge MORE
- *  than the lease provides is refused here; enter it manually. */
-export class OverBillingError extends ApprovalInputError {
-  constructor(readonly months: BillingDivergence[]) {
-    super(`Monthly billing would charge MORE than the lease provides in ${months.length} month(s) (for example an abatement or a charge that ends). This lease cannot be imported until billing follows the lease schedule; enter it manually.`)
-  }
-}
-
-/** Stable identity of a month list (the acknowledgement is bound to it). */
-export function divergenceSignature(months: BillingDivergence[]): string {
-  return months.map((d) => `${d.period}:${d.by_type.map((t) => `${t.type}=${t.billed.toFixed(2)}/${t.due.toFixed(2)}`).join(';')}`).join(',')
 }
 
 const blankToNull = (s: string | null | undefined) => (s && s.trim() ? s.trim() : null)
@@ -189,19 +149,13 @@ export function buildApprovalPayload(a: LeaseAbstract, inp: ApproveInputs): Reco
     notes: blankToNull(inp.notes),
   }
 
-  const divergence = legacyBillingDivergence(a, lease)
-  // NaN (the schedule engine raised an exception for that month) counts as an over-bill: fail closed.
-  const over = divergence.filter((d) => d.over)
-  if (over.length > 0) throw new OverBillingError(over)
-  if (divergence.length > 0 && inp.acknowledgedDivergence !== divergenceSignature(divergence)) {
-    throw new BillingDivergenceError(divergence, divergenceSignature(divergence))
+  // Plan §5a item 6: a fixed-dollar waiver over rent AND CAM has no defined split (the engine and the 0034 CHECK
+  // refuse it); say how to enter it instead of failing on the generic schedule check.
+  if (a.concessions.some((c) => c.charge_type === 'all' && c.kind === 'fixed_amount')) {
+    throw new ApprovalInputError('A fixed-dollar concession over rent and CAM together has no defined split; enter it as two concessions, one for rent and one for CAM.')
   }
-  for (const d of divergence) {
-    critical.push({
-      critical_date: `${d.period}-01`, kind: 'other',
-      description: `Billing review ${d.period}: ${d.by_type.map((t) => `${t.type} billed $${t.billed.toFixed(2)}, lease provides $${t.due.toFixed(2)}`).join('; ')}. Bill the difference by hand.`,
-    })
-  }
+  const problems = scheduleBillingProblems(a, lease)
+  if (problems.length > 0) throw new ScheduleUnbillableError(problems)
 
   return {
     unit_id: inp.unitId,

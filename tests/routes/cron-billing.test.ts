@@ -112,6 +112,7 @@ const state = {
   activation: null as Record<string, unknown> | null,
   activationError: null as { code?: string; message: string } | null,
   priorChargesError: null as { code?: string; message: string } | null,
+  syncError: null as { code?: string; message: string } | null,
 }
 
 function paymentCounts(p: PaymentRow): boolean {
@@ -232,6 +233,10 @@ function installDbMock() {
     if (fn === 'activate_pending_leases') {
       if (state.activationError) return { data: null, error: state.activationError }
       return { data: state.activation ?? { activated: [], blocked: [], dry_run: args.p_dry_run ?? false }, error: null }
+    }
+    if (fn === 'sync_scheduled_lease_amounts') {
+      if (state.syncError) return { data: null, error: state.syncError }
+      return { data: { rent_updated: 0, cam_updated: 0 }, error: null }
     }
     if (fn !== 'reserve_autopay_payment') return { data: null, error: { message: `unexpected rpc ${fn}` } }
     if (state.reserveRpcError) return { data: null, error: state.reserveRpcError }
@@ -506,6 +511,7 @@ beforeEach(() => {
   state.activation = null
   state.activationError = null
   state.priorChargesError = null
+  state.syncError = null
   installDbMock()
   mockStripe.paymentIntents.create.mockResolvedValue({ id: 'pi_auto_1', status: 'processing' })
 })
@@ -1854,6 +1860,21 @@ describe('monthly-billing: ?dryRun=1 (Phase 7)', () => {
     expect(byId.lease_2).toMatchObject({ path: 'schedule', total: 4120, legacy_total: 4000, autopay: false })
     expect(byId.lease_1).toMatchObject({ path: 'legacy', total: 5000, legacy_total: 5000, autopay: true })
     expect(byId.lease_1.charges[0].idempotency_key).toBe('auto:lease_1:2026-06-01:rent')
+  })
+
+  it('does not sync lease display amounts in a dry run; a live run does', async () => {
+    await dry()
+    expect(mockRpc).not.toHaveBeenCalledWith('sync_scheduled_lease_amounts', expect.anything())
+    await postBilling()
+    expect(mockRpc).toHaveBeenCalledWith('sync_scheduled_lease_amounts', { p_as_of: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/) })
+  })
+
+  it('a display-sync failure is reported but billing proceeds (200)', async () => {
+    state.syncError = { message: 'nope' }
+    const res = await postBilling()
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as { errorMessages: string[] }).errorMessages.join(' ')).toMatch(/display sync failed/)
+    expect(state.charges.length).toBeGreaterThan(0)
   })
 
   it('rejects any dryRun value other than 0 or 1', async () => {

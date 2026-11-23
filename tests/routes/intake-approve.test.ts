@@ -4,7 +4,6 @@ import { intakeRouter } from '../../server/routes/intake'
 import { buildTextPdf, toBase64 } from '../fixtures/pdf'
 import { PAGES, buildLeasePdf, reviewed } from '../fixtures/lease-abstract-approve'
 import { confirmationKey, revalidateAbstract } from '../../server/lib/lease-abstract'
-import { buildApprovalPayload, BillingDivergenceError } from '../../server/lib/lease-approve'
 
 vi.mock('../../server/lib/rate-limit', () => ({ checkRateLimit: vi.fn(async () => ({ allowed: true, retryAfterMs: 0 })) }))
 
@@ -29,14 +28,10 @@ async function body(over: Record<string, unknown> = {}) {
   const r = reviewed()
   const rv = revalidateAbstract(JSON.parse(JSON.stringify(r.abstract)), PAGES)
   const keys = rv.confirmations.map(confirmationKey)
-  let signature: string | null = null
-  try {
-    buildApprovalPayload(rv.abstract, { unitId: '', today: '2026-11-23', tenant: { mode: 'new', name: 'x' }, replace: null, notes: null, storagePath: '', fileSha256: '', filename: '', model: '', approvedBy: '', warnings: [], acknowledgedDivergence: null })
-  } catch (e) { if (e instanceof BillingDivergenceError) signature = e.signature }
   return {
     filename: 'Acme Lease.pdf', pdfBase64: pdf, unit_id: UNIT,
     tenant: { mode: 'new', name: 'Acme Fabrication' }, replace: null,
-    abstract: r.abstract, confirmed_keys: keys, acknowledged_divergence: signature, notes: 'Renewal option.',
+    abstract: r.abstract, confirmed_keys: keys, notes: 'Renewal option.',
     ...over,
   }
 }
@@ -127,24 +122,35 @@ describe('POST /intake/lease/approve', () => {
     expect(rpc).not.toHaveBeenCalled()
   })
 
-  it('REFUTE C4: refuses until the under-billing months are acknowledged with their exact signature', async () => {
-    const res = await post(await body({ acknowledged_divergence: null }))
-    expect(res.status).toBe(422)
-    const j = (await res.json()) as { divergence: { under: Array<{ period: string }>; over: unknown[]; signature: string } }
-    expect(j.divergence.under.map((d) => d.period)).toContain('2027-01')
-    expect(j.divergence.over).toEqual([])
-    expect((await post(await body({ acknowledged_divergence: 'stale' }))).status).toBe(422)
-    expect(rpc).not.toHaveBeenCalled()
+  // Phase 7: billing follows the schedule, so steps and abatements approve with no acknowledgement; only a
+  // schedule billing cannot bill is refused.
+  it('a lease with rent steps approves with no billing acknowledgement', async () => {
+    const res = await post(await body())
+    expect(res.status).toBe(201)
+    expect(rpc).toHaveBeenCalledTimes(1)
   })
 
-  it('REFUTE round 2 C4: an over-billed month (abatement) is refused even when acknowledged', async () => {
+  it('an abatement lease approves and sends its concession to the RPC', async () => {
     const r = reviewed({ abatement: true })
     const rv = revalidateAbstract(JSON.parse(JSON.stringify(r.abstract)), PAGES)
-    const res = await post(await body({ abstract: r.abstract, confirmed_keys: rv.confirmations.map(confirmationKey), acknowledged_divergence: 'anything' }))
+    const res = await post(await body({ abstract: r.abstract, confirmed_keys: rv.confirmations.map(confirmationKey) }))
+    expect(res.status).toBe(201)
+    const payload = (rpc.mock.calls[0] as unknown as [string, { p: { concessions: unknown[] } }])[1]
+    expect(payload.p.concessions.length).toBeGreaterThan(0)
+  })
+
+  it('a schedule billing cannot bill is refused, naming the month, before any write', async () => {
+    const r = reviewed()
+    const a = JSON.parse(JSON.stringify(r.abstract)) as typeof r.abstract
+    // A rent waiver and an all-charges waiver over the same days: the engine cannot pick one.
+    const c = { charge_type: 'rent' as const, period_start: '2026-02-01', period_end: '2026-02-28', kind: 'full_waiver' as const, value_as_written: '', value_period: 'none' as const, value: null, reason: 'Free', page: 2, quote: a.rent_schedule[0].quote, confidence: 1 }
+    a.concessions = [c, { ...c, charge_type: 'all' as const }]
+    const rv = revalidateAbstract(JSON.parse(JSON.stringify(a)), PAGES)
+    const res = await post(await body({ abstract: a, confirmed_keys: rv.confirmations.map(confirmationKey) }))
+    // Revalidation's own engine dry run blocks it first; buildApprovalPayload's check is the second layer
+    // (covered in tests/lib/lease-approve.test.ts).
     expect(res.status).toBe(422)
-    const j = (await res.json()) as { error: string; divergence: { over: Array<{ period: string }> } }
-    expect(j.error).toMatch(/charge MORE/)
-    expect(j.divergence.over.map((d) => d.period)).toContain('2026-01')
+    expect(JSON.stringify(await res.json())).toMatch(/2026-02.*concession_conflict/)
     expect(rpc).not.toHaveBeenCalled()
   })
 })

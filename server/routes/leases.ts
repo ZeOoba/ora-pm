@@ -4,6 +4,7 @@ import {
   LeaseInsertSchema, LeaseUpdateSchema, LeaseAmendmentInsertSchema, LeaseNoticeInsertSchema,
 } from '../lib/schemas'
 import { dbError } from '../lib/api-error'
+import { scheduledLeaseEditProblem, type LeaseMoneyFields, type LeaseScheduleShape } from '../lib/lease-edit-guard'
 import { parseListQuery, listErrorResponse } from '../lib/list-query'
 
 type Env = { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string }
@@ -73,10 +74,30 @@ leasesRouter.put('/:id', async (c) => {
   const raw = await c.req.json()
   const parsed = LeaseUpdateSchema.safeParse(raw)
   if (!parsed.success) return c.json({ error: parsed.error.flatten().fieldErrors }, 422)
+  const id = c.req.param('id')
+  // Plan §5a item 2: a lease billed from its schedule ignores these fields; refuse edits that would look
+  // like they change billing, or that move the term outside the schedule (billing would stop).
+  const p = parsed.data as LeaseMoneyFields
+  if (['base_rent_monthly', 'cam_estimate_monthly', 'start_date', 'end_date'].some((k) => k in p)) {
+    const [cur, rent, cam] = await Promise.all([
+      db.from('leases').select('base_rent_monthly, cam_estimate_monthly, start_date, end_date').eq('id', id).maybeSingle(),
+      db.from('lease_rent_schedule').select('effective_start, effective_end, superseded_at').eq('lease_id', id),
+      db.from('lease_recurring_charges').select('id').eq('lease_id', id).eq('type', 'cam_estimate').is('superseded_at', null).limit(1),
+    ])
+    const readErr = cur.error ?? rent.error ?? cam.error
+    if (readErr) return dbError(c, readErr, 'Failed to update lease')
+    if (cur.data) {
+      const problem = scheduledLeaseEditProblem(cur.data as LeaseMoneyFields, p, {
+        rent: (rent.data ?? []) as LeaseScheduleShape['rent'],
+        hasActiveCam: (cam.data ?? []).length > 0,
+      })
+      if (problem) return c.json({ error: problem }, 409)
+    }
+  }
   const { data, error } = await db
     .from('leases')
     .update(parsed.data)
-    .eq('id', c.req.param('id'))
+    .eq('id', id)
     .select()
     .single()
   if (error) return dbError(c, error, 'Failed to update lease')
