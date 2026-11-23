@@ -168,6 +168,10 @@ intakeRouter.post('/lease', async (c) => {
       // Scanned text only — never pdfBase64 (see the REFUTE C1b comment above).
       abs = await extractAbstract(scanned.pages, { apiKey: c.env.ANTHROPIC_API_KEY, model: resolveModel(c.env.INTAKE_MODEL) })
     } catch (e) {
+      // Operator diagnostics (Worker log only): which stage failed. An upstream HTTP failure is logged in
+      // detail by lease-abstract.ts; this names the stop reason (refusal / max_tokens / no_output /
+      // bad_json) or the exception class, never document text.
+      console.error(`[intake] lease abstraction stopped: ${e instanceof ExtractionStopped ? `stop ${e.reason}` : e instanceof Error ? e.name : 'unknown'}`)
       const msg = e instanceof ExtractionStopped && e.reason === 'max_tokens'
         ? 'The lease was too long to abstract in one pass. Enter it manually.'
         : 'Lease abstraction failed. Enter the lease manually.'
