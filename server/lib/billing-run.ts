@@ -81,9 +81,13 @@ export const AUTOPAY_VARIANCE_LIMIT = 0.15
  */
 export function autopayVarianceHold(args: { current: number; currentExpected: number; priorPosted: number | null; priorExpected: number | null; noBaselineOk: boolean }): string | null {
   const { current, currentExpected, priorExpected } = args
-  if (args.priorPosted === null) {
-    return args.noBaselineOk ? null : `no monthly auto charge was posted last month to compare $${current.toFixed(2)} against`
+  // No baseline is a $0 baseline under the same explained rule (REFUTE round 2 N1: a month after a whole-month
+  // abatement posts nothing, and the inputs explain that). Otherwise it holds unless noBaselineOk.
+  if (args.priorPosted === null && !args.noBaselineOk
+      && !(priorExpected !== null && Math.round(priorExpected * 100) === 0 && Math.round(currentExpected * 100) === Math.round(current * 100))) {
+    return `no monthly auto charge was posted last month to compare $${current.toFixed(2)} against`
   }
+  if (args.priorPosted === null) return null
   const priorPosted = args.priorPosted
   const cents = (x: number) => Math.round(x * 100)
   // Explained only when the current inputs reproduce BOTH months as posted (REFUTE C5: a stale amount posted

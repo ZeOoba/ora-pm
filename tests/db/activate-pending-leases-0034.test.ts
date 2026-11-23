@@ -54,8 +54,8 @@ beforeEach(async () => {
 afterEach(async () => { await db.exec('ROLLBACK') })
 
 type Result = { activated: Array<Record<string, string | null>>; blocked: Array<Record<string, string>>; dry_run: boolean }
-async function activate(today: string, dryRun = false): Promise<Result> {
-  const r = await db.query<{ r: Result }>('SELECT activate_pending_leases($1::date, $2) AS r', [today, dryRun])
+async function activate(today: string, dryRun = false, asOf: string | null = null): Promise<Result> {
+  const r = await db.query<{ r: Result }>('SELECT activate_pending_leases($1::date, $2, $3::date) AS r', [today, dryRun, asOf])
   return r.rows[0].r
 }
 async function statusOf(id: string): Promise<string> {
@@ -135,11 +135,26 @@ describe('activate_pending_leases (0034)', () => {
     expect(r.blocked).toEqual([])
   })
 
+  it('p_as_of activates only leases started by that date', async () => {
+    await lease(NEW, T2, UNIT2, '2026-11-16', '2031-11-30', 'pending')
+    expect((await activate('2026-11-23', false, '2026-11-01')).activated).toEqual([])
+    expect(await statusOf(NEW)).toBe('pending')
+    expect((await activate('2026-12-01', false, '2026-12-01')).activated).toHaveLength(1)
+  })
+
+  it('a past-month catch-up (p_as_of in the past) never activates a lease whose term ended in real time (REFUTE round 2)', async () => {
+    await lease(NEW, T2, UNIT2, '2026-09-01', '2026-10-31', 'pending')
+    const r = await activate('2026-12-05', false, '2026-09-01')
+    expect(r.activated).toEqual([])
+    expect(r.blocked).toEqual([expect.objectContaining({ lease_id: NEW, reason: 'term_already_ended' })])
+    expect(await statusOf(NEW)).toBe('pending')
+  })
+
   it('is service_role only', async () => {
     const r = await db.query<{ anon: boolean; auth: boolean; svc: boolean }>(`SELECT
-      has_function_privilege('anon', 'activate_pending_leases(date, boolean)', 'EXECUTE') AS anon,
-      has_function_privilege('authenticated', 'activate_pending_leases(date, boolean)', 'EXECUTE') AS auth,
-      has_function_privilege('service_role', 'activate_pending_leases(date, boolean)', 'EXECUTE') AS svc`)
+      has_function_privilege('anon', 'activate_pending_leases(date, boolean, date)', 'EXECUTE') AS anon,
+      has_function_privilege('authenticated', 'activate_pending_leases(date, boolean, date)', 'EXECUTE') AS auth,
+      has_function_privilege('service_role', 'activate_pending_leases(date, boolean, date)', 'EXECUTE') AS svc`)
     expect(r.rows[0]).toEqual({ anon: false, auth: false, svc: true })
   })
 })

@@ -73,6 +73,10 @@ describe('autopayVarianceHold (plan §5: never debit a surprise amount)', () => 
   it('holds a stale posted amount the current inputs do not reproduce, even when last month matches (REFUTE C5)', () => {
     expect(autopayVarianceHold({ current: 50000, currentExpected: 5000, priorPosted: 5000, priorExpected: 5000, noBaselineOk: false })).toMatch(/15%/)
   })
+  it('no baseline after a whole-month abatement is explained when the inputs bill $0 for last month (REFUTE round 2 N1)', () => {
+    expect(autopayVarianceHold({ current: 5000, currentExpected: 5000, priorPosted: null, priorExpected: 0, noBaselineOk: false })).toBeNull()
+    expect(autopayVarianceHold({ current: 50000, currentExpected: 50000, priorPosted: null, priorExpected: 50000, noBaselineOk: false })).not.toBeNull()
+  })
   it('does not hold when nothing changed', () => {
     expect(autopayVarianceHold({ current: 5000, currentExpected: 5000, priorPosted: 5000, priorExpected: null, noBaselineOk: false })).toBeNull()
   })

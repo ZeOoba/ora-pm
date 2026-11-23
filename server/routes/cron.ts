@@ -184,7 +184,7 @@ cronRouter.post('/monthly-billing', async (c) => {
   // date) and the successor bills its in-month days as a pending lease; it activates on the next month's run.
   const periodFirst = `${year}-${String(month).padStart(2, '0')}-01`
   const asOf = todayIso < periodFirst ? todayIso : periodFirst
-  const activation = await db.rpc('activate_pending_leases', { p_today: asOf, p_dry_run: dryRun })
+  const activation = await db.rpc('activate_pending_leases', { p_today: todayIso, p_dry_run: dryRun, p_as_of: asOf })
   const activationResult = activation.error || !activation.data ? null : activation.data as ActivationResult
   const activationFailed = activationResult === null
   const wouldActivate = new Set((activationResult?.activated ?? []).map((a) => a.lease_id))
@@ -245,7 +245,7 @@ cronRouter.post('/monthly-billing', async (c) => {
   // trigger-billing.ps1 must not treat a lease awaiting a holdover decision as a failed run.
   type LeaseException = {
     lease_id: string
-    reason: 'past_end_date' | 'invalid_term_dates' | 'pending_not_activated' | 'pending_overlaps_unit_lease' | 'schedule_exception'
+    reason: 'past_end_date' | 'invalid_term_dates' | 'pending_not_activated' | 'pending_overlaps_unit_lease' | 'schedule_exception' | 'closed_in_period_not_billed'
     start_date: string | null
     end_date: string | null
     code?: string
@@ -313,6 +313,24 @@ cronRouter.post('/monthly-billing', async (c) => {
   if (pendingBlocked.length > 0) {
     leaseExceptions.push(...pendingBlocked)
     errorMessages.push(`${pendingBlocked.length} pending lease(s) were NOT billed: not activated, or overlapping another lease on the same unit (see leaseExceptions) — end or correct the unit's current lease, then re-run.`)
+  }
+  // REFUTE round 2 (C8b residual): a catch-up run for a PAST month cannot see a lease that a later run has
+  // since closed out (expired/terminated) — e.g. the prior tenant of a successor activated by next month's
+  // run — so its days in this month are not billed here. Report every such lease (read only; a failed read
+  // is reported, not fatal: nothing is billed or debited from it).
+  if (periodStartStr < `${todayIso.slice(0, 7)}-01`) {
+    const closed = await db.from('leases').select('id, status, start_date, end_date')
+      .in('status', ['expired', 'terminated']).gte('end_date', periodStartStr).lte('start_date', periodEndStr)
+      .order('id').limit(POSTGREST_MAX_ROWS)
+    if (closed.error) {
+      errorMessages.push(`catch-up check for leases closed out since ${periodStartStr} failed; leases ended within this period may be unbilled: ${closed.error.message}`)
+    } else if ((closed.data ?? []).length > 0) {
+      const rows = closed.data as { id: string; status: string; start_date: string; end_date: string }[]
+      for (const r of rows) {
+        leaseExceptions.push({ lease_id: r.id, reason: 'closed_in_period_not_billed', start_date: r.start_date, end_date: r.end_date, code: r.status })
+      }
+      errorMessages.push(`${rows.length} lease(s) now expired or terminated have days in this past period and were NOT billed by this catch-up run (see leaseExceptions) — check whether their final days were billed, and post any missing charge manually.`)
+    }
   }
   let chargesBulkFailed = false
   let voidRecheckFailed = false

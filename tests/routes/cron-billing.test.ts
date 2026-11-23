@@ -149,7 +149,7 @@ const leasesPageSpy = vi.hoisted(() => vi.fn())
 function leasesTable() {
   const calls: { method: string; args: unknown[] }[] = []
   const b: Record<string, unknown> = {}
-  for (const m of ['select', 'eq', 'in', 'gt', 'order', 'limit']) {
+  for (const m of ['select', 'eq', 'in', 'gt', 'gte', 'lte', 'order', 'limit']) {
     b[m] = (...args: unknown[]) => { calls.push({ method: m, args }); return b }
   }
   b.then = (resolve: (v: unknown) => void) => {
@@ -159,6 +159,8 @@ function leasesTable() {
       if (c.method === 'gt') rows = rows.filter(r => (r as Record<string, unknown>)[c.args[0] as string] as string > (c.args[1] as string))
       if (c.method === 'in') rows = rows.filter(r => (c.args[1] as unknown[]).includes((r as Record<string, unknown>)[c.args[0] as string]))
       if (c.method === 'eq') rows = rows.filter(r => (r as Record<string, unknown>)[c.args[0] as string] === c.args[1])
+      if (c.method === 'gte') rows = rows.filter(r => String((r as Record<string, unknown>)[c.args[0] as string]) >= String(c.args[1]))
+      if (c.method === 'lte') rows = rows.filter(r => String((r as Record<string, unknown>)[c.args[0] as string]) <= String(c.args[1]))
     }
     const order = calls.find(c => c.method === 'order')
     if (order) {
@@ -1250,8 +1252,11 @@ describe('POST /api/cron/monthly-billing', () => {
       expect(new Set(state.charges.map(c => c.lease_id)).size).toBe(N)
       expect(body.posted).toBe(N)
       // Keyset-paged, each page within the cap — not one oversized request.
-      expect(leasesPageSpy).toHaveBeenCalledTimes(2)
-      for (const [calls] of leasesPageSpy.mock.calls as [{ method: string; args: unknown[] }[]][]) {
+      // Only the billing select (status active/pending); the past-month catch-up report is a separate read.
+      const billingPages = (leasesPageSpy.mock.calls as [{ method: string; args: unknown[] }[]][])
+        .filter(([calls]) => calls.some(c => c.method === 'in' && (c.args[1] as string[]).includes('active')))
+      expect(billingPages).toHaveLength(2)
+      for (const [calls] of billingPages) {
         expect(calls.find(c => c.method === 'order')?.args[0]).toBe('id')
         const limit = calls.find(c => c.method === 'limit')
         expect(limit).toBeDefined()
@@ -1831,7 +1836,7 @@ describe('monthly-billing: pending → active (Phase 7)', () => {
   it('calls activate_pending_leases with today, live', async () => {
     at('2026-06-01')
     await postBilling()
-    expect(mockRpc).toHaveBeenCalledWith('activate_pending_leases', { p_today: '2026-06-01', p_dry_run: false })
+    expect(mockRpc).toHaveBeenCalledWith('activate_pending_leases', { p_today: '2026-06-01', p_dry_run: false, p_as_of: '2026-06-01' })
   })
 
   it('a pending lease starting later this month bills its prorated days but is never autopay-debited', async () => {
@@ -1870,7 +1875,7 @@ describe('monthly-billing: pending → active (Phase 7)', () => {
     ]
     const res = await postBilling()
     expect(res.status).toBe(200)
-    expect(mockRpc).toHaveBeenCalledWith('activate_pending_leases', { p_today: '2026-06-01', p_dry_run: false })
+    expect(mockRpc).toHaveBeenCalledWith('activate_pending_leases', { p_today: '2026-06-20', p_dry_run: false, p_as_of: '2026-06-01' })
     expect(state.charges.map(c => [c.lease_id, c.amount]).sort()).toEqual([['lease_new', 1500], ['lease_old', 1500]])
   })
 
@@ -1885,6 +1890,26 @@ describe('monthly-billing: pending → active (Phase 7)', () => {
     const body = await res.json() as Body
     expect(state.charges.map(c => c.lease_id)).toEqual(['lease_cur'])
     expect(body.leaseExceptions).toEqual([expect.objectContaining({ lease_id: 'lease_new', reason: 'pending_overlaps_unit_lease' })])
+  })
+
+  it('REFUTE round 2 (C8b residual): a catch-up run for a past month reports leases closed out since, with days in that month', async () => {
+    at('2026-07-20')
+    state.leases = [
+      { ...nonAutopayLease('lease_P', 3000), unit_id: 'u1', status: 'expired', end_date: '2026-06-14' },
+      { ...nonAutopayLease('lease_S', 3000), unit_id: 'u1', start_date: '2026-06-15' },
+    ]
+    const res = await postBilling()
+    expect(res.status).toBe(200)
+    const body = await res.json() as Body
+    expect(state.charges.map(c => c.lease_id)).toEqual(['lease_S'])
+    expect(body.leaseExceptions).toEqual([expect.objectContaining({ lease_id: 'lease_P', reason: 'closed_in_period_not_billed', code: 'expired' })])
+  })
+
+  it('a current-month run does not run the catch-up check', async () => {
+    at('2026-06-01')
+    state.leases = [{ ...nonAutopayLease('lease_P', 3000), status: 'expired', end_date: '2026-06-14' }]
+    const body = await (await postBilling()).json() as Body
+    expect(body.leaseExceptions).toEqual([])
   })
 
   it('an activation failure answers 500, bills active leases, and does not bill started pending ones', async () => {

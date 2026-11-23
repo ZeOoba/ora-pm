@@ -6,7 +6,9 @@
 -- still 'active' (0033 closes it out only once its end date has passed AT APPROVAL) and leases_active_unit_unique
 -- allows one active lease per unit.
 --
--- For every pending lease whose start_date has arrived (start_date <= p_today), in (unit, start_date) order:
+-- For every pending lease whose start_date has arrived by the activation date (start_date <= LEAST(p_today,
+-- p_as_of)), in (unit, start_date) order. p_as_of lets the billing cron activate as of a billing month's first
+-- day; whether a term has already ENDED is always judged against the real p_today:
 --   - its term already ended (end_date < p_today)              → blocked 'term_already_ended' (never activated
 --                                                                   blind; a human decides whether it ever ran)
 --   - the unit has an ACTIVE lease whose end_date is on or
@@ -31,7 +33,7 @@
 --
 -- Service role only. Re-runnable.
 
-CREATE OR REPLACE FUNCTION activate_pending_leases(p_today date, p_dry_run boolean DEFAULT false) RETURNS jsonb
+CREATE OR REPLACE FUNCTION activate_pending_leases(p_today date, p_dry_run boolean DEFAULT false, p_as_of date DEFAULT NULL) RETURNS jsonb
 LANGUAGE plpgsql
 SET search_path = public, pg_temp
 AS $$
@@ -40,21 +42,23 @@ DECLARE
   v_l leases%ROWTYPE;
   v_prior leases%ROWTYPE;
   v_has_prior boolean;
+  v_as_of date;
   v_activated jsonb := '[]'::jsonb;
   v_blocked jsonb := '[]'::jsonb;
 BEGIN
   IF p_today IS NULL THEN
     RAISE EXCEPTION 'activate_pending_leases: p_today is required';
   END IF;
+  v_as_of := LEAST(p_today, COALESCE(p_as_of, p_today));
 
   FOR v_id IN
-    SELECT id FROM leases WHERE status = 'pending' AND start_date <= p_today ORDER BY unit_id, start_date, id
+    SELECT id FROM leases WHERE status = 'pending' AND start_date <= v_as_of ORDER BY unit_id, start_date, id
   LOOP
     SELECT * INTO v_l FROM leases WHERE id = v_id;
     PERFORM 1 FROM units WHERE id = v_l.unit_id FOR UPDATE;
     -- Re-read under the unit lock: a concurrent approval or activation may have changed it.
     SELECT * INTO v_l FROM leases WHERE id = v_id FOR UPDATE;
-    IF NOT FOUND OR v_l.status <> 'pending' OR v_l.start_date > p_today THEN
+    IF NOT FOUND OR v_l.status <> 'pending' OR v_l.start_date > v_as_of THEN
       CONTINUE;
     END IF;
 
@@ -90,8 +94,8 @@ BEGIN
 END;
 $$;
 
-REVOKE EXECUTE ON FUNCTION activate_pending_leases(date, boolean) FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION activate_pending_leases(date, boolean) TO service_role;
+REVOKE EXECUTE ON FUNCTION activate_pending_leases(date, boolean, date) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION activate_pending_leases(date, boolean, date) TO service_role;
 
 -- sync_scheduled_lease_amounts(p_as_of): plan §5a item 2. Once a lease has schedule rows, billing reads the
 -- schedule and leases.base_rent_monthly / cam_estimate_monthly are display only — but the rent_roll view (0004),
@@ -150,6 +154,6 @@ ALTER TABLE lease_concessions ADD CONSTRAINT lease_concessions_all_not_fixed
   CHECK (NOT (charge_type = 'all' AND kind = 'fixed_amount'));
 
 -- Rollback:
---   DROP FUNCTION IF EXISTS activate_pending_leases(date, boolean);
+--   DROP FUNCTION IF EXISTS activate_pending_leases(date, boolean, date);
 --   DROP FUNCTION IF EXISTS sync_scheduled_lease_amounts(date);
 --   ALTER TABLE lease_concessions DROP CONSTRAINT IF EXISTS lease_concessions_all_not_fixed;
