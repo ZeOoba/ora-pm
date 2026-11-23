@@ -186,6 +186,9 @@ intakeRouter.post('/lease', async (c) => {
     // reasons, descriptions) is checked; a hit nulls that string and is reported by path.
     const scrubbed: string[] = []
     const abstract = scrubConfidential(abs.abstract, terms, '', scrubbed)
+    // `unreadable` list/index are fixed server values (like flag severity, merge gate R2-08): scrubbing them
+    // would drop the entry and lift its approval block (REFUTE grammar round 2). Only the quote is scrubbed.
+    abstract.unreadable = abs.abstract.unreadable.map((u, i) => ({ ...u, quote: abstract.unreadable[i]?.quote ?? null }))
     // Flag MESSAGES are scrubbed (they echo amounts, dates and figures from the lease). Only the message:
     // severity and path are fixed server values, and scrubbing them let a term like "lock" null the
     // severity of every block flag, which fails open (merge gate R2-08).

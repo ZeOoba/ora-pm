@@ -139,6 +139,7 @@ function normalizeName(s: string): string {
  *  filing these as 'other' would store a renewal or termination notice deadline under the wrong kind. */
 const CATEGORY_ALIASES: Record<string, string> = {
   renewal: 'renewal_option', renewal_options: 'renewal_option', option_to_renew: 'renewal_option', extension_option: 'renewal_option',
+  option_to_extend: 'renewal_option', extension_options: 'renewal_option', options_to_renew: 'renewal_option', termination_rights: 'termination',
   expansion_option: 'expansion', expansion_right: 'expansion',
   rofr: 'rofr_rofo', rofo: 'rofr_rofo', right_of_first_refusal: 'rofr_rofo', right_of_first_offer: 'rofr_rofo',
   early_termination: 'termination', termination_option: 'termination', termination_right: 'termination',
@@ -150,7 +151,7 @@ const CATEGORY_ALIASES: Record<string, string> = {
 
 function provisionCategory(v: unknown, warnings: string[]): unknown {
   if (typeof v !== 'string') return v // zod rejects it and drops the item with its own warning
-  const n = normalizeName(v).replace(/[/&]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '')
+  const n = normalizeName(v.replace(/\(s\)/gi, '')).replace(/[/&]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '')
   const c = CATEGORY_ALIASES[n] ?? n
   if ((PROVISION_CATEGORIES as readonly string[]).includes(c)) return c
   warnings.push(`A provision category "${v.slice(0, 40)}" is not recognised; it was filed as "other".`)
@@ -264,9 +265,18 @@ const ProvisionZ = z.object({
   exercise_window_start: isoDate.nullable(), exercise_window_end: isoDate.nullable(), ...source,
 })
 
-const UnreadableZ = z.object({ list: z.enum(['concessions', 'recurring_charges']), index: z.number().int(), page: z.number().int().nullable(), quote: z.string().nullable() })
+const UnreadableZ = z.object({ list: z.enum(['concessions', 'recurring_charges', 'escalation', 'unknown']), index: z.number().int(), page: z.number().int().nullable(), quote: z.string().nullable() })
 
 /** Every concession / recurring charge the model sent that its zod schema rejects (dropped by coerceAbstract). */
+const UNREADABLE_LABEL: Record<UnreadableItem['list'], string> = {
+  concessions: 'a concession', recurring_charges: 'a recurring charge', escalation: 'an escalation rule that could not be applied', unknown: 'a billing term',
+}
+/** Block for a billing item the model returned unreadably. Path: the item, or the list when there is no index. */
+function unreadableBlock(u: UnreadableItem): AbstractFlag {
+  const path = u.list === 'escalation' ? 'escalation' : u.list === 'unknown' ? 'unreadable' : `${u.list}[${u.index}]`
+  return { severity: 'block', path, message: `The lease states ${UNREADABLE_LABEL[u.list]}${u.page ? ` (p. ${u.page})` : ''} that could not be read; enter this lease manually.` }
+}
+
 function unreadableBillingItems(shaped: unknown): UnreadableItem[] {
   if (!shaped || typeof shaped !== 'object' || Array.isArray(shaped)) return []
   const r = shaped as Record<string, unknown>
@@ -327,7 +337,7 @@ export type LeaseAbstract = { -readonly [K in keyof typeof SCALARS]: z.infer<(ty
   unreadable: UnreadableItem[]
 }
 
-export interface UnreadableItem { list: 'concessions' | 'recurring_charges'; index: number; page: number | null; quote: string | null }
+export interface UnreadableItem { list: 'concessions' | 'recurring_charges' | 'escalation' | 'unknown'; index: number; page: number | null; quote: string | null }
 
 export interface AbstractFlag {
   severity: 'block' | 'warn'
@@ -403,7 +413,11 @@ export function coerceAbstract(raw: unknown): { abstract: LeaseAbstract; warning
   out.concessions = list('concessions', ConcessionZ)
   out.recurring_charges = list('recurring_charges', RecurringZ)
   out.provisions = list('provisions', ProvisionZ)
-  out.unreadable = list('unreadable', UnreadableZ)
+  // Never dropped (REFUTE grammar round 2): a malformed entry would silently lift its block, so it is kept
+  // as a placeholder that still blocks approval.
+  out.unreadable = Array.isArray(r.unreadable)
+    ? r.unreadable.map((u) => { const p = UnreadableZ.safeParse(u); return p.success ? p.data : { list: 'unknown' as const, index: -1, page: null, quote: null } })
+    : []
   for (const [key, zs] of [['escalation', EscalationZ], ['late_fee', LateFeeZ]] as const) {
     const v = r[key]
     if (v === undefined || v === null) continue
@@ -1030,6 +1044,15 @@ export function finalizeAbstract(raw: unknown, pages: readonly string[]): Abstra
   const shaped = wireToShape(raw, wireWarnings)
   const { abstract, warnings: coerceWarnings } = coerceAbstract(shaped)
   abstract.unreadable = unreadableBillingItems(shaped)
+  // REFUTE grammar round 2 C1b: a stated escalation that could not be read (e.g. a blank first adjustment
+  // date), or more than one rule, travels in `unreadable` too, so the block survives the review re-check.
+  {
+    const sentEsc = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>).escalations : undefined
+    if (Array.isArray(sentEsc) && ((sentEsc.length > 0 && abstract.escalation === null) || sentEsc.length > 1)) {
+      const o = sentEsc[0] && typeof sentEsc[0] === 'object' ? (sentEsc[0] as Record<string, unknown>) : {}
+      abstract.unreadable.push({ list: 'escalation', index: 0, page: Number.isInteger(o.page) ? (o.page as number) : null, quote: typeof o.quote === 'string' ? o.quote.slice(0, 200) : null })
+    }
+  }
   const warnings = [...wireWarnings, ...coerceWarnings]
   const flags: AbstractFlag[] = []
   // REFUTE round 2 C1a: the reviewer marker must only ever come from a human edit. A model quote carrying
@@ -1041,7 +1064,7 @@ export function finalizeAbstract(raw: unknown, pages: readonly string[]): Abstra
   // its billing-engine dry run runs only when every amount is resolved and it raised no block itself.
   flags.push(...crossCheck(abstract))
   for (const u of abstract.unreadable) {
-    flags.push({ severity: 'block', path: `${u.list}[${u.index}]`, message: `The lease states a ${u.list === 'concessions' ? 'concession' : 'recurring charge'}${u.page ? ` (p. ${u.page})` : ''} that could not be read; enter this lease manually.` })
+    flags.push(unreadableBlock(u))
   }
   // Re-REFUTE 3: the lease states an escalation the model returned malformed. Treating it as "no rule"
   // would skip the schedule-vs-rule comparison, so it blocks until entered by hand.
@@ -1107,7 +1130,7 @@ export function revalidateAbstract(raw: unknown, pages: readonly string[]): Abst
   // raw model output), so a rent period DERIVED from the escalation cannot be trusted at approval. Every
   // rent period must be printed in the lease or entered (and confirmed) by the reviewer.
   for (const u of abstract.unreadable) {
-    flags.push({ severity: 'block', path: `${u.list}[${u.index}]`, message: `The lease states a ${u.list === 'concessions' ? 'concession' : 'recurring charge'}${u.page ? ` (p. ${u.page})` : ''} that could not be read; enter this lease manually.` })
+    flags.push(unreadableBlock(u))
   }
   abstract.rent_schedule.forEach((r, i) => {
     if (!r.amount_as_written.trim()) flags.push({ severity: 'block', path: `rent_schedule[${i}]`, message: 'This rent period is derived from the escalation, not printed in the lease; enter its amount as you have verified it.' })

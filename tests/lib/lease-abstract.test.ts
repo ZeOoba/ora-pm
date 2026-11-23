@@ -147,6 +147,35 @@ describe('buildAbstractRequest', () => {
     const again = revalidateAbstract(JSON.parse(JSON.stringify(r.abstract)), PAGES)
     expect(again.flags.filter((f) => f.severity === 'block').map((f) => f.path)).toEqual(expect.arrayContaining(['concessions[0]', 'recurring_charges[0]']))
   })
+  it('REFUTE grammar round 2 C1b: an unreadable escalation keeps blocking after every re-check', () => {
+    const w = good()
+    ;(esc(w) as Obj).first_adjustment_date = ''
+    const r = run(w)
+    expect(r.abstract.escalation).toBeNull()
+    let a = JSON.parse(JSON.stringify(r.abstract))
+    for (let k = 0; k < 3; k++) {
+      const again = revalidateAbstract(a, PAGES)
+      expect(again.flags.some((f) => f.severity === 'block' && f.path === 'escalation')).toBe(true)
+      a = JSON.parse(JSON.stringify(again.abstract))
+    }
+  })
+  it('REFUTE grammar round 2 C1: a malformed unreadable entry is kept as a blocking placeholder, never dropped', () => {
+    const w = good()
+    ;(w.concessions[0] as Obj).period_end = ''
+    const a = JSON.parse(JSON.stringify(run(w).abstract))
+    a.unreadable[0].list = null // e.g. nulled by a scrub
+    const again = revalidateAbstract(a, PAGES)
+    expect(again.abstract.unreadable).toHaveLength(1)
+    expect(again.flags.some((f) => f.severity === 'block' && f.path === 'unreadable')).toBe(true)
+    const third = revalidateAbstract(JSON.parse(JSON.stringify(again.abstract)), PAGES)
+    expect(third.flags.some((f) => f.severity === 'block' && f.path === 'unreadable')).toBe(true)
+  })
+  it('extra category aliases and (s)', () => {
+    const w = good()
+    const prov = (category: string) => ({ category, summary: 'x', notice_deadline: '', exercise_window_start: '', exercise_window_end: '', ...src(3, 'one option to renew for five (5) years') })
+    ;(w as Obj).provisions = ['Option to Extend', 'Extension Options', 'Renewal Option(s)', 'Termination Rights'].map(prov)
+    expect(run(w).abstract.provisions.map((p) => p.category)).toEqual(['renewal_option', 'renewal_option', 'renewal_option', 'termination'])
+  })
   it('REFUTE grammar C3: near-miss provision categories map to the right category', () => {
     const w = good()
     const prov = (category: string) => ({ category, summary: 'x', notice_deadline: '', exercise_window_start: '', exercise_window_end: '', ...src(3, 'one option to renew for five (5) years') })
