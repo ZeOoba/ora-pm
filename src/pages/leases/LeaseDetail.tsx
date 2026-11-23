@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { useParams, Link } from 'react-router'
+import { useParams, useSearchParams, Link } from 'react-router'
 import { api } from '../../lib/api'
 import { useSaveMutation } from '../../lib/mutations'
 import { EntityPage, SectionCard } from '../../components/EntityPage'
@@ -24,6 +24,72 @@ type LeaseDetail = Lease & {
   broker_commissions: BrokerCommission[]
   lease_documents: LeaseDocument[]
   tenant_notices: TenantNotice[]
+  // 0020 abstract rows; optional so a response from before this change still renders.
+  lease_provisions?: LeaseProvision[]
+  lease_rent_schedule?: RentScheduleRow[]
+  lease_critical_dates?: CriticalDateRow[]
+}
+
+interface LeaseProvision {
+  id: string; category: string; summary: string; verbatim_excerpt: string | null; page_ref: number | null
+  notice_deadline: string | null; exercise_window_start: string | null; exercise_window_end: string | null
+}
+interface RentScheduleRow { id: string; effective_start: string; effective_end: string; base_rent_monthly: number; superseded_at: string | null; note: string | null }
+interface CriticalDateRow { id: string; critical_date: string; kind: string; description: string }
+
+function RightsAndRules({ data, priorCharges }: { data: LeaseDetail; priorCharges: number }) {
+  const provisions = data.lease_provisions ?? []
+  const schedule = (data.lease_rent_schedule ?? []).filter(r => !r.superseded_at).sort((a, b) => a.effective_start.localeCompare(b.effective_start))
+  const dates = [...(data.lease_critical_dates ?? [])].sort((a, b) => a.critical_date.localeCompare(b.critical_date))
+  return (
+    <div className="flex flex-col gap-6">
+      {priorCharges > 0 && (
+        <SectionCard title="Prior tenant follow-up">
+          <p className="text-sm text-status-warning">
+            {priorCharges} charge{priorCharges === 1 ? '' : 's'} on the replaced tenant&apos;s lease fall after its new end date. Review and void them from that lease if they should not stand.
+          </p>
+        </SectionCard>
+      )}
+      <SectionCard title="Notes">
+        {data.notes ? <pre className="whitespace-pre-wrap font-sans text-sm text-navy">{data.notes}</pre> : <p className="text-sm text-status-neutral">No notes.</p>}
+      </SectionCard>
+      <SectionCard title={`Rights & Rules (${provisions.length})`}>
+        {provisions.length === 0 ? <p className="text-sm text-status-neutral">No provisions abstracted for this lease.</p> : (
+          <ul className="space-y-3">
+            {provisions.map(p => (
+              <li key={p.id} className="text-sm">
+                <div className="flex gap-2">
+                  <span className="font-medium text-navy capitalize">{p.category.replace(/_/g, ' ')}</span>
+                  {p.notice_deadline && <span className="font-mono text-[11px] text-gold-600">notice by {formatDate(p.notice_deadline)}</span>}
+                  {p.page_ref && <span className="text-xs text-status-neutral">p. {p.page_ref}</span>}
+                </div>
+                <p>{p.summary}</p>
+                {p.verbatim_excerpt && <p className="text-xs text-status-neutral">“{p.verbatim_excerpt}”</p>}
+              </li>
+            ))}
+          </ul>
+        )}
+      </SectionCard>
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+        <SectionCard title={`Rent schedule (${schedule.length})`}>
+          {schedule.length === 0 ? <p className="text-sm text-status-neutral">No rent schedule on file.</p> : (
+            <dl className="space-y-2">
+              {schedule.map(r => (
+                <TermRow key={r.id} label={`${formatDate(r.effective_start)} – ${formatDate(r.effective_end)}`}>{formatCurrency(r.base_rent_monthly)}/mo</TermRow>
+              ))}
+            </dl>
+          )}
+        </SectionCard>
+        <SectionCard title={`Critical dates (${dates.length})`}>
+          {dates.length === 0 ? <p className="text-sm text-status-neutral">None recorded.</p> : (
+            <dl className="space-y-2">
+              {dates.map(d => <TermRow key={d.id} label={formatDate(d.critical_date)}>{d.description}</TermRow>)}
+            </dl>
+          )}
+        </SectionCard>
+      </div>
+    </div>
+  )
 }
 
 interface AmendmentForm {
@@ -122,6 +188,8 @@ function NoticesSection({ leaseId, notices }: { leaseId: string; notices: Tenant
 
 export function LeaseDetail() {
   const { id } = useParams<{ id: string }>()
+  const [searchParams] = useSearchParams()
+  const priorCharges = Number(searchParams.get('priorCharges') ?? 0) || 0
   const [showAmendForm, setShowAmendForm] = useState(false)
   const [amendForm, setAmendForm] = useState<AmendmentForm>(EMPTY_AMENDMENT)
   const [amendErrors, setAmendErrors] = useState<AmendmentErrors>({})
@@ -273,6 +341,11 @@ export function LeaseDetail() {
                 </div>
                 </div>
               ),
+            },
+            {
+              value: 'rights',
+              label: 'Rights & Rules',
+              content: <RightsAndRules data={data} priorCharges={priorCharges} />,
             },
             {
               value: 'amendments',

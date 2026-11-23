@@ -717,9 +717,14 @@ export function namedMonths(quote: string): Set<number> {
   return named
 }
 
-function verifyCitations(a: LeaseAbstract, pages: readonly string[], flags: AbstractFlag[]): void {
+function verifyCitations(a: LeaseAbstract, pages: readonly string[], flags: AbstractFlag[], allowReviewer = false): void {
   const push = (severity: 'block' | 'warn', path: string, message: string) => flags.push({ severity, path, message })
+  const byReviewer = (s: Source) => allowReviewer && s.quote.endsWith(REVIEWER_QUOTE_SUFFIX)
   const check = (path: string, s: Source) => {
+    if (byReviewer(s)) {
+      push('warn', path, 'Entered by the reviewer; not taken from the lease text.')
+      return true
+    }
     if (!quoteOnPage(pages, s.page, s.quote)) {
       s.confidence = 0
       push(BILLING_PATH.test(path) ? 'block' : 'warn', path, `Quote not found on cited page ${s.page}; verify this value against the lease.`)
@@ -734,7 +739,7 @@ function verifyCitations(a: LeaseAbstract, pages: readonly string[], flags: Abst
   // A citation must also SUPPORT its value. The term dates bound everything billed.
   for (const k of ['commencement_date', 'rent_commencement_date', 'expiration_date'] as const) {
     const v = a[k]
-    if (v && v.confidence > 0 && !dateInQuote(v.value, v.quote)) {
+    if (v && v.confidence > 0 && !byReviewer(v) && !dateInQuote(v.value, v.quote)) {
       push('block', k, `The quote does not state ${v.value}; confirm the date against the lease.`)
     }
   }
@@ -961,6 +966,9 @@ export function finalizeAbstract(raw: unknown, pages: readonly string[]): Abstra
   const { abstract, warnings: coerceWarnings } = coerceAbstract(shaped)
   const warnings = [...wireWarnings, ...coerceWarnings]
   const flags: AbstractFlag[] = []
+  // REFUTE round 2 C1a: the reviewer marker must only ever come from a human edit. A model quote carrying
+  // it (prompt-injected lease text or a model error) is stripped, so it is page-checked like any other.
+  stripReviewerMarker(abstract)
   verifyCitations(abstract, pages, flags)
   const confirmations = resolveAmounts(abstract, flags)
   // crossCheck skips value checks on unresolved (null) amounts (resolveAmounts already blocked them), and
@@ -978,6 +986,87 @@ export function finalizeAbstract(raw: unknown, pages: readonly string[]): Abstra
     flags.push({ severity: 'block', path: 'escalation', message: `The lease states ${sent.length} escalation rules; only one can be applied automatically. Enter the rent schedule by hand.` })
   }
   return { abstract, flags, warnings, confirmations }
+}
+
+/**
+ * Approval-time re-check of a HUMAN-REVIEWED abstract (Phase 4). The client is not trusted: whatever it
+ * sends is re-validated field by field; every computed figure is discarded and re-resolved from its
+ * as-written text; every quote is re-verified against `pages` — the text of the PDF being approved (so
+ * the abstract is tied to the stored file, and a block raised at extraction cannot vanish here, REFUTE
+ * C1a/C1c); and the deterministic cross-checks run again.
+ *
+ * A value the REVIEWER typed carries REVIEWER_QUOTE_SUFFIX in its quote. It is exempt from the on-page
+ * check (it is not lease text) but raises a warning and, if it is a billing value, still needs its
+ * confirmation ticked.
+ *
+ * Confirmations here are a SUPERSET of extraction's: every lease-row term that is not otherwise
+ * confirmed (rent type, deposit, share, expense stop, base year) is added (REFUTE C1d).
+ * Returns the resolved abstract, flags, confirmations, and any malformed-field warnings (which the
+ * approve route treats as a rejection, never a silent drop).
+ */
+export const REVIEWER_QUOTE_SUFFIX = ' [entered by reviewer]'
+
+/** Every cited source in an abstract (scalars, schedule rows, rule, concessions, charges, late fee, provisions). */
+function sourcesOf(a: LeaseAbstract): Source[] {
+  const out: Source[] = []
+  for (const k of Object.keys(SCALARS) as (keyof typeof SCALARS)[]) { const v = a[k]; if (v) out.push(v) }
+  out.push(...a.rent_schedule, ...a.concessions, ...a.recurring_charges, ...a.provisions)
+  if (a.escalation) out.push(a.escalation)
+  if (a.late_fee) out.push(a.late_fee)
+  return out
+}
+
+function stripReviewerMarker(a: LeaseAbstract): void {
+  const marker = REVIEWER_QUOTE_SUFFIX.trim()
+  for (const s of sourcesOf(a)) if (s.quote.includes(marker)) s.quote = s.quote.split(marker).join('').trim()
+}
+
+export function revalidateAbstract(raw: unknown, pages: readonly string[]): AbstractResult {
+  const { abstract, warnings } = coerceAbstract(raw)
+  // Never trust a computed figure from the client (REFUTE C1d): resolveAmounts re-derives each one.
+  for (const r of abstract.rent_schedule) { r.base_rent_monthly = null; r.rent_psf_annual = null }
+  for (const r of abstract.recurring_charges) r.amount_monthly = null
+  for (const c of abstract.concessions) c.value = null
+  if (abstract.escalation) abstract.escalation.value = null
+
+  const flags: AbstractFlag[] = []
+  verifyCitations(abstract, pages, flags, true)
+  const confirmations = resolveAmounts(abstract, flags)
+  flags.push(...crossCheck(abstract))
+
+  // REFUTE round 3 C1: the multiple-rule and malformed-rule blocks exist only at extraction (they read the
+  // raw model output), so a rent period DERIVED from the escalation cannot be trusted at approval. Every
+  // rent period must be printed in the lease or entered (and confirmed) by the reviewer.
+  abstract.rent_schedule.forEach((r, i) => {
+    if (!r.amount_as_written.trim()) flags.push({ severity: 'block', path: `rent_schedule[${i}]`, message: 'This rent period is derived from the escalation, not printed in the lease; enter its amount as you have verified it.' })
+  })
+  const rc = abstract.rent_commencement_date?.value
+  const cm = abstract.commencement_date?.value
+  if (rc && cm && rc < cm) flags.push({ severity: 'block', path: 'rent_commencement_date', message: `Rent commencement ${rc} is before lease commencement ${cm}.` })
+
+  const term = (k: 'rent_type' | 'security_deposit' | 'pro_rata_share' | 'expense_stop_psf_annual' | 'base_year', period: string) => {
+    const v = abstract[k]
+    if (!v) return
+    confirmations.push({
+      path: k, as_written: String(v.value), period, monthly: null, start: null, end: null, charge: null, rsf: null,
+      first_adjustment_date: null, cadence_months: null, page: v.page, quote: v.quote,
+    })
+  }
+  // REFUTE round 2 C1b: rent type drives the CAM true-up; it is never defaulted silently.
+  if (!abstract.rent_type) flags.push({ severity: 'block', path: 'rent_type', message: 'The rent type (NNN, gross or modified gross) is not stated; select it.' })
+  term('rent_type', 'rent type')
+  term('security_deposit', 'dollars')
+  term('pro_rata_share', 'fraction (proportionate share)')
+  term('expense_stop_psf_annual', 'per SF per year')
+  term('base_year', 'calendar year')
+  return { abstract, flags, warnings, confirmations }
+}
+
+/** Content identity of a confirmation: every input a human checks. Approval matches ticks by this key, not
+ *  by path, so a value that changed after it was ticked is never approved on the old tick (REFUTE C1b).
+ *  Mirrored byte-for-byte by src/pages/leases/abstract-review-helpers.ts confirmationKey (parity-tested). */
+export function confirmationKey(c: Confirmation): string {
+  return [c.path, c.as_written, c.period, c.monthly, c.start, c.end, c.charge, c.rsf, c.first_adjustment_date, c.cadence_months, c.page, c.quote].join('|')
 }
 
 export async function extractAbstract(
