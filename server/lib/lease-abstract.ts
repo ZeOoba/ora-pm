@@ -476,10 +476,23 @@ export function hasWireShape(o: Record<string, unknown>): boolean {
 }
 
 /** JSON.parse keeps the LAST of duplicate keys, so `"concessions": []` repeated after the real list would
- *  empty it. A key token is `"name"` followed by `:` and not preceded by a backslash (inside a JSON string
- *  quotes are escaped), so text in quotes cannot trigger this. Any repeat of a wire list key fails closed. */
+ *  empty it. Scans the JSON span string by string (each match consumes one whole JSON string literal, escapes
+ *  included, so the scan never starts inside a string), DECODES every string followed by `:` (a key) — so
+ *  `"concessions"` counts as concessions (REFUTE plain-JSON R-C2b) — and fails closed when any wire
+ *  list name is a key more than once. No item key is a list name, so nested objects cannot collide. */
 export function hasDuplicateTopLevelKey(text: string): boolean {
-  return WIRE_LISTS.some((k) => (text.match(new RegExp(`(?<!\\\\)"${k}"\\s*:`, 'g')) ?? []).length > 1)
+  const a = text.indexOf('{')
+  const b = text.lastIndexOf('}')
+  if (a < 0 || b <= a) return false
+  const span = text.slice(a, b + 1)
+  const counts = new Map<string, number>()
+  for (const m of span.matchAll(/"((?:[^"\\]|\\.)*)"(\s*:)?/g)) {
+    if (!m[2]) continue // a string value, not a key
+    let key: string
+    try { key = JSON.parse(`"${m[1]}"`) as string } catch { return true } // undecodable key: fail closed
+    if ((WIRE_LISTS as readonly string[]).includes(key)) counts.set(key, (counts.get(key) ?? 0) + 1)
+  }
+  return [...counts.values()].some((n) => n > 1)
 }
 
 const JSON_SPAN_RE = /\{[\s\S]*\}/

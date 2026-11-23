@@ -250,6 +250,9 @@ describe('parseAbstractResponse', () => {
     const real = JSON.stringify({ ...W, concessions: [{ charge_type: 'rent' }] })
     const dup = real.slice(0, -1) + ',"concessions":[]}'
     expect(reason(() => parseAbstractResponse(reply(dup)))).toBe('bad_json')
+    // R-C2b: a Unicode-escaped duplicate key decodes to the same name.
+    const escaped = real.slice(0, -1) + ',"\\u0063oncessions":[]}'
+    expect(reason(() => parseAbstractResponse(reply(escaped)))).toBe('bad_json')
     // A key name inside a quoted string is not a key.
     const quoted = { ...W, provisions: [{ category: 'other', summary: 'says "concessions": none', notice_deadline: '', exercise_window_start: '', exercise_window_end: '', page: 1, quote: 'q', confidence: 1 }] }
     expect(reason(() => parseAbstractResponse(reply(JSON.stringify(quoted))))).toBe('ok')

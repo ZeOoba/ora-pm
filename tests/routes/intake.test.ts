@@ -480,6 +480,18 @@ describe("mode: 'abstract' (lease abstraction v2)", () => {
     } finally { env.CONFIDENTIAL_TERMS = prev }
   })
 
+  it('REFUTE plain-JSON R-C5: model prose outside the abstract is scrubbed like every other model string', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'Note: this is the Zeta portfolio lease.\n' + JSON.stringify(modelJson()) }] }),
+    }))
+    const res = await post(await buildTextPdf(LEASE_TEXT))
+    expect(res.status).toBe(200)
+    const raw = await res.text()
+    expect(raw.toLowerCase()).not.toContain('zeta')
+    expect(raw).toContain('withheld by the confidentiality guard')
+  })
+
   it('rejects an unknown mode before any egress', async () => {
     const fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock)
     const res = await post(await buildTextPdf(LEASE_TEXT), { mode: 'full' })

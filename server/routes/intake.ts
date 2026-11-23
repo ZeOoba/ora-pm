@@ -177,7 +177,10 @@ intakeRouter.post('/lease', async (c) => {
         : 'Lease abstraction failed. Enter the lease manually.'
       return c.json({ error: msg }, 502)
     }
-    const warnings = [...abs.warnings]
+    // Model-derived warnings (malformed-field notes, a category echo, and prose the model wrote outside the
+    // abstract) go through the same post-egress scrub as every other model string (REFUTE plain-JSON R-C5).
+    const warnings = abs.warnings.map((w, i) =>
+      scrubConfidential(w, terms, `warnings[${i}]`, []) ?? 'A note from the extraction was withheld by the confidentiality guard.')
     const notSent = describeNotSent(scanned)
     if (notSent) {
       warnings.push(`Only the document's extracted text was sent for extraction; ${notSent} were not. Check the extracted fields against the document.`)
