@@ -2,9 +2,9 @@
 // PURE: no I/O. server/routes/cron.ts reads the 0020 rows and the prior period's charges and calls these.
 import type { ConcessionRow, LeaseSchedule, RecurringChargeRow, RentScheduleRow } from './rent-schedule'
 
-/** Columns cron.ts selects from each 0020 table. Every row is read, superseded or not (see groupSchedules). */
+/** Columns cron.ts selects from each 0020 table (cron prepends `id`, the keyset). Every row is read, superseded or not (see groupSchedules). */
 export const RENT_SCHEDULE_COLUMNS = 'lease_id, effective_start, effective_end, base_rent_monthly, superseded_at'
-export const RECURRING_COLUMNS = 'id, lease_id, type, description, amount_monthly, effective_start, effective_end, superseded_at'
+export const RECURRING_COLUMNS = 'lease_id, type, description, amount_monthly, effective_start, effective_end, superseded_at'
 export const CONCESSION_COLUMNS = 'lease_id, charge_type, period_start, period_end, kind, value, reason, clause_ref, superseded_at'
 
 type Numeric = number | string | null | undefined
@@ -61,26 +61,34 @@ export const AUTOPAY_VARIANCE_LIMIT = 0.15
  * Plan §5 autopay variance guard: never debit a surprise amount. Returns a reason to HOLD the autopay
  * debit for this lease this period, or null to let it proceed.
  *
- *   current       — total of the auto charges this run built for the lease this period.
+ *   current         — total of this period's monthly auto charges the debit will draw on (posted, plus any
+ *                     built charge not yet posted).
+ *   currentExpected — what the lease's CURRENT inputs bill for this period.
  *   priorPosted   — total of the lease's non-voided monthly auto charges posted for the previous period;
- *                   null when the previous period has NO monthly auto charge at all, voided or not (the
- *                   lease's first billed month, or a month billed in QuickBooks before cutover): there is
- *                   no baseline to compare, so nothing is held. A month whose charges were all voided is
- *                   a $0 baseline, not a missing one.
+ *                   null when the previous period has NO monthly auto charge at all, voided or not. A month
+ *                   whose charges were all voided is a $0 baseline, not a missing one.
  *   priorExpected — what the CURRENT lease inputs (schedule or flat fields) bill for the previous period;
  *                   null when the engine raised an exception for it.
+ *   noBaselineOk  — with no baseline (priorPosted null) the debit is allowed only when this is true: the
+ *                   caller sets it when the lease's term began this period, or a QuickBooks balance forward
+ *                   covers last period. Otherwise a missing month (an exception, a failed run) is held
+ *                   (REFUTE C5: that is exactly when a mis-keyed amount would go through unchecked).
  *
  * The move is EXPLAINED when the current inputs reproduce last month's posted total to the cent: it then
  * comes from the approved schedule itself (a step, an abatement ending, a prorated first month). Otherwise
  * the inputs changed since last month (lease edited, schedule replaced, prior month voided or billed
  * outside the app) and a move of more than 15%, or any move off a $0 month, is held for a human.
  */
-export function autopayVarianceHold(args: { current: number; priorPosted: number | null; priorExpected: number | null }): string | null {
-  const { current, priorExpected } = args
-  if (args.priorPosted === null) return null
+export function autopayVarianceHold(args: { current: number; currentExpected: number; priorPosted: number | null; priorExpected: number | null; noBaselineOk: boolean }): string | null {
+  const { current, currentExpected, priorExpected } = args
+  if (args.priorPosted === null) {
+    return args.noBaselineOk ? null : `no monthly auto charge was posted last month to compare $${current.toFixed(2)} against`
+  }
   const priorPosted = args.priorPosted
   const cents = (x: number) => Math.round(x * 100)
-  if (priorExpected !== null && cents(priorExpected) === cents(priorPosted)) return null
+  // Explained only when the current inputs reproduce BOTH months as posted (REFUTE C5: a stale amount posted
+  // this month by an earlier run must not pass because last month matches).
+  if (priorExpected !== null && cents(priorExpected) === cents(priorPosted) && cents(currentExpected) === cents(current)) return null
   const change = Math.abs(cents(current) - cents(priorPosted))
   if (change === 0) return null
   if (cents(priorPosted) === 0 || change > cents(priorPosted) * AUTOPAY_VARIANCE_LIMIT) {

@@ -50,27 +50,31 @@ describe('groupSchedules', () => {
 
 describe('autopayVarianceHold (plan §5: never debit a surprise amount)', () => {
   it('allows a big move the lease inputs explain (abatement ends, step, prorated first month)', () => {
-    expect(autopayVarianceHold({ current: 10000, priorPosted: 0, priorExpected: 0 })).toBeNull()
-    expect(autopayVarianceHold({ current: 6000, priorPosted: 3000, priorExpected: 3000 })).toBeNull()
+    expect(autopayVarianceHold({ current: 10000, currentExpected: 10000, priorPosted: 0, priorExpected: 0, noBaselineOk: false })).toBeNull()
+    expect(autopayVarianceHold({ current: 6000, currentExpected: 6000, priorPosted: 3000, priorExpected: 3000, noBaselineOk: false })).toBeNull()
   })
   it('allows an unexplained move of 15% or less', () => {
-    expect(autopayVarianceHold({ current: 5750, priorPosted: 5000, priorExpected: 5100 })).toBeNull()
+    expect(autopayVarianceHold({ current: 5750, currentExpected: 5750, priorPosted: 5000, priorExpected: 5100, noBaselineOk: false })).toBeNull()
   })
   it('holds an unexplained move over 15%', () => {
-    expect(autopayVarianceHold({ current: 5751, priorPosted: 5000, priorExpected: 5751 })).toMatch(/15%/)
-    expect(autopayVarianceHold({ current: 4000, priorPosted: 5000, priorExpected: 4000 })).toMatch(/15%/)
+    expect(autopayVarianceHold({ current: 5751, currentExpected: 5751, priorPosted: 5000, priorExpected: 5751, noBaselineOk: false })).toMatch(/15%/)
+    expect(autopayVarianceHold({ current: 4000, currentExpected: 4000, priorPosted: 5000, priorExpected: 4000, noBaselineOk: false })).toMatch(/15%/)
   })
   it('holds any unexplained move off a $0 month', () => {
-    expect(autopayVarianceHold({ current: 100, priorPosted: 0, priorExpected: 5000 })).not.toBeNull()
+    expect(autopayVarianceHold({ current: 100, currentExpected: 100, priorPosted: 0, priorExpected: 5000, noBaselineOk: false })).not.toBeNull()
   })
   it('holds when the lease inputs cannot bill last month at all', () => {
-    expect(autopayVarianceHold({ current: 9000, priorPosted: 5000, priorExpected: null })).toMatch(/cannot bill last month/)
+    expect(autopayVarianceHold({ current: 9000, currentExpected: 9000, priorPosted: 5000, priorExpected: null, noBaselineOk: false })).toMatch(/cannot bill last month/)
   })
-  it('does not hold when last month has no monthly auto charge at all (no baseline: first month, QuickBooks cutover)', () => {
-    expect(autopayVarianceHold({ current: 9000, priorPosted: null, priorExpected: 5000 })).toBeNull()
+  it('with no baseline (no monthly auto charge last month) holds, unless the term began this period or QuickBooks covers last month', () => {
+    expect(autopayVarianceHold({ current: 9000, currentExpected: 9000, priorPosted: null, priorExpected: 5000, noBaselineOk: false })).toMatch(/no monthly auto charge/)
+    expect(autopayVarianceHold({ current: 9000, currentExpected: 9000, priorPosted: null, priorExpected: 5000, noBaselineOk: true })).toBeNull()
+  })
+  it('holds a stale posted amount the current inputs do not reproduce, even when last month matches (REFUTE C5)', () => {
+    expect(autopayVarianceHold({ current: 50000, currentExpected: 5000, priorPosted: 5000, priorExpected: 5000, noBaselineOk: false })).toMatch(/15%/)
   })
   it('does not hold when nothing changed', () => {
-    expect(autopayVarianceHold({ current: 5000, priorPosted: 5000, priorExpected: null })).toBeNull()
+    expect(autopayVarianceHold({ current: 5000, currentExpected: 5000, priorPosted: 5000, priorExpected: null, noBaselineOk: false })).toBeNull()
   })
 })
 

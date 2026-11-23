@@ -113,6 +113,12 @@ cronRouter.use('/*', async (c, next) => {
 //     UNVERIFIED from this repo, confirm in the dashboard), not eyeballing a smaller number.
 //     AUTOPAY_BATCH_LIMIT × trigger-billing.ps1's MAX_INVOCATIONS is also a hard per-run debit
 //     ceiling (64 today) — see that script for the capacity note.
+//     Phase 7 adds per invocation: 1 activate_pending_leases RPC + 1 sync_scheduled_lease_amounts RPC
+//     (live only) + 3 × (floor(rows/1000) + 1) keyset pages over the 0020 tables + ceil(autopayCandidates/100)
+//     variance-guard reads — about +6 today. With 8 debited leases (~32) plus a re-check-heavy drain call
+//     that can approach the Free-plan ceiling of 50; the Cloudflare plan tier is still UNVERIFIED here
+//     (zero autopay leases in production today). Confirm the plan, or lower AUTOPAY_BATCH_LIMIT, before
+//     autopay enrollment goes live (OI-068).
 //   - Every Stripe call carries a deterministic `idempotencyKey` (`autopay:<leaseId>:<period>`),
 //     so a retry — from `maxNetworkRetries`, a re-run, or the drain loop — is never itself a
 //     double-charge risk within Stripe's ~24h idempotency window.
@@ -136,19 +142,22 @@ cronRouter.use('/*', async (c, next) => {
 // `trigger-billing.ps1` only checks the sum today; not fixed further, by design (event_log.md).
 //
 // Lease abstraction Phase 7 (docs/plans/2026-11-10-lease-abstraction-auto-billing-plan.md §5/§5a):
-//   - Step A: pending leases whose start date has arrived are activated first
-//     (activate_pending_leases(), migration 0034), closing out a prior lease on the unit that ended
-//     before the successor starts. A pending lease that cannot be activated is surfaced, never billed.
-//     A pending lease starting LATER in this billing month is billed for its prorated days (it has no
-//     other run that would bill them) but is never autopay-debited.
+//   - Step A: pending leases whose start date has arrived by the EARLIER of today and the billing month's
+//     first day are activated first (activate_pending_leases(), migration 0034), closing out a prior lease
+//     on the unit that ended before the successor starts. A pending lease that cannot be activated is
+//     surfaced, never billed. A pending lease starting LATER in this billing month is billed for its
+//     prorated days (no other run would bill them) but is never autopay-debited — unless it overlaps any
+//     other active/pending lease on its unit, which is surfaced and not billed.
 //   - Every 0020 schedule row (rent schedule, recurring charges, concessions, superseded or not) is read
 //     and passed to buildMonthlyCharges, so steps, abatements and CAM changes bill as the lease states.
 //     A lease with no rows bills exactly as before. A schedule read failure posts NOTHING (500): the
 //     run cannot tell which leases are scheduled, and flat billing would over-bill an abated month.
 //   - A schedule exception (gap, overlap, bad row, superseded-only) bills nothing and debits nothing for
 //     that lease; it is reported in leaseExceptions (reason 'schedule_exception') and errorMessages.
-//   - Autopay variance guard: a lease whose auto charges move more than 15% from last month's posted
-//     auto charges, in a way its current inputs do not reproduce, is not debited (autopayHeld).
+//   - Autopay variance guard (runs after posting, on what the debit will draw on): a lease whose posted
+//     auto charges move more than 15% from last month's, in a way its current inputs do not reproduce for
+//     BOTH months, or with no posted month to compare (unless its term began this period), is not debited
+//     (autopayHeld).
 //   - ?dryRun=1: activation, charges and autopay are decided exactly as a live run would, and NOTHING
 //     is written (no activation, no charge, no reservation, no Stripe call). The response lists each
 //     lease's charges next to what flat (legacy) billing would post, for review before a live run.
@@ -168,8 +177,14 @@ cronRouter.post('/monthly-billing', async (c) => {
     return c.json({ error: 'Invalid year or month' }, 400)
   }
 
-  // --- Step A: pending → active (migration 0034). ---
-  const activation = await db.rpc('activate_pending_leases', { p_today: todayIso, p_dry_run: dryRun })
+  // --- Step A: pending → active (migration 0034), as of the EARLIER of today and the billing month's first
+  // day (REFUTE C8b). Activating a successor that starts mid-month expires the unit's prior lease, which then
+  // drops out of this run's select — so a catch-up run for that month would never bill the prior tenant's
+  // final days. Capped at the month start, the prior lease stays active for this month (billed to its end
+  // date) and the successor bills its in-month days as a pending lease; it activates on the next month's run.
+  const periodFirst = `${year}-${String(month).padStart(2, '0')}-01`
+  const asOf = todayIso < periodFirst ? todayIso : periodFirst
+  const activation = await db.rpc('activate_pending_leases', { p_today: asOf, p_dry_run: dryRun })
   const activationResult = activation.error || !activation.data ? null : activation.data as ActivationResult
   const activationFailed = activationResult === null
   const wouldActivate = new Set((activationResult?.activated ?? []).map((a) => a.lease_id))
@@ -197,7 +212,7 @@ cronRouter.post('/monthly-billing', async (c) => {
   const { data: leases, error: leaseErr } = await fetchAllPages((after) => {
     let q = db
       .from('leases')
-      .select('id, tenant_id, status, base_rent_monthly, cam_estimate_monthly, start_date, end_date, autopay_enabled, autopay_payment_method_id, tenants(id, stripe_customer_id)')
+      .select('id, tenant_id, unit_id, status, base_rent_monthly, cam_estimate_monthly, start_date, end_date, autopay_enabled, autopay_payment_method_id, tenants(id, stripe_customer_id)')
       .in('status', ['active', 'pending'])
     if (after !== null) q = q.gt('id', after)
     return q.order('id').limit(POSTGREST_MAX_ROWS)
@@ -230,7 +245,7 @@ cronRouter.post('/monthly-billing', async (c) => {
   // trigger-billing.ps1 must not treat a lease awaiting a holdover decision as a failed run.
   type LeaseException = {
     lease_id: string
-    reason: 'past_end_date' | 'invalid_term_dates' | 'pending_not_activated' | 'schedule_exception'
+    reason: 'past_end_date' | 'invalid_term_dates' | 'pending_not_activated' | 'pending_overlaps_unit_lease' | 'schedule_exception'
     start_date: string | null
     end_date: string | null
     code?: string
@@ -239,14 +254,30 @@ cronRouter.post('/monthly-billing', async (c) => {
   const leaseExceptions: LeaseException[] = []
   let notStarted = 0
   // Pending leases (Phase 7): one the activation step activated (or, in a dry run, would activate) bills
-  // as active; one starting after today bills only its in-period days and is never autopay-debited; one
-  // whose start date has arrived but was NOT activated (blocked, or activation failed) bills nothing and
-  // is surfaced — its unit still has a lease in the way, which a human resolves.
+  // as active; one starting after the activation date (asOf) bills only its in-period days and is never
+  // autopay-debited; one whose start date has arrived but was NOT activated (blocked, or activation failed)
+  // bills nothing and is surfaced — its unit still has a lease in the way, which a human resolves.
+  // REFUTE C8a: a pending lease whose term overlaps ANY other active/pending lease on its unit is never billed
+  // (a form-created pending lease has no overlap check, and the unit's current tenant is still being billed
+  // for those days); it is surfaced instead.
   const notAutopay = new Set<string>()
   const pendingBlocked: LeaseException[] = []
-  const candidateLeases = (leases ?? []).filter((lease) => {
-    if (lease.status !== 'pending' || wouldActivate.has(lease.id)) return true
-    if (typeof lease.start_date === 'string' && lease.start_date > todayIso) { notAutopay.add(lease.id); return true }
+  const allLeases = leases ?? []
+  const overlapping = (lease: (typeof allLeases)[number]) => allLeases.find((o) =>
+    lease.unit_id != null && o.id !== lease.id && o.unit_id === lease.unit_id && typeof o.start_date === 'string' && typeof o.end_date === 'string'
+    && o.start_date <= lease.end_date && o.end_date >= lease.start_date)
+  const candidateLeases = allLeases.filter((lease) => {
+    if (lease.status !== 'pending') return true
+    const clash = overlapping(lease)
+    if (clash) {
+      pendingBlocked.push({
+        lease_id: lease.id, reason: 'pending_overlaps_unit_lease', start_date: lease.start_date ?? null, end_date: lease.end_date ?? null,
+        code: 'unit_lease_overlap', detail: `overlaps ${clash.status} lease ${clash.id} (${clash.start_date}..${clash.end_date}) on the same unit`,
+      })
+      return false
+    }
+    if (wouldActivate.has(lease.id)) return true
+    if (typeof lease.start_date === 'string' && lease.start_date > asOf) { notAutopay.add(lease.id); return true }
     const b = activationBlocked.get(lease.id)
     pendingBlocked.push({
       lease_id: lease.id, reason: 'pending_not_activated', start_date: lease.start_date ?? null, end_date: lease.end_date ?? null,
@@ -281,7 +312,7 @@ cronRouter.post('/monthly-billing', async (c) => {
   }
   if (pendingBlocked.length > 0) {
     leaseExceptions.push(...pendingBlocked)
-    errorMessages.push(`${pendingBlocked.length} pending lease(s) whose start date has arrived could not be activated and were NOT billed (see leaseExceptions) — end or correct the unit's current lease, then re-run.`)
+    errorMessages.push(`${pendingBlocked.length} pending lease(s) were NOT billed: not activated, or overlapping another lease on the same unit (see leaseExceptions) — end or correct the unit's current lease, then re-run.`)
   }
   let chargesBulkFailed = false
   let voidRecheckFailed = false
@@ -392,15 +423,18 @@ cronRouter.post('/monthly-billing', async (c) => {
     }
   }
 
-  // --- Step 1b: autopay eligibility (decided BEFORE posting so a dry run reports it too). ---
+  // --- Step 1b: autopay eligibility. ---
   // In-term leases only: an excluded lease (past end / not started / invalid dates / schedule exception /
   // pending) has no charge this period, or must not be debited, and never reaches Stripe, even via
   // arrears headroom.
   // 0030: a lease whose balance forward from QuickBooks covers this billing month (as_of on or after
   // its first day) is not autopay-debited for it: the app cannot see what was paid for that month in
   // QuickBooks, so the debit would really sweep older arrears.
+  // Decided WITHOUT reference to builtByLease (REFUTE C4): when the schedule read failed nothing was built,
+  // yet every eligible lease is still outstanding and must count in `remaining`.
+  const scheduleExceptionIds = new Set(scheduleExceptions.map((e) => e.lease_id))
   const autopayCandidates = inTermLeases.filter((lease) => {
-    if (!builtByLease.has(lease.id) || notAutopay.has(lease.id)) return false
+    if (scheduleExceptionIds.has(lease.id) || notAutopay.has(lease.id)) return false
     if (lease.status !== 'active' && !wouldActivate.has(lease.id)) return false
     const tenant = Array.isArray(lease.tenants) ? lease.tenants[0] : lease.tenants
     const cut = bfCutoff.get(lease.id)
@@ -408,49 +442,69 @@ cronRouter.post('/monthly-billing', async (c) => {
     return Boolean(lease.autopay_enabled && lease.autopay_payment_method_id && tenant?.stripe_customer_id)
   })
 
-  // Autopay variance guard (plan §5): last period's posted auto charges vs. this period's, explained only
-  // when the lease's CURRENT inputs reproduce last period's posted total. A failed read defers autopay
-  // for the whole run (never debit blind).
+  // Autopay variance guard (plan §5), REFUTE C5. `current` is what the debit will actually draw on: this
+  // period's non-voided monthly auto charges ALREADY POSTED (a re-run after a lease edit must not compare
+  // a freshly built amount while the debit takes the stale posted one), plus any built charge not yet posted
+  // (dry run). The baseline is last period's posted monthly auto charges; the move is explained only when
+  // the lease's CURRENT inputs reproduce that baseline to the cent. No baseline at all (no monthly auto
+  // charge last period, voided or not) is a HOLD unless the lease's term began this period or a QuickBooks
+  // balance forward covers last period — a month that went unbilled (exception, failed run) is exactly when
+  // a mis-keyed amount would otherwise go through unchecked. A failed read defers all autopay (never debit
+  // blind; every candidate counts in `remaining`).
   const prior = priorPeriod(year, month)
   const autopayHeld: { lease_id: string; reason: string }[] = []
   let varianceLookupFailed = false
   let eligibleLeases = autopayCandidates
-  if (autopayCandidates.length > 0) {
-    // Voided rows are read too: a month whose charges were all voided is a $0 baseline, not a missing one.
-    const priorRes = await fetchChunked<{ lease_id: string; amount: number | string; type: string; voided_at: string | null }>(
+  const varianceGuard = async () => {
+    if (autopayCandidates.length === 0) return
+    const res = await fetchChunked<{ lease_id: string; amount: number | string; type: string; voided_at: string | null; period_start: string; idempotency_key: string }>(
       autopayCandidates.map((l) => l.id), BULK_QUERY_CHUNK_SIZE, (chunk) =>
-        db.from('charges').select('lease_id, amount, type, voided_at').in('lease_id', chunk)
-          .eq('period_start', prior.start).eq('source', 'auto'),
+        db.from('charges').select('lease_id, amount, type, voided_at, period_start, idempotency_key').in('lease_id', chunk)
+          .in('period_start', [prior.start, periodStartStr]).eq('source', 'auto'),
       { maxRows: POSTGREST_MAX_ROWS })
-    if (priorRes.error) {
+    if (res.error) {
       varianceLookupFailed = true
       autopayErrors += autopayCandidates.length
-      errorMessages.push(`autopay variance check failed (batch of ${autopayCandidates.length}), autopay skipped entirely this run: ${priorRes.error.message}`)
-      // eligibleLeases stays the full candidate set: autopayDeferred then counts every one in `remaining`.
-    } else {
-      const priorPosted = new Map<string, number>()
-      for (const r of priorRes.data) {
-        if (!MONTHLY_AUTO_TYPES.has(r.type)) continue
-        priorPosted.set(r.lease_id, (priorPosted.get(r.lease_id) ?? 0) + (r.voided_at === null ? Number(r.amount) : 0))
+      errorMessages.push(`autopay variance check failed (batch of ${autopayCandidates.length}), autopay skipped entirely this run: ${res.error.message}`)
+      return // eligibleLeases stays the full candidate set: autopayDeferred then counts every one in `remaining`.
+    }
+    const priorPosted = new Map<string, number>()
+    const currentPosted = new Map<string, number>()
+    const currentKeys = new Set<string>()
+    for (const r of res.data) {
+      if (!MONTHLY_AUTO_TYPES.has(r.type)) continue
+      const amt = r.voided_at === null ? Number(r.amount) : 0
+      if (r.period_start === prior.start) priorPosted.set(r.lease_id, (priorPosted.get(r.lease_id) ?? 0) + amt)
+      else if (r.period_start === periodStartStr) {
+        currentKeys.add(r.idempotency_key)
+        currentPosted.set(r.lease_id, (currentPosted.get(r.lease_id) ?? 0) + amt)
       }
-      const total = (cs: { amount: number }[]) => Math.round(cs.reduce((t, x) => t + x.amount, 0) * 100) / 100
-      eligibleLeases = autopayCandidates.filter((lease) => {
-        const priorOut = buildMonthlyCharges(chargeInput(lease, prior.year, prior.month))
-        const reason = autopayVarianceHold({
-          current: total(builtByLease.get(lease.id) ?? []),
-          priorPosted: priorPosted.has(lease.id) ? Math.round((priorPosted.get(lease.id) as number) * 100) / 100 : null,
-          priorExpected: priorOut.exception ? null : total(priorOut.charges),
-        })
-        if (reason) autopayHeld.push({ lease_id: lease.id, reason })
-        return reason === null
+    }
+    const r2 = (x: number) => Math.round(x * 100) / 100
+    const total = (cs: { amount: number }[]) => r2(cs.reduce((t, x) => t + x.amount, 0))
+    eligibleLeases = autopayCandidates.filter((lease) => {
+      const unposted = (builtByLease.get(lease.id) ?? []).filter((ch) => !currentKeys.has(ch.idempotency_key))
+      const current = r2((currentPosted.get(lease.id) ?? 0) + total(unposted))
+      const priorOut = buildMonthlyCharges(chargeInput(lease, prior.year, prior.month))
+      const cut = bfCutoff.get(lease.id)
+      const noBaselineOk = (typeof lease.start_date === 'string' && lease.start_date >= periodStartStr) || (cut !== undefined && cut >= prior.start)
+      const reason = autopayVarianceHold({
+        current,
+        currentExpected: total(builtByLease.get(lease.id) ?? []),
+        priorPosted: priorPosted.has(lease.id) ? r2(priorPosted.get(lease.id) as number) : null,
+        priorExpected: priorOut.exception ? null : total(priorOut.charges),
+        noBaselineOk,
       })
-      if (autopayHeld.length > 0) {
-        errorMessages.push(`${autopayHeld.length} lease(s) NOT autopay-debited this period: the amount moved unexpectedly vs last month (see autopayHeld) — charges were posted; confirm the amount, then collect manually.`)
-      }
+      if (reason) autopayHeld.push({ lease_id: lease.id, reason })
+      return reason === null
+    })
+    if (autopayHeld.length > 0) {
+      errorMessages.push(`${autopayHeld.length} lease(s) NOT autopay-debited this period: the amount moved unexpectedly vs last month, or last month has nothing to compare (see autopayHeld) — confirm the posted charges, then collect manually.`)
     }
   }
 
   if (dryRun) {
+    if (!scheduleLookupFailed) await varianceGuard()
     const frozenKeys = new Set(builtCharges.filter((ch) => !allCharges.includes(ch)).map((ch) => ch.idempotency_key))
     const preview = inTermLeases.filter((l) => builtByLease.has(l.id)).map((lease) => {
       const charges = builtByLease.get(lease.id) ?? []
@@ -469,7 +523,7 @@ cronRouter.post('/monthly-billing', async (c) => {
     })
     const status = scheduleLookupFailed || bfLookupFailed || activationFailed || varianceLookupFailed ? 500 : 200
     return c.json({
-      dryRun: true, year, month, today: todayIso, leases: preview, leaseExceptions, autopayHeld, notStarted, expiredUnbilled,
+      dryRun: true, year, month, today: todayIso, activationAsOf: asOf, leases: preview, leaseExceptions, autopayHeld, notStarted, expiredUnbilled,
       activation: activationResult, errorMessages,
     }, status)
   }
@@ -538,6 +592,10 @@ cronRouter.post('/monthly-billing', async (c) => {
       }
     }
   }
+
+  // Live: the guard runs AFTER posting, on the charges the debit will draw on.
+  if (!chargesBulkFailed && !scheduleLookupFailed) await varianceGuard()
+  if (scheduleLookupFailed) autopayErrors += autopayCandidates.length
 
   // --- Step 2: prior-period autopay pre-check (bulk, one query for all eligible; eligibility is decided in Step 1b). ---
   const alreadyCollected = new Set<string>()

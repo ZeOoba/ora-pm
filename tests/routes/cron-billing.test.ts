@@ -112,6 +112,7 @@ const state = {
   activation: null as Record<string, unknown> | null,
   activationError: null as { code?: string; message: string } | null,
   priorChargesError: null as { code?: string; message: string } | null,
+  baselinePriorMonth: true,
   syncError: null as { code?: string; message: string } | null,
 }
 
@@ -281,18 +282,26 @@ function installDbMock() {
         //   - Step 3's open-charges lookup: 'lease_id, amount'
         //   - The PR #42 review-follow-up voided-charge re-check: 'idempotency_key, voided_at'
         select: vi.fn().mockImplementation((cols?: string) => {
-          if (cols === 'lease_id, amount, type, voided_at') {
-            // Phase 7 autopay variance guard: last period's auto charges.
-            //   .in('lease_id', ids).eq('period_start', p).eq('source', 'auto')
+          if (cols === 'lease_id, amount, type, voided_at, period_start, idempotency_key') {
+            // Phase 7 autopay variance guard: last AND this period's auto charges.
+            //   .in('lease_id', ids).in('period_start', [prior, current]).eq('source', 'auto')
+            // state.baselinePriorMonth (default true) stands for "last month was billed normally": each lease
+            // gets a synthetic 2026-05 auto rent row at its flat rent + CAM, unless a test seeds May itself.
             return {
               in: priorChargesSpy.mockImplementation((_col: string, leaseIds: string[]) => ({
-                eq: (c1: string, v1: string) => ({
+                in: (c1: string, periods: string[]) => ({
                   eq: async (c2: string, v2: string) => {
                     if (state.priorChargesError) return { data: null, error: state.priorChargesError }
+                    const synthetic = state.baselinePriorMonth
+                      ? (state.leases as { id: string; base_rent_monthly: number; cam_estimate_monthly?: number }[])
+                        .filter(l => !state.charges.some(c => c.lease_id === l.id && c.period_start === '2026-05-01'))
+                        .map(l => ({ lease_id: l.id, amount: l.base_rent_monthly + (l.cam_estimate_monthly ?? 0), type: 'rent', voided_at: null, period_start: '2026-05-01', source: 'auto', idempotency_key: `auto:${l.id}:2026-05-01:rent` }))
+                      : []
+                    const rows: Record<string, unknown>[] = [...state.charges.map(c => ({ ...c, voided_at: c.voided_at ?? null })), ...synthetic]
                     return {
-                      data: capped(state.charges
-                        .filter(c => leaseIds.includes(c.lease_id) && c[c1] === v1 && c[c2] === v2)
-                        .map(c => ({ lease_id: c.lease_id, amount: c.amount, type: c.type, voided_at: c.voided_at ?? null }))),
+                      data: capped(rows
+                        .filter(c => leaseIds.includes(c.lease_id as string) &&periods.includes(c[c1] as string) && c[c2] === v2)
+                        .map(c => ({ lease_id: c.lease_id, amount: c.amount, type: c.type, voided_at: c.voided_at, period_start: c.period_start, idempotency_key: c.idempotency_key }))),
                       error: null,
                     }
                   },
@@ -511,6 +520,7 @@ beforeEach(() => {
   state.activation = null
   state.activationError = null
   state.priorChargesError = null
+  state.baselinePriorMonth = true
   state.syncError = null
   installDbMock()
   mockStripe.paymentIntents.create.mockResolvedValue({ id: 'pi_auto_1', status: 'processing' })
@@ -1726,6 +1736,13 @@ describe('monthly-billing: lease schedule (Phase 7)', () => {
     expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
     expect(body.errorMessages.join(' ')).toMatch(/schedule lookup failed/)
   })
+
+  it('REFUTE C4 (R1): a failed schedule read counts the autopay lease in remaining and autopayErrors', async () => {
+    state.scheduleError = { message: 'boom' }
+    const body = await (await postBilling()).json() as Body
+    expect(body.remaining).toBe(1)
+    expect(body.autopayErrors).toBe(1)
+  })
 })
 
 describe('monthly-billing: autopay variance guard (Phase 7)', () => {
@@ -1734,6 +1751,7 @@ describe('monthly-billing: autopay variance guard (Phase 7)', () => {
     lease_id: 'lease_1', idempotency_key: 'auto:lease_1:2026-05-01:rent', amount, due_date: '2026-05-05', period_start: '2026-05-01', type: 'rent', source: 'auto', ...extra,
   })
   const paidMay = () => state.payments.push({ lease_id: 'lease_1', amount: 5000, method: 'check', payment_date: '2026-05-03' })
+  beforeEach(() => { state.baselinePriorMonth = false })
 
   it('holds the debit when the rent moved >15% unexplained by the lease inputs; the charge still posts', async () => {
     state.leases = [{ ...AUTOPAY_LEASE, base_rent_monthly: 6000 }]
@@ -1763,6 +1781,28 @@ describe('monthly-billing: autopay variance guard (Phase 7)', () => {
     const body = await (await postBilling()).json() as Body
     expect(body.autopayHeld.map(h => h.lease_id)).toEqual(['lease_1'])
     expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
+  })
+
+  it('REFUTE C5 (R2): checks what the debit will draw on — a stale posted amount is held even after the lease is corrected', async () => {
+    priorRent(5000); paidMay()
+    // An earlier run posted June at $50,000 and its debit was held; the lease row is then corrected to $5,000.
+    state.charges.push({ lease_id: 'lease_1', idempotency_key: 'auto:lease_1:2026-06-01:rent', amount: 50000, due_date: '2026-06-05', period_start: '2026-06-01', type: 'rent', source: 'auto' })
+    const body = await (await postBilling()).json() as Body
+    expect(body.autopayHeld.map(h => h.lease_id)).toEqual(['lease_1'])
+    expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
+  })
+
+  it('REFUTE C5 (R3): no baseline last month is held when the lease was already in term', async () => {
+    const body = await (await postBilling()).json() as Body
+    expect(body.autopayHeld).toEqual([{ lease_id: 'lease_1', reason: expect.stringMatching(/no monthly auto charge/) }])
+    expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
+  })
+
+  it('no baseline is fine for a lease whose term began this period', async () => {
+    state.leases = [{ ...AUTOPAY_LEASE, start_date: '2026-06-01' }]
+    const body = await (await postBilling()).json() as Body
+    expect(body.autopayHeld).toEqual([])
+    expect(mockStripe.paymentIntents.create).toHaveBeenCalledTimes(1)
   })
 
   it('a failed variance read defers ALL autopay, counts it remaining, and answers 500 (charges still post)', async () => {
@@ -1813,7 +1853,7 @@ describe('monthly-billing: pending → active (Phase 7)', () => {
 
   it('a started pending lease the activation step blocked is not billed and is surfaced', async () => {
     at('2026-06-20')
-    state.leases = [{ ...AUTOPAY_LEASE, status: 'pending', start_date: '2026-06-16' }]
+    state.leases = [{ ...AUTOPAY_LEASE, status: 'pending', start_date: '2026-06-01' }]
     state.activation = { activated: [], blocked: [{ lease_id: 'lease_1', unit_id: 'u', reason: 'unit_has_active_lease', blocking_lease_id: 'old', blocking_end_date: '2027-12-31' }], dry_run: false }
     const res = await postBilling()
     expect(res.status).toBe(200)
@@ -1822,9 +1862,34 @@ describe('monthly-billing: pending → active (Phase 7)', () => {
     expect(body.leaseExceptions).toEqual([expect.objectContaining({ lease_id: 'lease_1', reason: 'pending_not_activated', code: 'unit_has_active_lease' })])
   })
 
+  it('REFUTE C8b: activation runs as of the billing month start, so a catch-up run bills the prior tenant to its end AND the successor from its start', async () => {
+    at('2026-06-20')
+    state.leases = [
+      { ...nonAutopayLease('lease_old', 3000), unit_id: 'u1', end_date: '2026-06-15' },
+      { ...nonAutopayLease('lease_new', 3000), unit_id: 'u1', status: 'pending', start_date: '2026-06-16' },
+    ]
+    const res = await postBilling()
+    expect(res.status).toBe(200)
+    expect(mockRpc).toHaveBeenCalledWith('activate_pending_leases', { p_today: '2026-06-01', p_dry_run: false })
+    expect(state.charges.map(c => [c.lease_id, c.amount]).sort()).toEqual([['lease_new', 1500], ['lease_old', 1500]])
+  })
+
+  it('REFUTE C8a (R4): a pending lease overlapping another lease on its unit is never billed and is surfaced', async () => {
+    at('2026-06-01')
+    state.leases = [
+      { ...nonAutopayLease('lease_cur', 4000), unit_id: 'u1' },
+      { ...nonAutopayLease('lease_new', 3000), unit_id: 'u1', status: 'pending', start_date: '2026-06-16' },
+    ]
+    const res = await postBilling()
+    expect(res.status).toBe(200)
+    const body = await res.json() as Body
+    expect(state.charges.map(c => c.lease_id)).toEqual(['lease_cur'])
+    expect(body.leaseExceptions).toEqual([expect.objectContaining({ lease_id: 'lease_new', reason: 'pending_overlaps_unit_lease' })])
+  })
+
   it('an activation failure answers 500, bills active leases, and does not bill started pending ones', async () => {
     at('2026-06-20')
-    state.leases = [nonAutopayLease('lease_a'), { ...nonAutopayLease('lease_p'), status: 'pending', start_date: '2026-06-16' }]
+    state.leases = [nonAutopayLease('lease_a'), { ...nonAutopayLease('lease_p'), status: 'pending', start_date: '2026-06-01' }]
     state.activationError = { message: 'missing function' }
     const res = await postBilling()
     expect(res.status).toBe(500)

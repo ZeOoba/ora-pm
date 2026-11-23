@@ -66,6 +66,8 @@ export const FINANCIAL_SOURCE_PATHS: ReadonlySet<string> = new Set([
   // Lease abstraction Phase 4/7: builds the approve payload whose rent schedule, concessions and recurring
   // charges monthly billing then bills, and refuses a schedule the billing engine cannot bill.
   'server/lib/lease-approve.ts',
+  // Phase 7: refuses lease edits that billing would ignore or that move the term outside the schedule.
+  'server/lib/lease-edit-guard.ts',
   // Lease abstraction v2 (Phase 3): the money/date fields and cross-checks a human approves into the
   // rent schedule, plus the billing-engine dry run that gates approval.
   'server/lib/lease-abstract.ts',
