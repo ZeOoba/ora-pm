@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { describeUpstreamFailure, logUpstreamFailure } from './upstream-error'
 import {
   addMonthsIso,
   computeScheduledLines,
@@ -1084,6 +1085,7 @@ export async function extractAbstract(
   })
   if (!res.ok) {
     // Never surface the raw upstream body — it may echo document text.
+    logUpstreamFailure('lease abstraction', await describeUpstreamFailure(res))
     throw new Error(`Lease abstraction failed (status ${res.status})`)
   }
   return finalizeAbstract(parseAbstractResponse(await res.json()), pages)

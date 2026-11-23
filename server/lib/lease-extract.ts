@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { describeUpstreamFailure, logUpstreamFailure } from './upstream-error'
 
 // Anthropic lease extraction. The model is asked to fill an extract_lease tool whose
 // schema mirrors the writable LeaseForm fields, plus a _confidence map (0..1 per field).
@@ -131,6 +132,7 @@ export async function extractLease(
   })
   if (!res.ok) {
     // Never surface the raw upstream body — it may echo document text.
+    logUpstreamFailure('lease extraction', await describeUpstreamFailure(res))
     throw new Error(`Lease extraction failed (status ${res.status})`)
   }
   return parseExtractionResponse(await res.json())
