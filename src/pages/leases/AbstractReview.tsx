@@ -10,7 +10,7 @@ import { Field } from '../../components/form/Field'
 import { TextInput, NumberInput, DateInput, Textarea, Select } from '../../components/form/inputs'
 import type { Tenant } from '../../types'
 import {
-  confirmationKey, dayBefore, defaultLeaseNotes, money, provisionLabel, setCited, REVIEWER_QUOTE,
+  confirmationKey, dayBefore, defaultLeaseNotes, money, provisionLabel, setCited, REVIEWER_QUOTE, PROVISION_CATEGORY_OPTIONS, withOneRetry,
   type BillingProblem, type Confirmation, type Flag, type LeaseAbstract,
 } from './abstract-review-helpers'
 
@@ -80,7 +80,9 @@ export function AbstractReview({ result, filename, pdfBase64, unitId, unitLabel,
   async function recheck(): Promise<AbstractResponse | null> {
     setBusy(true); setError('')
     try {
-      const r = await api.post<AbstractResponse>('/intake/lease/recheck', { abstract: a, pdfBase64 })
+      // One retry on a server or network error (live run 2026-11-23: the on-open re-check got a transient 503
+      // right after a long extraction and left the confirmations locked). A 4xx is a real answer: no retry.
+      const r = await withOneRetry(() => api.post<AbstractResponse>('/intake/lease/recheck', { abstract: a, pdfBase64 }))
       setA(r.abstract); setFlags(r.flags); setConfs(r.confirmations); setProblems(r.billing_problems ?? [])
       if (r.warnings.length > 0) setError(r.warnings.join(' '))
       // Keys are content: a tick survives only for a confirmation that is byte-identical to what was checked.
@@ -273,13 +275,22 @@ export function AbstractReview({ result, filename, pdfBase64, unitId, unitLabel,
         {a.provisions.length === 0 ? <p className="text-sm text-status-neutral">None extracted.</p> : (
           <ul className="space-y-3">
             {a.provisions.map((p, i) => (
-              <li key={i} className="text-sm">
+              <li key={i} className={`text-sm ${flagsFor(`provisions[${i}]`).some((f) => f.severity === 'block') ? 'bg-status-danger/5 p-2 rounded' : ''}`}>
                 <div className="flex items-center gap-2 mb-1">
-                  <span className="font-medium">{provisionLabel(p.category)}</span>
-                  {p.notice_deadline && <span className="text-xs text-status-warning">Notice by {p.notice_deadline}</span>}
+                  {/* Category and dates are editable (live run 2026-11-23: a renewal option came back with one end
+                      of its exercise window, which blocked approval and could only be removed). */}
+                  <Select aria-label="Provision category" className="w-56" value={p.category} onChange={(e) => edit((d) => { d.provisions[i].category = e.target.value })}>
+                    {PROVISION_CATEGORY_OPTIONS.map((c) => <option key={c} value={c}>{provisionLabel(c)}</option>)}
+                  </Select>
                   <button type="button" className="ml-auto text-xs text-status-danger" onClick={() => edit((d) => { d.provisions.splice(i, 1) })}>Remove</button>
                 </div>
                 <TextInput value={p.summary} onChange={(e) => edit((d) => { d.provisions[i].summary = e.target.value })} />
+                <div className="grid grid-cols-3 gap-3 mt-2">
+                  <Field label="Notice deadline"><DateInput value={p.notice_deadline ?? ''} onChange={(e) => edit((d) => { d.provisions[i].notice_deadline = e.target.value || null })} /></Field>
+                  <Field label="Exercise window opens"><DateInput value={p.exercise_window_start ?? ''} onChange={(e) => edit((d) => { d.provisions[i].exercise_window_start = e.target.value || null })} /></Field>
+                  <Field label="Exercise window closes"><DateInput value={p.exercise_window_end ?? ''} onChange={(e) => edit((d) => { d.provisions[i].exercise_window_end = e.target.value || null })} /></Field>
+                </div>
+                {flagsFor(`provisions[${i}]`).map((f, k) => <p key={k} className={`text-xs ${f.severity === 'block' ? 'text-status-danger' : 'text-status-warning'}`}>{f.message}</p>)}
                 <Src p={p.page} q={p.quote} />
               </li>
             ))}

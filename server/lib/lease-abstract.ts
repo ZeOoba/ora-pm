@@ -110,7 +110,7 @@ const INSTRUCTIONS = [
   'Rules:',
   '- Use the lease text only. Never infer, convert or compute a value.',
   '- facts: one entry per field the lease states; leave a field out entirely if it is not stated. value is a string: dates as YYYY-MM-DD, numbers as plain decimals without $ or commas (10000, 0.03), tenant_entity_type one of llc/corporation/partnership/sole_proprietorship/individual/nonprofit/other, rent_type one of nnn/gross/modified_gross.',
-  '- page: the "Page n" number the value appears on. quote: a verbatim excerpt of at least a few words (under 200 characters) copied exactly from that page that states the value. confidence: 0..1.',
+  '- page: the "Page n" number the value appears on. quote: a verbatim excerpt of at least a few words (under 200 characters) copied exactly from that page that states the value: one contiguous passage, never shortened with "..." or "…". confidence: 0..1.',
   '- MONEY: never divide, multiply or convert. Copy every dollar amount into its *_as_written field EXACTLY as the lease prints it, including "$" and commas (e.g. "$120,000.00"), and copy percentages with their "%" (e.g. "3%"). The quote must contain that exact text. Then set the *_period field to the period the lease attaches to THAT printed figure: "month" (per month, monthly installment), "year" (per annum, per year, per lease year, annual), or "psf_year" (per rentable square foot per year). The server computes monthly amounts.',
   '- Percentages in facts (pro_rata_share, cam_cap_pct, admin_fee_pct) are FRACTIONS: 3% is 0.03; holdover is a multiplier, 150% is 1.5.',
   '- Dates are YYYY-MM-DD. Date ranges are inclusive (a year starting 2026-01-01 ends 2026-12-31).',
@@ -536,9 +536,18 @@ export function normalizeForMatch(s: string): string {
 
 export const MIN_QUOTE_CHARS = 12
 
-/** True when `quote` occurs on page `page` (1-based), or straddles that page and the next. */
-export function quoteOnPage(pages: readonly string[], page: number, quote: string): boolean {
+/** Longest stretch of page text an elided quote may span: pieces must be close, never stitched from afar. */
+export const MAX_ELIDED_SPAN = 600
+
+/**
+ * True when `quote` occurs on page `page` (1-based), or straddles that page and the next.
+ * `allowElision` (NON-billing paths only; see verifyCitations): a quote the model shortened with "..." or
+ * "…" (live run 2026-11-23) matches when every piece is at least MIN_QUOTE_CHARS, the pieces occur in
+ * order starting on the cited page, and the whole run spans at most MAX_ELIDED_SPAN characters.
+ */
+export function quoteOnPage(pages: readonly string[], page: number, quote: string, opts: { allowElision?: boolean } = {}): boolean {
   if (!Number.isInteger(page) || page < 1 || page > pages.length) return false
+  if (opts.allowElision && /\.\.\.|…/.test(quote)) return elidedQuoteOnPage(pages, page, quote)
   const q = normalizeForMatch(quote)
   // REFUTE C3: a 3-character quote ("100", "net") matches almost any page and proves nothing.
   if (q.length < MIN_QUOTE_CHARS) return false
@@ -550,6 +559,25 @@ export function quoteOnPage(pages: readonly string[], page: number, quote: strin
   const joined = `${here} ${normalizeForMatch(pages[page])}`
   for (let i = joined.indexOf(q); i !== -1; i = joined.indexOf(q, i + 1)) {
     if (i < here.length && i + q.length > here.length) return true
+  }
+  return false
+}
+
+function elidedQuoteOnPage(pages: readonly string[], page: number, quote: string): boolean {
+  const pieces = quote.split(/\.\.\.|…/).map(normalizeForMatch).filter((p) => p.length > 0)
+  if (pieces.length === 0 || pieces.some((p) => p.length < MIN_QUOTE_CHARS)) return false
+  const here = normalizeForMatch(pages[page - 1])
+  const text = page < pages.length ? `${here} ${normalizeForMatch(pages[page])}` : here
+  // Every start of the first piece on the cited page; then each later piece, in order, inside the window.
+  for (let start = text.indexOf(pieces[0]); start !== -1 && start < here.length; start = text.indexOf(pieces[0], start + 1)) {
+    let at = start + pieces[0].length
+    let ok = true
+    for (const p of pieces.slice(1)) {
+      const i = text.indexOf(p, at)
+      if (i === -1 || i + p.length - start > MAX_ELIDED_SPAN) { ok = false; break }
+      at = i + p.length
+    }
+    if (ok) return true
   }
   return false
 }
@@ -874,7 +902,9 @@ function verifyCitations(a: LeaseAbstract, pages: readonly string[], flags: Abst
       push('warn', path, 'Entered by the reviewer; not taken from the lease text.')
       return true
     }
-    if (!quoteOnPage(pages, s.page, s.quote)) {
+    // Elided quotes ("...") are accepted only off the billing paths: a billing figure must be quoted as one
+    // contiguous passage, so its period and amount cannot be stitched from separate sentences.
+    if (!quoteOnPage(pages, s.page, s.quote, { allowElision: !BILLING_PATH.test(path) })) {
       s.confidence = 0
       push(BILLING_PATH.test(path) ? 'block' : 'warn', path, `Quote not found on cited page ${s.page}; verify this value against the lease.`)
       return false

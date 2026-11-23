@@ -349,6 +349,29 @@ describe('quote verification', () => {
     expect(quoteOnPage(PAGES, 1, 'Year 2: $8,583.33 per month')).toBe(false) // wholly on the next page
     expect(quoteOnPage(PAGES, 9, 'Year 2: $8,583.33')).toBe(false)
   })
+  // Live run 2026-11-23: the model shortened provision quotes with "...", so five verbatim passages failed.
+  it('an elided quote matches only when allowed, every piece is long enough, in order, and close together', () => {
+    const elided = 'Tenant shall have one option ... for five (5) years upon written notice'
+    expect(quoteOnPage(PAGES, 3, elided)).toBe(false) // default: exact only (billing paths)
+    expect(quoteOnPage(PAGES, 3, elided, { allowElision: true })).toBe(true)
+    expect(quoteOnPage(PAGES, 3, 'Tenant shall have one option … for five (5) years upon written notice', { allowElision: true })).toBe(true)
+    // Out of order, a short piece, or a piece not on the page: rejected.
+    expect(quoteOnPage(PAGES, 3, 'for five (5) years upon written notice ... Tenant shall have one option', { allowElision: true })).toBe(false)
+    expect(quoteOnPage(PAGES, 3, 'Tenant shall have one option ... years', { allowElision: true })).toBe(false)
+    expect(quoteOnPage(PAGES, 3, 'Tenant shall have one option ... a rent-free year forever', { allowElision: true })).toBe(false)
+  })
+  it('elided pieces too far apart do not match (no stitching distant text)', () => {
+    const far = ['Opening clause states the lease term begins today. ' + 'filler text here. '.repeat(60) + 'Closing clause ends the lease agreement now.']
+    expect(quoteOnPage(far, 1, 'Opening clause states the lease ... Closing clause ends the lease', { allowElision: true })).toBe(false)
+  })
+  it('verifyCitations allows elision for provisions but never for a billing value', () => {
+    const w = good()
+    ;(w as Obj).provisions = [{ category: 'renewal_option', summary: 'One 5-year renewal option.', notice_deadline: '2028-06-30', exercise_window_start: '', exercise_window_end: '', ...src(3, 'Tenant shall have one option ... for five (5) years upon written notice') }]
+    ;(rec(w)).quote = 'Tenant shall pay ... estimated CAM of $1,250.00 per month'
+    const r = run(w)
+    expect(r.flags.some((f) => f.path === 'provisions[0]' && /Quote not found/.test(f.message))).toBe(false)
+    expect(r.flags.some((f) => f.severity === 'block' && f.path === 'recurring_charges[0]' && /Quote not found/.test(f.message))).toBe(true)
+  })
   it('quotes of MIN_QUOTE_CHARS - 1 are rejected and of MIN_QUOTE_CHARS accepted', () => {
     expect(MIN_QUOTE_CHARS).toBe(12)
     expect(quoteOnPage(PAGES, 1, 'Premises: S')).toBe(false) // 11

@@ -55,6 +55,8 @@ const LABEL: Record<string, string> = {
   hvac: 'HVAC', holdover: 'Holdover', late_fee: 'Late fee', guaranty: 'Guaranty', relocation: 'Relocation', other: 'Other',
 }
 export const provisionLabel = (c: string) => LABEL[c] ?? c
+/** Every provision category the server accepts (server: lease-abstract.ts PROVISION_CATEGORIES). */
+export const PROVISION_CATEGORY_OPTIONS = Object.keys(LABEL)
 
 /** Default lease notes: every term the PM record has no column for, so nothing in the abstract is lost. */
 export function defaultLeaseNotes(a: LeaseAbstract, filename: string): string {
@@ -97,3 +99,16 @@ export function dayBefore(iso: string): string {
 
 export const money = (n: number | null | undefined) =>
   n === null || n === undefined ? '—' : `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+
+/** Run `fn`; on a server (5xx) or network error, wait `delayMs` and try exactly once more. A 4xx (or any
+ *  error carrying a status below 500) is a real answer and is rethrown at once. */
+export async function withOneRetry<T>(fn: () => Promise<T>, delayMs = 1500): Promise<T> {
+  try {
+    return await fn()
+  } catch (e) {
+    const status = (e as { status?: unknown }).status
+    if (typeof status === 'number' && status < 500) throw e
+    await new Promise((r) => setTimeout(r, delayMs))
+    return fn()
+  }
+}
