@@ -16,6 +16,7 @@ import {
   parseWrittenPercent,
   periodWordingMismatch,
   quoteOnPage,
+  revalidateAbstract,
   wireToShape,
   writtenInQuote,
 } from '../../server/lib/lease-abstract'
@@ -133,6 +134,31 @@ describe('buildAbstractRequest', () => {
     expect(r.warnings.some((x) => /rent_schedule\[0\] was malformed/.test(x))).toBe(true)
     expect(r.abstract.provisions.map((p) => p.category)).toEqual(['renewal_option', 'other'])
     expect(r.warnings.some((x) => /Parking Lot Rules/.test(x))).toBe(true)
+  })
+  it('REFUTE grammar C1: a concession or recurring charge with an unreadable date blocks, at extraction and again at approval', () => {
+    const w = good()
+    ;(w.concessions[0] as Obj).period_end = ''
+    ;(w.recurring_charges[0] as Obj).effective_end = 'end of term'
+    const r = run(w)
+    expect(r.abstract.concessions).toHaveLength(0)
+    expect(r.abstract.unreadable.map((u) => `${u.list}[${u.index}]`)).toEqual(['concessions[0]', 'recurring_charges[0]'])
+    expect(blocks(r).map((f) => f.path)).toEqual(expect.arrayContaining(['concessions[0]', 'recurring_charges[0]']))
+    // The review screen re-checks the abstract it holds: the block must survive that round trip.
+    const again = revalidateAbstract(JSON.parse(JSON.stringify(r.abstract)), PAGES)
+    expect(again.flags.filter((f) => f.severity === 'block').map((f) => f.path)).toEqual(expect.arrayContaining(['concessions[0]', 'recurring_charges[0]']))
+  })
+  it('REFUTE grammar C3: near-miss provision categories map to the right category', () => {
+    const w = good()
+    const prov = (category: string) => ({ category, summary: 'x', notice_deadline: '', exercise_window_start: '', exercise_window_end: '', ...src(3, 'one option to renew for five (5) years') })
+    ;(w as Obj).provisions = ['Renewal Options', 'ROFR/ROFO', 'Early Termination', 'Right of First Refusal', 'Assignment/Sublet', 'Assignment & Subletting'].map(prov)
+    expect(run(w).abstract.provisions.map((p) => p.category)).toEqual(['renewal_option', 'rofr_rofo', 'termination', 'rofr_rofo', 'assignment_sublet', 'assignment_sublet'])
+  })
+  it('REFUTE grammar C2: prototype names are unknown fields, not duplicates', () => {
+    const w = good()
+    w.facts.push(fact('constructor', 'x', 1, 'Acme Fabrication LLC, an Ohio limited liability company'))
+    const r = run(w)
+    expect(r.warnings.some((x) => /unknown field/.test(x))).toBe(true)
+    expect(r.warnings.some((x) => /stated more than once/.test(x))).toBe(false)
   })
   it('asks for money as written plus its period, never a computed monthly figure', () => {
     const s = JSON.stringify(ABSTRACT_SCHEMA)

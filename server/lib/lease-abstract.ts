@@ -117,7 +117,8 @@ const INSTRUCTIONS = [
   '- rent_schedule: one row per rent period across the whole term, contiguous, no gaps or overlaps. If a period\'s rent is printed, give it as written. If it is NOT printed and follows only from a stated escalation, set amount_as_written to "" and amount_period to "month"; the server derives it from the escalation. The first period\'s rent must be printed.',
   '- escalations: at most one entry, only if the lease states a rule; first_adjustment_date is always a real date. fixed_pct: value_as_written is the printed percentage ("3%"), value_period "none". fixed_amount: value_as_written is the printed dollar increase, value_period its period. cpi: value_as_written "", value_period "none"; cpi_floor is -1 when not stated (0 means a stated 0% floor); cpi_cap is 0 when not stated. For fixed rules, cpi_floor is -1 and cpi_cap is 0.',
   '- concessions: free rent, abatements, waivers. full_waiver: value_as_written "" and value_period "none". pct: value_as_written is the printed percentage waived ("50%"), value_period "none". fixed_amount: value_as_written is the printed dollar amount waived, value_period its period. charge_type "all" only when the lease says the waiver covers rent AND CAM/operating expenses; a dollar waiver over both is two entries. Never "all" with fixed_amount.',
-  '- recurring_charges: amounts other than base rent (CAM estimate, utilities, tax or insurance escrow as type "other"), each as written with its period.',
+  '- recurring_charges: amounts other than base rent (CAM estimate, utilities, tax or insurance escrow as type "other"), each as written with its period. effective_start and effective_end are always real YYYY-MM-DD dates: a charge that runs for the whole term starts on the commencement (or rent commencement) date and ends on the expiration date.',
+  '- concessions: period_start and period_end are always real YYYY-MM-DD dates (never "").',
   '- late_fees: at most one entry; amount and pct are 0 when not stated; grace_days is -1 when not stated (0 means no grace period).',
   '- provisions: tenant rights and special rules (options, ROFR/ROFO, termination, exclusives, use, signage, parking, assignment, insurance requirements, maintenance split, HVAC, holdover, guaranty, relocation). summary is one plain sentence. notice_deadline, exercise_window_start and exercise_window_end are YYYY-MM-DD, or "" when the lease does not let you determine them.',
 ].join('\n')
@@ -134,9 +135,23 @@ function normalizeName(s: string): string {
 
 /** A provision category is a plain string on the wire: normalize it; an unknown one keeps the provision as
  *  'other' (its summary and quote are still worth having) with a warning, rather than dropping it. */
+/** Near-miss spellings the model may use now that category is a plain string (REFUTE schema-grammar C3):
+ *  filing these as 'other' would store a renewal or termination notice deadline under the wrong kind. */
+const CATEGORY_ALIASES: Record<string, string> = {
+  renewal: 'renewal_option', renewal_options: 'renewal_option', option_to_renew: 'renewal_option', extension_option: 'renewal_option',
+  expansion_option: 'expansion', expansion_right: 'expansion',
+  rofr: 'rofr_rofo', rofo: 'rofr_rofo', right_of_first_refusal: 'rofr_rofo', right_of_first_offer: 'rofr_rofo',
+  early_termination: 'termination', termination_option: 'termination', termination_right: 'termination',
+  exclusive: 'exclusive_use', use: 'permitted_use', permitted_uses: 'permitted_use',
+  assignment: 'assignment_sublet', sublet: 'assignment_sublet', subletting: 'assignment_sublet', assignment_and_subletting: 'assignment_sublet', assignment_subletting: 'assignment_sublet',
+  insurance: 'insurance_req', insurance_requirements: 'insurance_req', maintenance: 'maintenance_split', repairs_and_maintenance: 'maintenance_split',
+  late_fees: 'late_fee', late_charge: 'late_fee', guarantee: 'guaranty', personal_guaranty: 'guaranty',
+}
+
 function provisionCategory(v: unknown, warnings: string[]): unknown {
   if (typeof v !== 'string') return v // zod rejects it and drops the item with its own warning
-  const c = normalizeName(v)
+  const n = normalizeName(v).replace(/[/&]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '')
+  const c = CATEGORY_ALIASES[n] ?? n
   if ((PROVISION_CATEGORIES as readonly string[]).includes(c)) return c
   warnings.push(`A provision category "${v.slice(0, 40)}" is not recognised; it was filed as "other".`)
   return 'other'
@@ -160,8 +175,8 @@ export function wireToShape(raw: unknown, warnings: string[]): unknown {
     for (const [i, f] of r.facts.entries()) {
       const fact = f as Record<string, unknown> | null
       const name = typeof fact?.field === 'string' ? normalizeName(fact.field) : fact?.field
-      if (typeof name !== 'string' || !(name in FACT_FIELDS)) { warnings.push(`facts[${i}] names an unknown field and was dropped.`); continue }
-      if (name in out) { warnings.push(`Field "${name}" was stated more than once; the first value was kept.`); continue }
+      if (typeof name !== 'string' || !Object.hasOwn(FACT_FIELDS, name)) { warnings.push(`facts[${i}] names an unknown field and was dropped.`); continue }
+      if (Object.hasOwn(out, name)) { warnings.push(`Field "${name}" was stated more than once; the first value was kept.`); continue }
       const kind = FACT_FIELDS[name as keyof typeof FACT_FIELDS]
       const text = typeof fact?.value === 'string' ? fact.value.trim() : fact?.value
       let value: unknown = text
@@ -249,6 +264,25 @@ const ProvisionZ = z.object({
   exercise_window_start: isoDate.nullable(), exercise_window_end: isoDate.nullable(), ...source,
 })
 
+const UnreadableZ = z.object({ list: z.enum(['concessions', 'recurring_charges']), index: z.number().int(), page: z.number().int().nullable(), quote: z.string().nullable() })
+
+/** Every concession / recurring charge the model sent that its zod schema rejects (dropped by coerceAbstract). */
+function unreadableBillingItems(shaped: unknown): UnreadableItem[] {
+  if (!shaped || typeof shaped !== 'object' || Array.isArray(shaped)) return []
+  const r = shaped as Record<string, unknown>
+  const out: UnreadableItem[] = []
+  for (const [list, zs] of [['concessions', ConcessionZ], ['recurring_charges', RecurringZ]] as const) {
+    const items = r[list]
+    if (!Array.isArray(items)) continue
+    items.forEach((item, index) => {
+      if ((zs as z.ZodTypeAny).safeParse(item).success) return
+      const o = item && typeof item === 'object' ? (item as Record<string, unknown>) : {}
+      out.push({ list, index, page: Number.isInteger(o.page) ? (o.page as number) : null, quote: typeof o.quote === 'string' ? o.quote.slice(0, 200) : null })
+    })
+  }
+  return out
+}
+
 const SCALARS = {
   tenant_legal_name: citedZ(z.string()),
   tenant_dba: citedZ(z.string()),
@@ -287,7 +321,13 @@ export type LeaseAbstract = { -readonly [K in keyof typeof SCALARS]: z.infer<(ty
   recurring_charges: RecurringItem[]
   late_fee: LateFee | null
   provisions: ProvisionItem[]
+  /** Billing items the model returned that failed validation (e.g. a blank or non-ISO date) and were dropped.
+   *  Carried in the abstract so approval keeps refusing it after the review screen re-checks (REFUTE
+   *  schema-grammar C1): a lost abatement over-bills, a lost CAM line never bills. */
+  unreadable: UnreadableItem[]
 }
+
+export interface UnreadableItem { list: 'concessions' | 'recurring_charges'; index: number; page: number | null; quote: string | null }
 
 export interface AbstractFlag {
   severity: 'block' | 'warn'
@@ -328,7 +368,7 @@ export interface AbstractResult {
 
 export function emptyAbstract(): LeaseAbstract {
   const a = Object.fromEntries(Object.keys(SCALARS).map((k) => [k, null])) as unknown as LeaseAbstract
-  return { ...a, rent_schedule: [], escalation: null, concessions: [], recurring_charges: [], late_fee: null, provisions: [] }
+  return { ...a, rent_schedule: [], escalation: null, concessions: [], recurring_charges: [], late_fee: null, provisions: [], unreadable: [] }
 }
 
 /**
@@ -363,6 +403,7 @@ export function coerceAbstract(raw: unknown): { abstract: LeaseAbstract; warning
   out.concessions = list('concessions', ConcessionZ)
   out.recurring_charges = list('recurring_charges', RecurringZ)
   out.provisions = list('provisions', ProvisionZ)
+  out.unreadable = list('unreadable', UnreadableZ)
   for (const [key, zs] of [['escalation', EscalationZ], ['late_fee', LateFeeZ]] as const) {
     const v = r[key]
     if (v === undefined || v === null) continue
@@ -946,6 +987,7 @@ export function crossCheck(a: LeaseAbstract): AbstractFlag[] {
   })
   a.provisions.forEach((pv, i) => {
     if ((pv.exercise_window_start === null) !== (pv.exercise_window_end === null)) block(`provisions[${i}]`, 'An exercise window needs both a start and an end date.')
+    if (pv.category === 'other' && pv.notice_deadline) flags.push({ severity: 'warn', path: `provisions[${i}]`, message: `This provision has a notice deadline (${pv.notice_deadline}) but no recognised category; it will be calendared as "other". Check whether it is a renewal, termination or other option.` })
   })
 
   // Final gate: the billing engine must bill every month of the term from this abstract without an
@@ -987,6 +1029,7 @@ export function finalizeAbstract(raw: unknown, pages: readonly string[]): Abstra
   const wireWarnings: string[] = []
   const shaped = wireToShape(raw, wireWarnings)
   const { abstract, warnings: coerceWarnings } = coerceAbstract(shaped)
+  abstract.unreadable = unreadableBillingItems(shaped)
   const warnings = [...wireWarnings, ...coerceWarnings]
   const flags: AbstractFlag[] = []
   // REFUTE round 2 C1a: the reviewer marker must only ever come from a human edit. A model quote carrying
@@ -997,6 +1040,9 @@ export function finalizeAbstract(raw: unknown, pages: readonly string[]): Abstra
   // crossCheck skips value checks on unresolved (null) amounts (resolveAmounts already blocked them), and
   // its billing-engine dry run runs only when every amount is resolved and it raised no block itself.
   flags.push(...crossCheck(abstract))
+  for (const u of abstract.unreadable) {
+    flags.push({ severity: 'block', path: `${u.list}[${u.index}]`, message: `The lease states a ${u.list === 'concessions' ? 'concession' : 'recurring charge'}${u.page ? ` (p. ${u.page})` : ''} that could not be read; enter this lease manually.` })
+  }
   // Re-REFUTE 3: the lease states an escalation the model returned malformed. Treating it as "no rule"
   // would skip the schedule-vs-rule comparison, so it blocks until entered by hand.
   const sent = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>).escalations : undefined
@@ -1060,6 +1106,9 @@ export function revalidateAbstract(raw: unknown, pages: readonly string[]): Abst
   // REFUTE round 3 C1: the multiple-rule and malformed-rule blocks exist only at extraction (they read the
   // raw model output), so a rent period DERIVED from the escalation cannot be trusted at approval. Every
   // rent period must be printed in the lease or entered (and confirmed) by the reviewer.
+  for (const u of abstract.unreadable) {
+    flags.push({ severity: 'block', path: `${u.list}[${u.index}]`, message: `The lease states a ${u.list === 'concessions' ? 'concession' : 'recurring charge'}${u.page ? ` (p. ${u.page})` : ''} that could not be read; enter this lease manually.` })
+  }
   abstract.rent_schedule.forEach((r, i) => {
     if (!r.amount_as_written.trim()) flags.push({ severity: 'block', path: `rent_schedule[${i}]`, message: 'This rent period is derived from the escalation, not printed in the lease; enter its amount as you have verified it.' })
   })
