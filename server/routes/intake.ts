@@ -2,7 +2,10 @@ import { Hono } from 'hono'
 import type { Env } from '../index'
 import { parseTerms, containsConfidentialTerm } from '../lib/confidentiality'
 import { extractLease } from '../lib/lease-extract'
-import { BILLING_PATH, extractAbstract, ExtractionStopped, type AbstractFlag, type AbstractResult, type Confirmation } from '../lib/lease-abstract'
+import { z } from 'zod'
+import { BILLING_PATH, confirmationKey, extractAbstract, ExtractionStopped, revalidateAbstract, type AbstractFlag, type AbstractResult, type Confirmation } from '../lib/lease-abstract'
+import { buildApprovalPayload, ApprovalInputError, BillingDivergenceError, OverBillingError, type BillingDivergence } from '../lib/lease-approve'
+import { todayUtc } from '../lib/collections'
 import { inspectPdf, pagesLackingTextLayer, MIN_PAGE_TEXT_CHARS, type PdfInspection } from '../lib/pdf-extract'
 import { checkRateLimit } from '../lib/rate-limit'
 import { ANTHROPIC_MODEL } from '../lib/models'
@@ -49,14 +52,17 @@ intakeRouter.post('/lease', async (c) => {
   }
 
   const { filename, pdfBase64, tenant_id, unit_id, mode } = await c.req.json().catch(() => ({}))
-  if (!filename || !pdfBase64 || !tenant_id || !unit_id) {
-    return c.json({ error: 'filename, pdfBase64, tenant_id, unit_id are required' }, 400)
-  }
   // 'abstract' = lease abstraction v2 (server/lib/lease-abstract.ts): the full abstract with citations
   // and cross-check flags. Absent = the original 9-field extraction, unchanged. Every guard below runs
   // identically for both modes; only the extractor and the post-egress scrub differ.
   if (mode !== undefined && mode !== 'abstract') {
     return c.json({ error: "mode must be 'abstract' or omitted" }, 400)
+  }
+  // Phase 4: an abstract may be for a NEW tenant that has no row yet (it is created at approval), so
+  // tenant_id is optional in abstract mode. unit_id stays required and existence-checked: it is what binds
+  // the document to the managed portfolio (the OI-044 compensating control below).
+  if (!filename || !pdfBase64 || !unit_id || (!tenant_id && mode !== 'abstract')) {
+    return c.json({ error: mode === 'abstract' ? 'filename, pdfBase64, unit_id are required' : 'filename, pdfBase64, tenant_id, unit_id are required' }, 400)
   }
 
   // OI-044 tightening: tenant_id/unit_id were previously only checked for
@@ -64,9 +70,11 @@ intakeRouter.post('/lease', async (c) => {
   // construction a managed-portfolio lease") only holds if the ids actually
   // resolve to real rows. Existence-check both, before any egress.
   const db = getDb(c.env)
-  const { data: tenantRow, error: tenantErr } = await db.from('tenants').select('id').eq('id', tenant_id).maybeSingle()
-  if (tenantErr) return c.json({ error: 'Failed to verify tenant' }, 500)
-  if (!tenantRow) return c.json({ error: 'Tenant not found' }, 404)
+  if (tenant_id) {
+    const { data: tenantRow, error: tenantErr } = await db.from('tenants').select('id').eq('id', tenant_id).maybeSingle()
+    if (tenantErr) return c.json({ error: 'Failed to verify tenant' }, 500)
+    if (!tenantRow) return c.json({ error: 'Tenant not found' }, 404)
+  }
   const { data: unitRow, error: unitErr } = await db.from('units').select('id').eq('id', unit_id).maybeSingle()
   if (unitErr) return c.json({ error: 'Failed to verify unit' }, 500)
   if (!unitRow) return c.json({ error: 'Unit not found' }, 404)
@@ -191,7 +199,7 @@ intakeRouter.post('/lease', async (c) => {
         flags.push({ severity: 'block', path, message: 'A billing value was withheld by the confidentiality guard; enter it manually.' })
       }
     }
-    return c.json({ abstract, flags, confirmations, warnings: [...warnings, ...scrubbed] })
+    return c.json({ abstract, flags, confirmations, warnings: [...warnings, ...scrubbed], model: resolveModel(c.env.INTAKE_MODEL) })
   }
 
   let result
@@ -219,6 +227,156 @@ intakeRouter.post('/lease', async (c) => {
   }
   return c.json({ fields, confidence: result.confidence, warnings })
 })
+
+// ── Phase 4: approve a reviewed abstract into the PM records ─────────────────
+//
+// No egress happens here (nothing is sent to the model), so the LLM rate limit and the confidentiality
+// pre-scan do not apply; the route is admin-gated like every /api/intake path (server/index.ts).
+// NOTHING the client sends is trusted as computed: the abstract is re-validated and every monthly figure
+// re-derived from its as-written text (revalidateAbstract), any open 'block' flag refuses approval, and
+// every billing value must be in confirmed_paths (plan §5b: a human confirms each one against its quote).
+const ApproveBody = z.object({
+  filename: z.string().min(1).max(255),
+  pdfBase64: z.string().min(1),
+  unit_id: z.string().uuid(),
+  tenant: z.discriminatedUnion('mode', [
+    z.object({
+      mode: z.literal('new'), name: z.string().trim().min(1).max(200),
+      contact_name: z.string().max(200).nullish(), contact_email: z.string().max(200).nullish(),
+      contact_phone: z.string().max(50).nullish(), notes: z.string().max(5000).nullish(),
+    }),
+    z.object({ mode: z.literal('existing'), id: z.string().uuid() }),
+  ]),
+  replace: z.object({ lease_id: z.string().uuid(), end_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) }).nullable(),
+  abstract: z.unknown(),
+  confirmed_keys: z.array(z.string().max(5000)).max(500),
+  acknowledged_divergence: z.string().max(20000).nullable().default(null),
+  notes: z.string().max(20000).nullable(),
+  model: z.string().max(100).optional(),
+})
+
+const APPROVE_OUTCOME_STATUS: Record<string, { status: 404 | 409 | 422; error: string }> = {
+  unit_not_found: { status: 404, error: 'Unit not found.' },
+  tenant_not_found: { status: 404, error: 'Tenant not found.' },
+  replace_not_found: { status: 404, error: 'The lease to replace was not found.' },
+  replace_wrong_unit: { status: 422, error: 'The lease to replace is on a different unit.' },
+  replace_not_active: { status: 409, error: 'The lease to replace is no longer active or pending.' },
+  replace_historic: { status: 422, error: 'A lease that has already ended cannot replace the current tenant. Untick replace to record it as history.' },
+  replace_bad_end_date: { status: 422, error: "The prior tenant's end date must be on or after its lease start and before the new lease starts." },
+  unit_occupied: { status: 409, error: 'Another active or pending lease on this unit overlaps this term. Replace that tenant, or correct the dates.' },
+}
+
+// Decode + inspect an approval/recheck PDF. Its page text is what every quote is re-verified against, so
+// the abstract is tied to the exact file being stored (REFUTE C1c). Every page must carry a text layer,
+// the same rule extraction applies.
+async function approvalPages(pdfBase64: unknown): Promise<{ bytes: Uint8Array<ArrayBuffer>; pages: string[] } | { error: string; status: 413 | 415 | 422 }> {
+  if (typeof pdfBase64 !== 'string' || !pdfBase64) return { error: 'pdfBase64 is required.', status: 422 }
+  if (Math.floor((pdfBase64.length * 3) / 4) > MAX_PDF_BYTES) return { error: 'File too large (max 10 MB).', status: 413 }
+  if (!pdfBase64.startsWith('JVBER')) return { error: 'Uploaded file is not a valid PDF.', status: 415 }
+  let bytes: Uint8Array<ArrayBuffer>
+  try {
+    bytes = Uint8Array.from(atob(pdfBase64), (ch) => ch.charCodeAt(0))
+  } catch {
+    return { error: 'Uploaded file is not a valid PDF.', status: 415 }
+  }
+  const inspection = await safeDecodeAndInspect(pdfBase64)
+  if (!inspection || pagesLackingTextLayer(inspection.pages).length > 0) {
+    return { error: 'The PDF has pages without a usable text layer; its quotes cannot be verified.', status: 422 }
+  }
+  return { bytes, pages: inspection.pages }
+}
+
+/** Months where today's flat billing differs from the lease, previewed for the review screen: over-bills
+ *  (refused) and under-bills (acknowledgeable, bound to `signature`). */
+function previewDivergence(a: Parameters<typeof buildApprovalPayload>[0]): { over: BillingDivergence[]; under: BillingDivergence[]; signature: string | null } {
+  try {
+    buildApprovalPayload(a, {
+      unitId: '', today: todayUtc(), tenant: { mode: 'new', name: 'preview' }, replace: null, notes: null, storagePath: '',
+      fileSha256: '', filename: '', model: '', approvedBy: '', warnings: [], acknowledgedDivergence: null,
+    })
+    return { over: [], under: [], signature: null }
+  } catch (e) {
+    if (e instanceof OverBillingError) return { over: e.months, under: [], signature: null }
+    if (e instanceof BillingDivergenceError) return { over: [], under: e.months, signature: e.signature }
+    return { over: [], under: [], signature: null }
+  }
+}
+
+// Re-run the approval checks on a reviewer-edited abstract without saving anything (no egress, no
+// writes): the review screen calls this on open and after edits so flags, confirmations and billing
+// divergence match exactly what approval will enforce.
+intakeRouter.post('/lease/recheck', async (c) => {
+  const body = await c.req.json().catch(() => null) as { abstract?: unknown; pdfBase64?: unknown } | null
+  if (!body || body.abstract === undefined) return c.json({ error: 'abstract is required' }, 400)
+  const pdf = await approvalPages(body.pdfBase64)
+  if ('error' in pdf) return c.json({ error: pdf.error }, pdf.status)
+  const rv = revalidateAbstract(body.abstract, pdf.pages)
+  return c.json({ abstract: rv.abstract, flags: rv.flags, confirmations: rv.confirmations, warnings: rv.warnings, divergence: previewDivergence(rv.abstract) })
+})
+
+intakeRouter.post('/lease/approve', async (c) => {
+  const parsed = ApproveBody.safeParse(await c.req.json().catch(() => null))
+  if (!parsed.success) return c.json({ error: 'Invalid approval request.', fields: parsed.error.issues.map((i) => `${i.path.join('.')} (${i.code})`) }, 400)
+  const b = parsed.data
+
+  const pdf = await approvalPages(b.pdfBase64)
+  if ('error' in pdf) return c.json({ error: pdf.error }, pdf.status)
+
+  const rv = revalidateAbstract(b.abstract, pdf.pages)
+  if (rv.warnings.length > 0) return c.json({ error: 'Some reviewed fields are malformed; correct them and approve again.', warnings: rv.warnings }, 422)
+  const blocks = rv.flags.filter((f) => f.severity === 'block')
+  if (blocks.length > 0) return c.json({ error: 'Resolve every blocking issue before approving.', flags: blocks }, 422)
+  // Matched by CONTENT, not path: a value changed after it was ticked is not confirmed (REFUTE C1b).
+  const confirmed = new Set(b.confirmed_keys)
+  const missing = rv.confirmations.filter((cf) => !confirmed.has(confirmationKey(cf))).map((cf) => cf.path)
+  if (missing.length > 0) return c.json({ error: 'Confirm every billing value against the lease before approving.', missing }, 422)
+
+  const sha = await sha256Hex(pdf.bytes)
+  const storagePath = `abstracts/${sha}.pdf`
+  let payload: Record<string, unknown>
+  try {
+    payload = buildApprovalPayload(rv.abstract, {
+      unitId: b.unit_id,
+      today: todayUtc(),
+      tenant: b.tenant,
+      replace: b.replace,
+      notes: b.notes,
+      storagePath,
+      fileSha256: sha,
+      filename: b.filename,
+      model: b.model && ALLOWED_MODELS.has(b.model) ? b.model : resolveModel(c.env.INTAKE_MODEL),
+      approvedBy: c.get('adminEmail') ?? c.get('adminUserId') ?? 'admin',
+      warnings: rv.flags.filter((f) => f.severity === 'warn').map((f) => `${f.path}: ${f.message}`),
+      acknowledgedDivergence: b.acknowledged_divergence,
+    })
+  } catch (e) {
+    if (e instanceof OverBillingError) return c.json({ error: e.reason, divergence: { over: e.months, under: [], signature: null } }, 422)
+    if (e instanceof BillingDivergenceError) return c.json({ error: e.reason, divergence: { over: [], under: e.months, signature: e.signature } }, 422)
+    if (e instanceof ApprovalInputError) return c.json({ error: e.reason }, 422)
+    throw e
+  }
+
+  const db = getDb(c.env)
+  // Content-addressed: re-approving the same bytes overwrites an identical object. Uploaded before the
+  // RPC so the lease_documents row never points at a missing object; a refused approval can leave an
+  // unreferenced copy behind, never a database row.
+  const { error: upErr } = await db.storage.from('lease-documents').upload(storagePath, pdf.bytes, { contentType: 'application/pdf', upsert: true })
+  if (upErr) return c.json({ error: 'Failed to store the lease PDF; no records were saved.' }, 502)
+
+  const { data, error } = await db.rpc('approve_lease_abstract', { p: payload })
+  if (error) return c.json({ error: 'Approval failed; no records were saved.' }, 500)
+  const r = (data ?? {}) as Record<string, unknown>
+  const outcome = String(r.outcome ?? '')
+  if (outcome === 'approved' || outcome === 'already_approved') return c.json(r, outcome === 'approved' ? 201 : 200)
+  const mapped = APPROVE_OUTCOME_STATUS[outcome]
+  if (mapped) return c.json({ ...r, error: mapped.error }, mapped.status)
+  return c.json({ error: 'Approval failed; no records were saved.' }, 500)
+})
+
+async function sha256Hex(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', bytes)
+  return [...new Uint8Array(digest)].map((x) => x.toString(16).padStart(2, '0')).join('')
+}
 
 /**
  * Phase 4 confirmation list scrub. Every field is scrubbed EXCEPT the three fixed labels: path (a schema

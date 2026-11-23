@@ -39,7 +39,8 @@ leasesRouter.get('/:id', async (c) => {
   const db = getDb(c.env)
   const { data, error } = await db
     .from('leases')
-    .select('*, tenants(*), units(*, properties(*)), lease_amendments(*), lease_documents(*), broker_commissions(*), tenant_notices(*)')
+    // 0020 abstract rows (provisions, active rent schedule, critical dates) back the "Rights & Rules" tab.
+    .select('*, tenants(*), units(*, properties(*)), lease_amendments(*), lease_documents(*), broker_commissions(*), tenant_notices(*), lease_provisions(*), lease_rent_schedule(*), lease_critical_dates(*)')
     .eq('id', c.req.param('id'))
     .single()
   // Not-found is a 404, not a 500 — dbError always returns 500, so this
