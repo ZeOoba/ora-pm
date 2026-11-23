@@ -44,7 +44,14 @@ type JsonSchema = Record<string, unknown>
 const STR: JsonSchema = { type: 'string' }
 const NUM: JsonSchema = { type: 'number' }
 const INT: JsonSchema = { type: 'integer' }
-const DATE: JsonSchema = { type: 'string', format: 'date' }
+// GRAMMAR BUDGET (first live run, 2026-11-23): the API refused this schema with 400 "The compiled grammar
+// is too large". Structured outputs compile the schema into a grammar; `format: 'date'` (calendar-valid
+// dates, 8 fields) and the two large enums (20 fact names, 17 provision categories) were the bulk of it.
+// Dates and those two names are therefore plain strings ON THE WIRE ONLY: the server still enforces them
+// exactly (zod isoDate for every date; wireToShape normalizes fact names, dropping unknown ones with a
+// warning, and provision categories, mapping unknown ones to 'other' with a warning). Small enums (≤ 6
+// values) stay. tests/lib/lease-abstract.test.ts pins: no `format`, no enum over 6 values.
+const DATE: JsonSchema = { type: 'string', description: 'YYYY-MM-DD' }
 const enumOf = (values: readonly string[]): JsonSchema => ({ type: 'string', enum: [...values] })
 const obj = (properties: Record<string, JsonSchema>): JsonSchema =>
   ({ type: 'object', properties, required: Object.keys(properties), additionalProperties: false })
@@ -76,7 +83,7 @@ export const FACT_FIELDS = {
 // quote") leaked in rounds 1 and 2 and are gone.
 export const AMOUNT_PERIODS = ['month', 'year', 'psf_year'] as const
 export const ABSTRACT_SCHEMA: JsonSchema = obj({
-  facts: list(obj({ field: enumOf(Object.keys(FACT_FIELDS)), value: STR, ...SOURCE })),
+  facts: list(obj({ field: { type: 'string', description: `One of: ${Object.keys(FACT_FIELDS).join(', ')}` }, value: STR, ...SOURCE })),
   rent_schedule: list(obj({ start: DATE, end: DATE, amount_as_written: STR, amount_period: enumOf(AMOUNT_PERIODS), ...SOURCE })),
   escalations: list(obj({
     kind: enumOf(['fixed_pct', 'fixed_amount', 'cpi']), value_as_written: STR, value_period: enumOf([...AMOUNT_PERIODS, 'none']),
@@ -92,7 +99,7 @@ export const ABSTRACT_SCHEMA: JsonSchema = obj({
   })),
   late_fees: list(obj({ amount: NUM, pct: NUM, grace_days: INT, ...SOURCE })),
   provisions: list(obj({
-    category: enumOf(PROVISION_CATEGORIES), summary: STR, notice_deadline: STR,
+    category: { type: 'string', description: `One of: ${PROVISION_CATEGORIES.join(', ')}` }, summary: STR, notice_deadline: STR,
     exercise_window_start: STR, exercise_window_end: STR, ...SOURCE,
   })),
 })
@@ -120,6 +127,21 @@ const INSTRUCTIONS = [
  * Sentinels: 0 → null for optional numbers; "" → null for optional dates; first escalation / late fee.
  * Anything not in the expected wire form is passed through so the zod layer rejects it with a warning.
  */
+/** 'Commencement Date' / 'commencement-date' → 'commencement_date' (names are plain strings on the wire). */
+function normalizeName(s: string): string {
+  return s.trim().toLowerCase().replace(/[\s-]+/g, '_')
+}
+
+/** A provision category is a plain string on the wire: normalize it; an unknown one keeps the provision as
+ *  'other' (its summary and quote are still worth having) with a warning, rather than dropping it. */
+function provisionCategory(v: unknown, warnings: string[]): unknown {
+  if (typeof v !== 'string') return v // zod rejects it and drops the item with its own warning
+  const c = normalizeName(v)
+  if ((PROVISION_CATEGORIES as readonly string[]).includes(c)) return c
+  warnings.push(`A provision category "${v.slice(0, 40)}" is not recognised; it was filed as "other".`)
+  return 'other'
+}
+
 export function wireToShape(raw: unknown, warnings: string[]): unknown {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw
   const r = raw as Record<string, unknown>
@@ -137,7 +159,7 @@ export function wireToShape(raw: unknown, warnings: string[]): unknown {
   if (Array.isArray(r.facts)) {
     for (const [i, f] of r.facts.entries()) {
       const fact = f as Record<string, unknown> | null
-      const name = fact?.field
+      const name = typeof fact?.field === 'string' ? normalizeName(fact.field) : fact?.field
       if (typeof name !== 'string' || !(name in FACT_FIELDS)) { warnings.push(`facts[${i}] names an unknown field and was dropped.`); continue }
       if (name in out) { warnings.push(`Field "${name}" was stated more than once; the first value was kept.`); continue }
       const kind = FACT_FIELDS[name as keyof typeof FACT_FIELDS]
@@ -156,7 +178,7 @@ export function wireToShape(raw: unknown, warnings: string[]): unknown {
   out.concessions = mapItems(r.concessions, (o) => ({ ...o, value: null }))
   out.recurring_charges = mapItems(r.recurring_charges, (o) => ({ ...o, amount_monthly: null }))
   out.provisions = mapItems(r.provisions, (o) => ({
-    ...o, notice_deadline: blankToNull(o.notice_deadline),
+    ...o, category: provisionCategory(o.category, warnings), notice_deadline: blankToNull(o.notice_deadline),
     exercise_window_start: blankToNull(o.exercise_window_start), exercise_window_end: blankToNull(o.exercise_window_end),
   }))
   const firstOf = (key: string, label: string) => {

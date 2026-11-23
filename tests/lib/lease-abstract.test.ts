@@ -106,6 +106,34 @@ describe('buildAbstractRequest', () => {
     expect(unions).toBe(0)
     expect(optional).toBe(0)
   })
+  // First live run (2026-11-23): 400 "The compiled grammar is too large". Grammar budget guard.
+  it('stays inside the grammar budget: no string formats and no enum over 6 values', () => {
+    const big: string[] = []
+    const walk = (s: unknown, path: string): void => {
+      if (!s || typeof s !== 'object') return
+      const o = s as Obj
+      expect(o, path).not.toHaveProperty('format')
+      if (Array.isArray(o.enum) && o.enum.length > 6) big.push(`${path} (${o.enum.length})`)
+      Object.entries(o).forEach(([k, v]) => (Array.isArray(v) ? v.forEach((x, i) => walk(x, `${path}.${k}[${i}]`)) : walk(v, `${path}.${k}`)))
+    }
+    walk(ABSTRACT_SCHEMA, '$')
+    expect(big).toEqual([])
+  })
+  it('server-side validation still holds for the plain-string wire fields', () => {
+    const w = good()
+    ;(w.facts[0] as Obj).field = 'Tenant Legal Name' // normalized
+    w.facts.push(fact('lease_signing_mood', 'happy', 1, 'Acme Fabrication LLC, an Ohio limited liability company')) // unknown → dropped
+    ;(w.rent_schedule[0] as Obj).start = '2026-02-30' // invalid calendar date → row rejected by zod
+    ;(w as Obj).provisions = [{ category: 'Renewal Option', summary: 'One 5-year renewal option.', notice_deadline: '', exercise_window_start: '', exercise_window_end: '', ...src(3, 'one option to renew for five (5) years') },
+      { category: 'Parking Lot Rules', summary: 'Ten spaces.', notice_deadline: '', exercise_window_start: '', exercise_window_end: '', ...src(3, 'one option to renew for five (5) years') }]
+    const r = run(w)
+    expect(r.abstract.tenant_legal_name?.value).toBe('Acme Fabrication LLC')
+    expect(r.warnings.some((x) => /unknown field/.test(x))).toBe(true)
+    expect(r.abstract.rent_schedule).toHaveLength(2)
+    expect(r.warnings.some((x) => /rent_schedule\[0\] was malformed/.test(x))).toBe(true)
+    expect(r.abstract.provisions.map((p) => p.category)).toEqual(['renewal_option', 'other'])
+    expect(r.warnings.some((x) => /Parking Lot Rules/.test(x))).toBe(true)
+  })
   it('asks for money as written plus its period, never a computed monthly figure', () => {
     const s = JSON.stringify(ABSTRACT_SCHEMA)
     expect(s).toContain('amount_as_written')
