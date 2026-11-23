@@ -4,7 +4,7 @@ import { parseTerms, containsConfidentialTerm } from '../lib/confidentiality'
 import { extractLease } from '../lib/lease-extract'
 import { z } from 'zod'
 import { BILLING_PATH, confirmationKey, extractAbstract, ExtractionStopped, revalidateAbstract, type AbstractFlag, type AbstractResult, type Confirmation } from '../lib/lease-abstract'
-import { buildApprovalPayload, ApprovalInputError, BillingDivergenceError, OverBillingError, type BillingDivergence } from '../lib/lease-approve'
+import { buildApprovalPayload, ApprovalInputError, ScheduleUnbillableError, type BillingProblem } from '../lib/lease-approve'
 import { todayUtc } from '../lib/collections'
 import { inspectPdf, pagesLackingTextLayer, MIN_PAGE_TEXT_CHARS, type PdfInspection } from '../lib/pdf-extract'
 import { checkRateLimit } from '../lib/rate-limit'
@@ -254,7 +254,6 @@ const ApproveBody = z.object({
   replace: z.object({ lease_id: z.string().uuid(), end_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) }).nullable(),
   abstract: z.unknown(),
   confirmed_keys: z.array(z.string().max(5000)).max(500),
-  acknowledged_divergence: z.string().max(20000).nullable().default(null),
   notes: z.string().max(20000).nullable(),
   model: z.string().max(100).optional(),
 })
@@ -290,32 +289,30 @@ async function approvalPages(pdfBase64: unknown): Promise<{ bytes: Uint8Array<Ar
   return { bytes, pages: inspection.pages }
 }
 
-/** Months where today's flat billing differs from the lease, previewed for the review screen: over-bills
- *  (refused) and under-bills (acknowledgeable, bound to `signature`). */
-function previewDivergence(a: Parameters<typeof buildApprovalPayload>[0]): { over: BillingDivergence[]; under: BillingDivergence[]; signature: string | null } {
+/** Months where monthly billing cannot bill the lease's schedule (Phase 7: billing follows the schedule, so
+ *  these are the only billing refusals left), previewed for the review screen. */
+function previewBillingProblems(a: Parameters<typeof buildApprovalPayload>[0]): BillingProblem[] {
   try {
     buildApprovalPayload(a, {
       unitId: '', today: todayUtc(), tenant: { mode: 'new', name: 'preview' }, replace: null, notes: null, storagePath: '',
-      fileSha256: '', filename: '', model: '', approvedBy: '', warnings: [], acknowledgedDivergence: null,
+      fileSha256: '', filename: '', model: '', approvedBy: '', warnings: [],
     })
-    return { over: [], under: [], signature: null }
+    return []
   } catch (e) {
-    if (e instanceof OverBillingError) return { over: e.months, under: [], signature: null }
-    if (e instanceof BillingDivergenceError) return { over: [], under: e.months, signature: e.signature }
-    return { over: [], under: [], signature: null }
+    return e instanceof ScheduleUnbillableError ? e.months : []
   }
 }
 
 // Re-run the approval checks on a reviewer-edited abstract without saving anything (no egress, no
 // writes): the review screen calls this on open and after edits so flags, confirmations and billing
-// divergence match exactly what approval will enforce.
+// problems match exactly what approval will enforce.
 intakeRouter.post('/lease/recheck', async (c) => {
   const body = await c.req.json().catch(() => null) as { abstract?: unknown; pdfBase64?: unknown } | null
   if (!body || body.abstract === undefined) return c.json({ error: 'abstract is required' }, 400)
   const pdf = await approvalPages(body.pdfBase64)
   if ('error' in pdf) return c.json({ error: pdf.error }, pdf.status)
   const rv = revalidateAbstract(body.abstract, pdf.pages)
-  return c.json({ abstract: rv.abstract, flags: rv.flags, confirmations: rv.confirmations, warnings: rv.warnings, divergence: previewDivergence(rv.abstract) })
+  return c.json({ abstract: rv.abstract, flags: rv.flags, confirmations: rv.confirmations, warnings: rv.warnings, billing_problems: previewBillingProblems(rv.abstract) })
 })
 
 intakeRouter.post('/lease/approve', async (c) => {
@@ -351,11 +348,9 @@ intakeRouter.post('/lease/approve', async (c) => {
       model: b.model && ALLOWED_MODELS.has(b.model) ? b.model : resolveModel(c.env.INTAKE_MODEL),
       approvedBy: c.get('adminEmail') ?? c.get('adminUserId') ?? 'admin',
       warnings: rv.flags.filter((f) => f.severity === 'warn').map((f) => `${f.path}: ${f.message}`),
-      acknowledgedDivergence: b.acknowledged_divergence,
     })
   } catch (e) {
-    if (e instanceof OverBillingError) return c.json({ error: e.reason, divergence: { over: e.months, under: [], signature: null } }, 422)
-    if (e instanceof BillingDivergenceError) return c.json({ error: e.reason, divergence: { over: [], under: e.months, signature: e.signature } }, 422)
+    if (e instanceof ScheduleUnbillableError) return c.json({ error: e.reason, billing_problems: e.months }, 422)
     if (e instanceof ApprovalInputError) return c.json({ error: e.reason }, 422)
     throw e
   }

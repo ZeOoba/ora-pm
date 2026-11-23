@@ -78,7 +78,7 @@ export interface ScheduledLine {
   type: LineType
   amount: number
   description: string
-  /** Idempotency-key discriminator when it differs from `type` ('other:<row id>'); null otherwise. */
+  /** Idempotency-key discriminator when it differs from `type` ('other:<otherKey(description)>'); null otherwise. */
   keySuffix: string | null
 }
 
@@ -142,6 +142,12 @@ function span(start: string, end: string): Span | null {
 }
 
 const covers = (s: Span, d: number) => d >= s.from && d <= s.to
+
+/** Stable idempotency discriminator for an 'other' recurring line: lowercase alphanumeric words joined by '-', at most 40 chars. */
+export function otherKey(description: string): string {
+  const slug = description.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40).replace(/-+$/, '')
+  return slug || 'unnamed'
+}
 
 const CONCESSION_KINDS = new Set(['full_waiver', 'pct', 'fixed_amount'])
 const CONCESSION_CLASSES = new Set(['rent', 'cam_estimate', 'all'])
@@ -316,8 +322,10 @@ export function computeScheduledLines(args: {
     if (s.amount > 0) lines.push({ type: 'cam_estimate', amount: s.amount, description: describe('CAM Estimate', monthLabel, prorated, s.notes), keySuffix: null })
   }
 
-  // Recurring lines, grouped by idempotency key: cam_estimate/utilities by type, 'other' per row.
-  const keyOf = (r: RecurringChargeRow) => (r.type === 'other' ? `other:${r.id}` : r.type)
+  // Recurring lines, grouped by idempotency key: cam_estimate/utilities by type, 'other' per
+  // normalized description (plan §5a item 4: a row id changes on supersede, so an id key would post a
+  // second escrow for a month already billed). Same-key rows overlapping a day fail closed below.
+  const keyOf = (r: RecurringChargeRow) => (r.type === 'other' ? `other:${otherKey(r.description)}` : r.type)
   const order: RecurringChargeType[] = ['cam_estimate', 'utility_water', 'utility_gas', 'utility_electric', 'utility_other', 'other']
   const keys = [...new Set(recurring.map(keyOf))].sort((a, b) => {
     const ta = order.indexOf(a.startsWith('other:') ? 'other' : (a as RecurringChargeType))

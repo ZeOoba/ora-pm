@@ -204,7 +204,7 @@ describe('computeScheduledLines: concessions', () => {
       ],
       concessions: [{ charge_type: 'all', period_start: '2026-06-01', period_end: '2026-06-30', kind: 'full_waiver', value: null, reason: 'Free rent' }],
     }, 2026, 6))
-    expect(r.map((l) => l.keySuffix ?? l.type).sort()).toEqual(['other:o1', 'utility_water'])
+    expect(r.map((l) => l.keySuffix ?? l.type).sort()).toEqual(['other:tax-escrow', 'utility_water'])
   })
   it('a cam_estimate concession does not touch rent', () => {
     const r = ok(lines({ ...empty, rent, concessions: [{ charge_type: 'cam_estimate', period_start: '2026-06-01', period_end: '2026-06-30', kind: 'full_waiver', value: null, reason: 'CAM holiday' }] }, 2026, 6, undefined, 500))
@@ -231,7 +231,7 @@ describe('computeScheduledLines: CAM source (recurring rows OR the lease field, 
 })
 
 describe('computeScheduledLines: recurring lines', () => {
-  it('keys utilities by type and "other" lines by row id, each with its own description', () => {
+  it('keys utilities by type and "other" lines by normalized description, each with its own description', () => {
     const r = ok(lines({
       ...empty,
       rent: [row('2025-01-01', '2030-12-31', 3000)],
@@ -241,9 +241,42 @@ describe('computeScheduledLines: recurring lines', () => {
         { id: 'e1', type: 'utility_electric', description: 'Electric', amount_monthly: 75, effective_start: '2026-06-11', effective_end: '2030-12-31' },
       ],
     }, 2026, 6))
-    expect(amt(r, 'other:o1')).toBe(812.5)
-    expect(r.find((l) => l.keySuffix === 'other:o2')!.description).toBe('Insurance escrow – June 2026')
+    expect(amt(r, 'other:tax-escrow')).toBe(812.5)
+    expect(r.find((l) => l.keySuffix === 'other:insurance-escrow')!.description).toBe('Insurance escrow – June 2026')
     expect(amt(r, 'utility_electric')).toBe(50) // 20 of 30 days
+  })
+  // Plan §5a item 4: a row id changes when a row is superseded and re-entered, so an id-keyed line
+  // would post a SECOND escrow for a month already billed. The key must survive that.
+  it('keeps the same "other" key when the row is superseded and re-entered under a new id', () => {
+    const rent = [row('2025-01-01', '2030-12-31', 3000)]
+    const before = ok(lines({ ...empty, rent, recurring: [
+      { id: 'o1', type: 'other', description: 'Tax escrow', amount_monthly: 812.5, effective_start: '2025-01-01', effective_end: '2030-12-31' },
+    ] }, 2026, 6))
+    const after = ok(lines({ ...empty, rent, recurring: [
+      { id: 'o1', type: 'other', description: 'Tax escrow', amount_monthly: 812.5, effective_start: '2025-01-01', effective_end: '2030-12-31', superseded_at: '2026-06-10T00:00:00Z' },
+      { id: 'o9', type: 'other', description: '  TAX  Escrow ', amount_monthly: 812.5, effective_start: '2025-01-01', effective_end: '2030-12-31' },
+    ] }, 2026, 6))
+    expect(before.find((l) => l.type === 'other')!.keySuffix).toBe('other:tax-escrow')
+    expect(after.find((l) => l.type === 'other')!.keySuffix).toBe('other:tax-escrow')
+  })
+  it('two active "other" rows with the same normalized description overlapping a day fail closed', () => {
+    const r = lines({ ...empty, rent: [row('2025-01-01', '2030-12-31', 3000)], recurring: [
+      { id: 'o1', type: 'other', description: 'Tax escrow', amount_monthly: 10, effective_start: '2025-01-01', effective_end: '2030-12-31' },
+      { id: 'o2', type: 'other', description: 'tax-escrow', amount_monthly: 20, effective_start: '2026-06-15', effective_end: '2030-12-31' },
+    ] }, 2026, 6)
+    expect('exception' in r && r.exception.code).toBe('recurring_overlap')
+  })
+  it('a description with no letters or digits still gets a stable key', () => {
+    const r = ok(lines({ ...empty, rent: [row('2025-01-01', '2030-12-31', 3000)], recurring: [
+      { id: 'o1', type: 'other', description: '$$$', amount_monthly: 10, effective_start: '2025-01-01', effective_end: '2030-12-31' },
+    ] }, 2026, 6))
+    expect(r.find((l) => l.type === 'other')!.keySuffix).toBe('other:unnamed')
+  })
+  it('caps the key length so the idempotency key stays short', () => {
+    const r = ok(lines({ ...empty, rent: [row('2025-01-01', '2030-12-31', 3000)], recurring: [
+      { id: 'o1', type: 'other', description: 'x'.repeat(300), amount_monthly: 10, effective_start: '2025-01-01', effective_end: '2030-12-31' },
+    ] }, 2026, 6))
+    expect(r.find((l) => l.type === 'other')!.keySuffix!.length).toBeLessThanOrEqual('other:'.length + 40)
   })
 })
 
@@ -332,13 +365,13 @@ describe('buildMonthlyCharges with a schedule', () => {
     const out = buildMonthlyCharges({ ...base, baseRentMonthly: 99999, schedule: { ...empty, rent: [row('2025-01-01', '2030-12-31', 3000)] } })
     expect(out.charges.find((c) => c.type === 'rent')!.amount).toBe(3000)
   })
-  it('keys "other" recurring lines per row so two escrows never collide, and keeps rent/cam keys legacy-compatible', () => {
+  it('keys "other" recurring lines per description so two escrows never collide, and keeps rent/cam keys legacy-compatible', () => {
     const out = buildMonthlyCharges({ ...base, schedule: { ...empty, rent: [row('2025-01-01', '2030-12-31', 3000)], recurring: [
       { id: 'o1', type: 'other', description: 'Tax escrow', amount_monthly: 10, effective_start: '2025-01-01', effective_end: '2030-12-31' },
       { id: 'o2', type: 'other', description: 'Ins escrow', amount_monthly: 20, effective_start: '2025-01-01', effective_end: '2030-12-31' },
     ] } })
     expect(out.charges.map((c) => c.idempotency_key).sort()).toEqual([
-      'auto:L:2026-06-01:other:o1', 'auto:L:2026-06-01:other:o2', 'auto:L:2026-06-01:rent',
+      'auto:L:2026-06-01:other:ins-escrow', 'auto:L:2026-06-01:other:tax-escrow', 'auto:L:2026-06-01:rent',
     ])
     expect(new Set(out.charges.map((c) => c.due_date))).toEqual(new Set(['2026-06-05']))
   })

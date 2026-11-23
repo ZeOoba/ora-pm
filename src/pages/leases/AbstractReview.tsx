@@ -11,7 +11,7 @@ import { TextInput, NumberInput, DateInput, Textarea, Select } from '../../compo
 import type { Tenant } from '../../types'
 import {
   confirmationKey, dayBefore, defaultLeaseNotes, money, provisionLabel, setCited, REVIEWER_QUOTE,
-  type Confirmation, type Divergence, type Flag, type LeaseAbstract,
+  type BillingProblem, type Confirmation, type Flag, type LeaseAbstract,
 } from './abstract-review-helpers'
 
 export interface AbstractResponse {
@@ -20,11 +20,8 @@ export interface AbstractResponse {
   confirmations: Confirmation[]
   warnings: string[]
   model?: string
-  divergence?: DivergenceReport
+  billing_problems?: BillingProblem[]
 }
-
-export interface DivergenceReport { over: Divergence[]; under: Divergence[]; signature: string | null }
-const NO_DIVERGENCE: DivergenceReport = { over: [], under: [], signature: null }
 
 export interface OccupantLease { id: string; start_date: string; end_date: string; status: string; tenant_name: string }
 
@@ -52,10 +49,8 @@ export function AbstractReview({ result, filename, pdfBase64, unitId, unitLabel,
   const [checked, setChecked] = useState<Set<string>>(new Set())
   // Starts dirty: the screen re-checks on open against the PDF, so it shows exactly what approval enforces.
   const [dirty, setDirty] = useState(true)
-  const [div, setDiv] = useState<DivergenceReport>(NO_DIVERGENCE)
-  // The acknowledgement is the signature of the month list the reviewer saw; any other list is unacknowledged.
-  const [ackSig, setAckSig] = useState<string | null>(null)
-  const acknowledged = div.signature !== null && ackSig === div.signature
+  // Months monthly billing cannot bill this schedule (it bills the lease's own schedule; Phase 7).
+  const [problems, setProblems] = useState<BillingProblem[]>([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
@@ -86,7 +81,7 @@ export function AbstractReview({ result, filename, pdfBase64, unitId, unitLabel,
     setBusy(true); setError('')
     try {
       const r = await api.post<AbstractResponse>('/intake/lease/recheck', { abstract: a, pdfBase64 })
-      setA(r.abstract); setFlags(r.flags); setConfs(r.confirmations); setDiv(r.divergence ?? NO_DIVERGENCE)
+      setA(r.abstract); setFlags(r.flags); setConfs(r.confirmations); setProblems(r.billing_problems ?? [])
       if (r.warnings.length > 0) setError(r.warnings.join(' '))
       // Keys are content: a tick survives only for a confirmation that is byte-identical to what was checked.
       const keys = new Set(r.confirmations.map(confirmationKey))
@@ -115,9 +110,7 @@ export function AbstractReview({ result, filename, pdfBase64, unitId, unitLabel,
       current = r.confirmations
       if (r.flags.some((f) => f.severity === 'block')) { setError('Resolve the blocking issues shown above.'); return }
       if (current.some((c) => !checked.has(confirmationKey(c)))) { setError('Your edits changed values to confirm; tick them below, then approve.'); return }
-      const d = r.divergence ?? NO_DIVERGENCE
-      if (d.over.length > 0) { setError('Billing would over-charge this lease; it cannot be imported yet.'); return }
-      if (d.under.length > 0 && ackSig !== d.signature) { setError('Review and acknowledge the billing months listed below.'); return }
+      if ((r.billing_problems ?? []).length > 0) { setError('Billing cannot bill this schedule in the months listed below; correct it first.'); return }
     }
     setBusy(true)
     try {
@@ -126,21 +119,21 @@ export function AbstractReview({ result, filename, pdfBase64, unitId, unitLabel,
         filename, pdfBase64, unit_id: unitId, tenant,
         replace: replace && occupant ? { lease_id: occupant.id, end_date: replaceEnd } : null,
         abstract: a, confirmed_keys: current.filter((c) => checked.has(confirmationKey(c))).map(confirmationKey),
-        acknowledged_divergence: ackSig, notes, model: result.model,
+        notes, model: result.model,
       })
       await qc.invalidateQueries()
       const extra = r.prior_charges_after_end ? `?priorCharges=${r.prior_charges_after_end}` : ''
       navigate(`/leases/${r.lease_id}${extra}`)
     } catch (e) {
-      const body = e instanceof ApiError ? (e.body as { flags?: Flag[]; missing?: string[]; warnings?: string[]; divergence?: DivergenceReport } | null) : null
+      const body = e instanceof ApiError ? (e.body as { flags?: Flag[]; missing?: string[]; warnings?: string[]; billing_problems?: BillingProblem[] } | null) : null
       if (body?.flags) setFlags(body.flags)
-      if (body?.divergence) setDiv(body.divergence)
+      if (body?.billing_problems) setProblems(body.billing_problems)
       const detail = body?.missing ? ` Unconfirmed: ${body.missing.join(', ')}.` : body?.warnings ? ` ${body.warnings.join(' ')}` : ''
       setError((e as Error).message + detail)
     } finally { setBusy(false) }
   }
 
-  const canApprove = !busy && unconfirmed.length === 0 && (dirty || blocks.length === 0) && div.over.length === 0 && (div.under.length === 0 || acknowledged)
+  const canApprove = !busy && unconfirmed.length === 0 && (dirty || blocks.length === 0) && problems.length === 0
     && (tenantMode === 'new' ? newTenant.name.trim() !== '' : existingId !== '')
     && (!replace || replaceEnd !== '')
 
@@ -321,28 +314,18 @@ export function AbstractReview({ result, filename, pdfBase64, unitId, unitLabel,
         </ul>
       </Section>
 
-      {div.over.length > 0 && (
-        <Section title="Cannot import yet: billing would over-charge">
+      {problems.length > 0 && (
+        <Section title="Cannot import yet: billing cannot bill this schedule">
           <p className="text-sm text-status-danger mb-3">
-            Monthly billing today posts the lease&apos;s starting rent and CAM flat for the whole term. In the months below that
-            would charge MORE than this lease provides (an abatement, or a charge that ends), so this lease cannot be approved
-            until billing follows the lease schedule. Enter it manually for now.
+            Monthly billing bills this lease&apos;s own rent schedule, concessions and charges. In the months below it cannot
+            (a gap, an overlap or conflicting concessions), so it would post nothing for them. Correct the schedule, then re-check.
           </p>
-          <DivergenceTable months={div.over} />
-        </Section>
-      )}
-      {div.over.length === 0 && div.under.length > 0 && (
-        <Section title={`Billing review (${div.under.length} month${div.under.length === 1 ? '' : 's'})`}>
-          <p className="text-sm mb-3">
-            Monthly billing today posts the lease&apos;s starting rent and CAM flat; rent steps are stored but not yet billed
-            automatically. In these months billing will post LESS than the lease provides. Each month is added to the
-            lease&apos;s critical dates so the difference can be billed by hand.
-          </p>
-          <DivergenceTable months={div.under} />
-          <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={acknowledged} onChange={(e) => setAckSig(e.target.checked ? div.signature : null)} />
-            I will bill the difference for these months by hand.
-          </label>
+          <table className="w-full text-sm mb-3">
+            <thead><tr className="text-left text-xs text-status-neutral"><th>Month</th><th>Problem</th></tr></thead>
+            <tbody>
+              {problems.map((p) => <tr key={`${p.period}-${p.code}`}><td>{p.period}</td><td>{p.detail}</td></tr>)}
+            </tbody>
+          </table>
         </Section>
       )}
       {error && <p className="text-sm text-status-danger mb-3">{error}</p>}
@@ -352,26 +335,6 @@ export function AbstractReview({ result, filename, pdfBase64, unitId, unitLabel,
         <Button onClick={() => void approve()} disabled={!canApprove}>{busy ? 'Working…' : 'Approve & import'}</Button>
       </div>
     </div>
-  )
-}
-
-function DivergenceTable({ months }: { months: Divergence[] }) {
-  return (
-    <table className="w-full text-sm mb-3">
-      <thead><tr className="text-left text-xs text-status-neutral"><th>Month</th><th>Charge</th><th className="text-right">Billing will post</th><th className="text-right">Lease provides</th><th className="text-right">Difference</th></tr></thead>
-      <tbody>
-        {months.flatMap((d) => (d.by_type.length > 0 ? d.by_type : [{ type: '(billing engine could not price this month)', billed: d.billed, due: NaN }]).map((t) => {
-          const due = typeof t.due === 'number' && !Number.isNaN(t.due) ? t.due : null
-          return (
-            <tr key={`${d.period}-${t.type}`}>
-              <td>{d.period}</td><td>{t.type.replace(/_/g, ' ')}</td><td className="text-right font-mono">{money(t.billed)}</td>
-              <td className="text-right font-mono">{money(due)}</td>
-              <td className={`text-right font-mono ${due === null || t.billed > due ? 'text-status-danger' : 'text-status-warning'}`}>{due === null ? '—' : money(t.billed - due)}</td>
-            </tr>
-          )
-        }))}
-      </tbody>
-    </table>
   )
 }
 
