@@ -349,6 +349,64 @@ describe('quote verification', () => {
     expect(quoteOnPage(PAGES, 1, 'Year 2: $8,583.33 per month')).toBe(false) // wholly on the next page
     expect(quoteOnPage(PAGES, 9, 'Year 2: $8,583.33')).toBe(false)
   })
+  // Live run 2026-11-23: the model shortened provision quotes with "...", so five verbatim passages failed.
+  it('an elided quote matches only when allowed, every piece is long enough, in order, and close together', () => {
+    const elided = 'Tenant shall have one option ... for five (5) years upon written notice'
+    expect(quoteOnPage(PAGES, 3, elided)).toBe(false) // default: exact only (billing paths)
+    expect(quoteOnPage(PAGES, 3, elided, { allowElision: true })).toBe(true)
+    expect(quoteOnPage(PAGES, 3, 'Tenant shall have one option … for five (5) years upon written notice', { allowElision: true })).toBe(true)
+    // Out of order, a short piece, or a piece not on the page: rejected.
+    expect(quoteOnPage(PAGES, 3, 'for five (5) years upon written notice ... Tenant shall have one option', { allowElision: true })).toBe(false)
+    expect(quoteOnPage(PAGES, 3, 'Tenant shall have one option ... years', { allowElision: true })).toBe(false)
+    expect(quoteOnPage(PAGES, 3, 'Tenant shall have one option ... a rent-free year forever', { allowElision: true })).toBe(false)
+  })
+  it('elided pieces too far apart do not match (no stitching distant text)', () => {
+    const far = ['Opening clause states the lease term begins today. ' + 'filler text here. '.repeat(60) + 'Closing clause ends the lease agreement now.']
+    expect(quoteOnPage(far, 1, 'Opening clause states the lease ... Closing clause ends the lease', { allowElision: true })).toBe(false)
+  })
+  it('verifyCitations allows elision for provisions but never for a billing value', () => {
+    const w = good()
+    ;(w as Obj).provisions = [{ category: 'renewal_option', summary: 'One 5-year renewal option.', notice_deadline: '2028-06-30', exercise_window_start: '', exercise_window_end: '', ...src(3, 'Tenant shall have one option ... for five (5) years upon written notice') }]
+    ;(rec(w)).quote = 'Tenant shall pay ... estimated CAM of $1,250.00 per month'
+    const r = run(w)
+    expect(r.flags.some((f) => f.path === 'provisions[0]' && /Quote not found/.test(f.message))).toBe(false)
+    expect(r.flags.some((f) => f.severity === 'block' && f.path === 'recurring_charges[0]' && /Quote not found/.test(f.message))).toBe(true)
+  })
+  it('REFUTE C1b: CAM true-up inputs (rent type, deposit, share...) never accept a stitched quote', () => {
+    const w = good()
+    w.facts.push(fact('rent_type', 'nnn', 2, 'Base Rent shall increase ... Tenant shall pay estimated CAM'))
+    const r = run(w)
+    expect(r.flags.some((f) => f.path === 'rent_type' && /Quote not found/.test(f.message))).toBe(true)
+  })
+  it.each([
+    ['security_deposit', '10000'], ['pro_rata_share', '0.25'], ['expense_stop_psf_annual', '4.5'], ['base_year', '2026'],
+  ])('REFUTE C1b: %s never accepts a stitched quote', (field, value) => {
+    const w = good()
+    w.facts.push(fact(field, value, 2, 'Base Rent shall increase ... Tenant shall pay estimated CAM'))
+    expect(run(w).flags.some((f) => f.path === field && /Quote not found/.test(f.message))).toBe(true)
+  })
+  it('REFUTE C2b: an accepted shortened quote always raises a warning', () => {
+    const w = good()
+    ;(w as Obj).provisions = [{ category: 'renewal_option', summary: 'x', notice_deadline: '', exercise_window_start: '', exercise_window_end: '', ...src(3, 'Tenant shall have one option ... for five (5) years upon written notice') }]
+    expect(run(w).flags.some((f) => f.severity === 'warn' && f.path === 'provisions[0]' && /shortened/.test(f.message))).toBe(true)
+  })
+  it('a verbatim quote with dot leaders still matches exactly when elision is allowed', () => {
+    const pages = ['Schedule of terms. Security Deposit.......$5,000.00 due at signing.']
+    expect(quoteOnPage(pages, 1, 'Security Deposit.......$5,000.00', { allowElision: true })).toBe(true)
+  })
+  it('REFUTE C2c: the elided matcher stays fast on a long repetitive page', () => {
+    const page = ['_'.repeat(200_000)]
+    const t0 = Date.now()
+    expect(quoteOnPage(page, 1, '____________ ... ___________x', { allowElision: true })).toBe(false)
+    expect(Date.now() - t0).toBeLessThan(2000)
+  })
+  it('REFUTE C3b: an inverted exercise window blocks; a notice deadline outside the term warns', () => {
+    const w = good()
+    ;(w as Obj).provisions = [{ category: 'renewal_option', summary: 'x', notice_deadline: '1999-01-01', exercise_window_start: '2028-06-30', exercise_window_end: '2027-01-01', ...src(3, 'one option to renew for five (5) years') }]
+    const r = run(w)
+    expect(r.flags.some((f) => f.severity === 'block' && f.path === 'provisions[0]' && /closes/.test(f.message))).toBe(true)
+    expect(r.flags.some((f) => f.severity === 'warn' && f.path === 'provisions[0]' && /outside the lease term/.test(f.message))).toBe(true)
+  })
   it('quotes of MIN_QUOTE_CHARS - 1 are rejected and of MIN_QUOTE_CHARS accepted', () => {
     expect(MIN_QUOTE_CHARS).toBe(12)
     expect(quoteOnPage(PAGES, 1, 'Premises: S')).toBe(false) // 11

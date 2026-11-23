@@ -6,7 +6,8 @@ import { createElement } from 'react'
 import { MemoryRouter } from 'react-router'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { AbstractReview, type AbstractResponse } from '../../src/pages/leases/AbstractReview'
-import { confirmationKey, dayBefore, defaultLeaseNotes, setCited, REVIEWER_QUOTE, type LeaseAbstract } from '../../src/pages/leases/abstract-review-helpers'
+import { confirmationKey, dayBefore, defaultLeaseNotes, setCited, REVIEWER_QUOTE, PROVISION_CATEGORY_OPTIONS, withOneRetry, type LeaseAbstract } from '../../src/pages/leases/abstract-review-helpers'
+import { PROVISION_CATEGORIES } from '../../server/lib/lease-abstract'
 import { reviewed } from '../fixtures/lease-abstract-approve'
 import { confirmationKey as serverKey, REVIEWER_QUOTE_SUFFIX as SERVER_SUFFIX } from '../../server/lib/lease-abstract'
 
@@ -64,6 +65,27 @@ describe('abstract-review helpers', () => {
   it('confirmation key and reviewer marker are byte-identical to the server (approval matches on them)', () => {
     for (const c of result().confirmations) expect(confirmationKey(c)).toBe(serverKey(c as Parameters<typeof serverKey>[0]))
     expect(REVIEWER_QUOTE('x')).toBe(`x${SERVER_SUFFIX}`)
+  })
+  it('the category picker offers exactly the categories the server accepts', () => {
+    expect([...PROVISION_CATEGORY_OPTIONS].sort()).toEqual([...PROVISION_CATEGORIES].sort())
+  })
+  it('withOneRetry retries once on a 5xx or network error, never on a 4xx', async () => {
+    const err = (status?: number) => Object.assign(new Error('x'), status === undefined ? {} : { status })
+    let n = 0
+    await expect(withOneRetry(async () => { n++; if (n === 1) throw err(503); return 'ok' }, 0)).resolves.toBe('ok')
+    expect(n).toBe(2)
+    n = 0
+    await expect(withOneRetry(async () => { n++; throw err() }, 0)).rejects.toThrow()
+    expect(n).toBe(2)
+    n = 0
+    await expect(withOneRetry(async () => { n++; throw err(422) }, 0)).rejects.toThrow()
+    expect(n).toBe(1)
+  })
+  it('the review screen renders editable provision category and dates', () => {
+    const html = render(false)
+    expect(html).toContain('aria-label="Provision category"')
+    expect(html).toContain('Exercise window opens')
+    expect(html).toContain('Notice deadline')
   })
   it('dayBefore crosses month and year boundaries', () => {
     expect(dayBefore('2026-03-01')).toBe('2026-02-28')
