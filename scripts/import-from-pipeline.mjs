@@ -2,12 +2,18 @@
 // Import properties' rent rolls from the ORA Lease Intelligence Pipeline
 // (Master Lease Database/_pipeline/output/TENANTS.json) into the PM database.
 //
-// Idempotent: re-running skips rows that already exist (natural keys; opening
-// balances guarded by a deterministic idempotency_key).
+// Idempotent: re-running skips rows that already exist (natural keys).
+//
+// Opening (arrears) balances are NOT imported here (audit 2026-11-23). This script used to write
+// each rent-roll balance as a charge row, which the GL posts as Dr AR / Cr INCOME
+// (0028_gl_ar_posting.sql) -- migrated arrears were booked as current-period income. A tenant's
+// prior-system balance goes in as a balance forward (0030), from the QuickBooks AR aging, through
+// the Balance forwards import (server/routes/balance-forwards.ts -> apply_balance_forwards). The
+// rent-roll balances are still printed below so they can be checked against that import.
 //
 // Usage:
-//   node scripts/import-from-pipeline.mjs --file <TENANTS.json> --property "<label>" [--dry-run] [--no-balances]
-//   node scripts/import-from-pipeline.mjs --file <TENANTS.json> --all [--dry-run] [--no-balances]
+//   node scripts/import-from-pipeline.mjs --file <TENANTS.json> --property "<label>" [--dry-run]
+//   node scripts/import-from-pipeline.mjs --file <TENANTS.json> --all [--dry-run]
 //   [--properties <roster.json>]  (default scripts/pipeline-properties.local.json, gitignored)
 //
 // Reads SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY from .env (service role bypasses RLS).
@@ -33,10 +39,17 @@ const FILE = arg('--file')
 const PROPERTY_LABEL = arg('--property')
 const ALL = args.includes('--all')
 const DRY_RUN = args.includes('--dry-run')
-const WITH_BALANCES = !args.includes('--no-balances')
+// --no-balances is accepted (and ignored) so existing invocations keep working: no balance is ever
+// written now. --with-balances is refused rather than silently doing nothing.
+
+if (args.includes('--with-balances')) {
+  console.error('import-from-pipeline: opening balances are not imported by this script (a charge would book them as income). '
+    + 'Import them as balance forwards from the QuickBooks AR aging (Balance forwards import; apply_balance_forwards, 0030).')
+  process.exit(2)
+}
 
 if (!FILE || (!ALL && (!PROPERTY_LABEL || PROPERTY_LABEL === true))) {
-  console.error('Usage: import-from-pipeline.mjs --file <TENANTS.json> (--property "<label>" | --all) [--dry-run] [--no-balances] [--properties <roster.json>]')
+  console.error('Usage: import-from-pipeline.mjs --file <TENANTS.json> (--property "<label>" | --all) [--dry-run] [--properties <roster.json>]')
   process.exit(2)
 }
 
@@ -74,12 +87,6 @@ if (!SUPABASE_URL || !SERVICE_KEY) {
   process.exit(2)
 }
 const db = createClient(SUPABASE_URL, SERVICE_KEY, { auth: { persistSession: false } })
-
-// ── dates ───────────────────────────────────────────────────────────────────
-const today = new Date()
-const todayStr = today.toISOString().slice(0, 10)
-const periodStart = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-01`
-const periodEnd = new Date(today.getFullYear(), today.getMonth() + 1, 0).toISOString().slice(0, 10)
 
 // ── suite sanitization ──────────────────────────────────────────────────────
 // Source rent rolls occasionally carry non-ASCII flag glyphs (e.g. a "⚑verify"
@@ -184,10 +191,10 @@ async function processProperty(label) {
     return null
   }
   const { leases: leaseRows, vacants, held, totalSF } = prepareRecords(records)
-  const withBal = leaseRows.filter((x) => WITH_BALANCES && Number(x.r.bal) > 0)
+  const withBal = leaseRows.filter((x) => Number(x.r.bal) > 0)
 
   console.log(`\n=== ${meta.name} (${label}) ===`)
-  console.log(`${meta.address}, ${meta.city}, ${meta.state}${meta.zip ? ' ' + meta.zip : ''} | ${meta.property_type} | total_sf=${totalSF} | leases=${leaseRows.length} | vacant=${vacants.length} | held=${held.length} | opening balances=${withBal.length}`)
+  console.log(`${meta.address}, ${meta.city}, ${meta.state}${meta.zip ? ' ' + meta.zip : ''} | ${meta.property_type} | total_sf=${totalSF} | leases=${leaseRows.length} | vacant=${vacants.length} | held=${held.length} | rent-roll balances (not imported)=${withBal.length}`)
   for (const x of leaseRows) {
     const r = x.r
     const bal = Number(r.bal) > 0 ? ` | bal $${Number(r.bal).toLocaleString()} (${r.age})` : ''
@@ -197,7 +204,7 @@ async function processProperty(label) {
   for (const h of held) console.log(`  [HELD] ${h.suite} / ${h.name} — ${h.reason}`)
   if (DRY_RUN) return { dryRun: true, held }
 
-  const stats = { units: 0, unitsSkipped: 0, tenants: 0, tenantsSkipped: 0, leases: 0, leasesSkipped: 0, renewals: 0, balances: 0, balancesSkipped: 0, vacants: 0, held: held.length }
+  const stats = { units: 0, unitsSkipped: 0, tenants: 0, tenantsSkipped: 0, leases: 0, leasesSkipped: 0, renewals: 0, vacants: 0, held: held.length }
 
   const prop = await getOrInsert('properties', 'name', meta.name, { ...meta, total_sf: totalSF })
   const propertyId = prop.row.id
@@ -243,20 +250,6 @@ async function processProperty(label) {
       if (renErr && renErr.code !== '23505') throw new Error(`renewal insert: ${renErr.message}`)
       if (!renErr) stats.renewals++
     }
-
-    if (WITH_BALANCES && Number(r.bal) > 0) {
-      const { error: balErr } = await db.from('charges').insert({
-        lease_id: leaseId, charge_date: todayStr, due_date: todayStr,
-        period_start: periodStart, period_end: periodEnd,
-        type: 'other', amount: Number(r.bal),
-        description: `Opening balance — migrated from rent roll (aging ${r.age ?? 'n/a'})`,
-        source: 'manual', idempotency_key: `import:openingbal:${leaseId}`,
-      })
-      if (balErr) {
-        if (balErr.code === '23505') stats.balancesSkipped++
-        else throw new Error(`opening balance insert (${x.name}): ${balErr.message}`)
-      } else stats.balances++
-    }
   }
 
   // Vacant units (no tenant/lease). Skip if suite already exists (e.g. collision with an occupied unit).
@@ -274,9 +267,9 @@ async function processProperty(label) {
 
 // ── run ───────────────────────────────────────────────────────────────────────
 const labels = labelsToRun()
-console.log(`Mode: ${DRY_RUN ? 'DRY RUN (no writes)' : 'LIVE WRITE'} | properties: ${labels.length} | balances: ${WITH_BALANCES ? 'on' : 'off'}`)
+console.log(`Mode: ${DRY_RUN ? 'DRY RUN (no writes)' : 'LIVE WRITE'} | properties: ${labels.length} | opening balances: not imported (use balance forwards)`)
 
-const totals = { properties: 0, units: 0, tenants: 0, leases: 0, balances: 0 }
+const totals = { properties: 0, units: 0, tenants: 0, leases: 0 }
 for (const label of labels) {
   const s = await processProperty(label)
   if (s && !s.dryRun) {
@@ -284,7 +277,6 @@ for (const label of labels) {
     totals.units += s.units
     totals.tenants += s.tenants
     totals.leases += s.leases
-    totals.balances += s.balances
   }
 }
 
