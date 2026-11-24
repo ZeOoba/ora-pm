@@ -937,8 +937,8 @@ interface AutopayReservation {
 }
 
 // Stripe error classes that mean the create was rejected WITHOUT a (charging) PaymentIntent;
-// everything else is indeterminate. server/routes/stripe.ts (portal ACH) also treats
-// StripeRateLimitError as definitive; here it is NOT: stripe-node retries a connection error once
+// everything else is indeterminate. StripeRateLimitError is NOT definitive (server/routes/stripe.ts,
+// portal ACH, applies the same policy): stripe-node retries a connection error once
 // (maxNetworkRetries), so a 429 on that retry can follow a first attempt Stripe did execute, and
 // releasing the reservation then would leave a live debit with no row that counts it.
 const DEFINITIVE_STRIPE_FAILURES = [

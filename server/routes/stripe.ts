@@ -356,13 +356,22 @@ const STRIPE_IDEMPOTENCY_WINDOW_SECONDS = 24 * 60 * 60
 // Stripe error classes that mean the request was rejected WITHOUT creating
 // a (charging) PaymentIntent. Everything else is indeterminate — the request
 // may have reached Stripe — and the reservation must stay 'pending'.
+// StripeRateLimitError is deliberately NOT here (same policy as cron.ts autopay):
+// stripe-node retries a connection error once (maxNetworkRetries: 1), and Stripe's
+// rate limiter answers before its idempotency replay, so a 429 on that retry can
+// follow a first attempt Stripe DID execute. Releasing the reservation then would
+// tell the tenant to start a new payment — a new client_request_id, a new
+// idempotency key, a second ACH debit.
 const DEFINITIVE_STRIPE_FAILURES = [
   Stripe.errors.StripeInvalidRequestError,
   Stripe.errors.StripeCardError,
   Stripe.errors.StripeAuthenticationError,
   Stripe.errors.StripePermissionError,
-  Stripe.errors.StripeRateLimitError,
 ]
+
+// PaymentIntent statuses that mean money is (or may be) moving. A "definitive"
+// error class is not trusted when the PaymentIntent it carries is in one of these.
+const MONEY_MOVING_PI_STATUSES = ['processing', 'succeeded', 'requires_capture']
 
 // paymentIntents.create threw AFTER a reservation row was written (OI-233).
 // What to do with that row depends on whether Stripe can have moved money.
@@ -383,9 +392,15 @@ async function handleStripeCreateFailure(
     return c.json({ error: 'Payment already in progress — do not resubmit', in_progress: true }, 409)
   }
 
+  // A definitive class is trusted only if the PaymentIntent it carries (if any) is
+  // not moving money — releasing the row next to a live debit would let the
+  // tenant's next attempt (a new idempotency key) debit again. Same rule as cron.ts.
+  const errPiStatus = (err as { payment_intent?: { status?: string } }).payment_intent?.status
   const definitive = DEFINITIVE_STRIPE_FAILURES.some((cls) => err instanceof cls)
+    && !(errPiStatus && MONEY_MOVING_PI_STATUSES.includes(errPiStatus))
   if (!definitive) {
-    // StripeConnectionError / StripeAPIError (5xx) / anything unexpected:
+    // StripeConnectionError / StripeAPIError (5xx) / StripeRateLimitError (429) /
+    // a definitive class carrying a money-moving PI / anything unexpected:
     // the request may have been processed. The reservation stays 'pending'
     // and keeps counting against the balance (OI-223) until the webhook
     // completes it, a same-id retry resumes it (>= IN_FLIGHT_WINDOW), or a

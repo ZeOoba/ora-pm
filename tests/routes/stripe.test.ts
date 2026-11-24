@@ -842,6 +842,51 @@ describe('POST /api/stripe/payment-intent', () => {
     expect(mockStripe.paymentIntents.create).toHaveBeenCalledTimes(1)
   })
 
+  it('OI-233f. a Stripe RATE-LIMIT (429) on PaymentIntent create is INDETERMINATE: the reservation stays pending and a new attempt is refused', async () => {
+    // stripe-node runs with maxNetworkRetries: 1. If the first attempt timed out AFTER Stripe
+    // created and confirmed the PI, the retry can still be answered 429 -- Stripe's rate limiter
+    // runs before its idempotency replay -- so the 429 says nothing about whether money moved.
+    // Releasing the reservation here invites the tenant to pay again under a NEW client_request_id
+    // (a new idempotency key), i.e. a second ACH debit.
+    supabaseMocks.tenantSelectResult = { data: { id: 'tenant-1', stripe_customer_id: 'cus_test123' }, error: null }
+    supabaseMocks.arLedgerResult = { data: [{ balance: 2500 }], error: null }
+    mockStripe.paymentIntents.create.mockRejectedValueOnce(
+      new Stripe.errors.StripeRateLimitError({ type: 'rate_limit_error' as never, message: 'Too many requests made to the API too quickly' } as never),
+    )
+
+    const res1 = await post('/api/stripe/payment-intent', { ...validPayload, amount_cents: 250000, client_request_id: 'c4c4c4c4-c4c4-4c4c-8c4c-c4c4c4c4c4c4' })
+    expect(res1.status).toBe(502)
+    expect(await res1.json()).toMatchObject({ in_progress: true })
+    expect(paymentsTable).toHaveLength(1)
+    expect(paymentsTable[0].stripe_status).toBe('pending') // NOT released: the PI may exist
+
+    const res2 = await post('/api/stripe/payment-intent', { ...validPayload, amount_cents: 250000, client_request_id: 'c5c5c5c5-c5c5-4c5c-8c5c-c5c5c5c5c5c5' })
+    expect(res2.status).toBe(422)
+    expect(mockStripe.paymentIntents.create).toHaveBeenCalledTimes(1)
+  })
+
+  it('OI-233g. a "definitive" error class carrying a PaymentIntent that is already moving money is treated as indeterminate', async () => {
+    supabaseMocks.tenantSelectResult = { data: { id: 'tenant-1', stripe_customer_id: 'cus_test123' }, error: null }
+    supabaseMocks.arLedgerResult = { data: [{ balance: 2500 }], error: null }
+    const cardErr = new Stripe.errors.StripeCardError({ type: 'card_error', message: 'odd post-confirm error' } as never)
+    ;(cardErr as unknown as { payment_intent: unknown }).payment_intent = { id: 'pi_live', status: 'processing' }
+    mockStripe.paymentIntents.create.mockRejectedValueOnce(cardErr)
+
+    const res1 = await post('/api/stripe/payment-intent', { ...validPayload, amount_cents: 250000, client_request_id: 'd6d6d6d6-d6d6-4d6d-8d6d-d6d6d6d6d6d6' })
+    expect(res1.status).toBe(502)
+    expect(paymentsTable[0].stripe_status).toBe('pending')
+
+    // A card error whose PI never moved money is still released (definitive).
+    const deadErr = new Stripe.errors.StripeCardError({ type: 'card_error', message: 'declined' } as never)
+    ;(deadErr as unknown as { payment_intent: unknown }).payment_intent = { id: 'pi_dead', status: 'requires_payment_method' }
+    paymentsTable.length = 0
+    mockStripe.paymentIntents.create.mockRejectedValueOnce(deadErr)
+    const res2 = await post('/api/stripe/payment-intent', { ...validPayload, amount_cents: 250000, client_request_id: 'd7d7d7d7-d7d7-4d7d-8d7d-d7d7d7d7d7d7' })
+    expect(res2.status).toBe(400)
+    expect(paymentsTable[0].stripe_status).toBe('failed')
+    expect(paymentsTable[0].stripe_payment_intent_id).toBe('pi_dead')
+  })
+
   it('OI-233e. a same-client_request_id retry after the in-flight window RESUMES the reservation: Stripe is re-called with the SAME idempotency key and the PI is written back', async () => {
     supabaseMocks.tenantSelectResult = { data: { id: 'tenant-1', stripe_customer_id: 'cus_test123' }, error: null }
     supabaseMocks.arLedgerResult = { data: [{ balance: 2500 }], error: null }
