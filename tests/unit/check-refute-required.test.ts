@@ -78,12 +78,17 @@ describe('check-refute-required — financial-source classification', () => {
     // Balance forward from QuickBooks (0030).
     expect(isFinancialSourcePath('server/lib/balance-forward-import.ts')).toBe(true)
     expect(isFinancialSourcePath('server/routes/balance-forwards.ts')).toBe(true)
+    // Audit 2026-11-23: autopay enrollment, tenant-facing balance, income statement.
+    expect(isFinancialSourcePath('server/routes/portal.ts')).toBe(true)
+    expect(isFinancialSourcePath('server/lib/portal-data.ts')).toBe(true)
+    expect(isFinancialSourcePath('server/lib/financial-report.ts')).toBe(true)
   })
 
   it('exposes the financial path set with the expected membership', () => {
     // 25 on main (#67 ar-aging-report, #71 gl.ts lib + route, #76 qb-iif-accounts, #81 gl-opening-balance) + server/lib/lease-abstract.ts from this PR.
     // + server/lib/balance-forward-import.ts and server/routes/balance-forwards.ts (0030).
-    expect(FINANCIAL_SOURCE_PATHS.size).toBe(33)
+    // + server/routes/portal.ts, server/lib/portal-data.ts, server/lib/financial-report.ts (audit 2026-11-23).
+    expect(FINANCIAL_SOURCE_PATHS.size).toBe(36)
     for (const p of [
       'server/routes/cron.ts',
       'server/routes/stripe.ts',
@@ -328,6 +333,44 @@ describe('check-refute-required — runRefuteCheck (exit logic)', () => {
     expect(logged.warn.join('\n')).toMatch(/WITHOUT a refute attestation/)
   })
 
+  it('--head scopes the diff and log ranges to that commit (push gate checks one commit at a time)', () => {
+    const { code, calls } = harness(repo(['server/routes/cron.ts'], 'fix: x\n\nRefute-Reviewed: agent-1\n'),
+      ['--strict', '--base=abc^1', '--head=abc'])
+    expect(code).toBe(0)
+    expect(calls).toContainEqual(['diff', '--name-only', 'abc^1...abc'])
+    expect(calls).toContainEqual(['log', 'abc^1..abc', '--format=%B'])
+    expect(calls).toContainEqual(['rev-parse', '--verify', '--quiet', 'abc^{commit}'])
+  })
+
+  it('reads migration SQL as of --head, not the tip (each pushed commit judged on its own content)', () => {
+    const reads: [string, string][] = []
+    const logged: string[] = []
+    const code = runRefuteCheck({
+      argv: ['--strict', '--base=c1^1', '--head=c1'],
+      env: {},
+      git: (args) => (args[0] === 'diff' ? 'supabase/migrations/0099_x.sql\n' : args[0] === 'log' ? 'add migration\n' : ''),
+      // At c1 the migration alters charges; a later tip rewrote it to something harmless.
+      readSql: (path, rev) => {
+        reads.push([path, rev])
+        return rev === 'c1' ? 'alter table charges add column x int;' : 'create table widgets (id int);'
+      },
+      logger: { log: (m) => logged.push(m), warn: (m) => logged.push(m), error: (m) => logged.push(m) },
+    })
+    expect(reads).toEqual([['supabase/migrations/0099_x.sql', 'c1']])
+    expect(code).toBe(1)
+    expect(logged.join('\n')).toMatch(/0099_x\.sql/)
+  })
+
+  it('--strict FAILS CLOSED on an empty --head', () => {
+    const { code } = harness(repo(['server/routes/cron.ts'], 'Refute-Reviewed: agent-1\n'), ['--strict', '--base=x', '--head='])
+    expect(code).toBe(1)
+  })
+
+  it('without --head the range still ends at HEAD (PR and local runs unchanged)', () => {
+    const { calls } = harness(repo([], ''), ['--strict', '--base=origin/main'])
+    expect(calls).toContainEqual(['diff', '--name-only', 'origin/main...HEAD'])
+  })
+
   it('--strict exits 0 when a financial file changed and a Refute-Reviewed trailer is present', () => {
     const { code } = harness(repo(['server/routes/cron.ts'], 'fix: x\n\nRefute-Reviewed: agent-123\n'), ['--strict'])
     expect(code).toBe(0)
@@ -360,6 +403,8 @@ describe('check-refute-required — runRefuteCheck (exit logic)', () => {
   it('verifies the base resolves to a commit (git rev-parse --verify) before diffing', () => {
     const { calls } = harness(repo([], ''), ['--strict', '--base=origin/main'])
     expect(calls[0]).toEqual(['rev-parse', '--verify', '--quiet', 'origin/main^{commit}'])
-    expect(calls[1][0]).toBe('diff')
+    // --head (default HEAD) is verified too, before any diff.
+    expect(calls[1]).toEqual(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}'])
+    expect(calls[2][0]).toBe('diff')
   })
 })
