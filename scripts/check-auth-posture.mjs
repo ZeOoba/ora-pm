@@ -16,6 +16,14 @@
 
 import { pathToFileURL } from 'node:url'
 
+class PostureHttpError extends Error {
+  /** @param {number} status */
+  constructor(status) {
+    super(`GET /auth/v1/settings -> ${Number(status)}`)
+    this.name = 'PostureHttpError'
+  }
+}
+
 // Identity sources allowed to be on. Everything else in `external` must be false: an OAuth / SSO
 // provider creates or links users with email_confirmed_at taken from the PROVIDER's verified-email
 // claim, so turning one on hands admin-address safety to that provider (review round 1).
@@ -85,14 +93,16 @@ export async function runAuthPostureCheck(env, fetchImpl, logger) {
   let body
   try {
     const res = await fetchImpl(`${url}/auth/v1/settings`, { headers: { apikey: key } })
-    if (!res.ok) {
-      // `-> <status>` is the form scripts/retry-transient.sh recognises as a retryable 5xx.
-      logger.error(`::error::auth posture: GET /auth/v1/settings -> ${res.status} (fail closed)`)
-      return 2
-    }
+    if (!res.ok) throw new PostureHttpError(res.status)
     body = await res.json()
   } catch (err) {
-    logger.error(`::error::auth posture: could not read /auth/v1/settings (${String(/** @type {Error} */ (err)?.message ?? err)}) (fail closed)`)
+    // The CI log is public (tests/unit/workflow-log-egress.test.ts): only messages composed here are
+    // printed -- never a response body or a raw error message. `-> <status>` and `fetch failed` are
+    // the forms scripts/retry-transient.sh retries; a non-JSON reply is not retried.
+    const why = err instanceof PostureHttpError ? err.message
+      : err instanceof Error && err.name === 'SyntaxError' ? 'the response was not JSON'
+        : `fetch failed (${err instanceof Error ? err.name : 'error'})`
+    logger.error(`::error::auth posture: could not read /auth/v1/settings: ${why} (fail closed)`)
     return 2
   }
   const { ok, problems } = evaluateAuthPosture(body)
