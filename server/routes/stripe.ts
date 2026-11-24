@@ -8,7 +8,7 @@ import { tenantAuthMiddleware } from '../middleware/tenant-auth'
 import { requireAal2 } from '../middleware/aal-guard'
 import { checkRateLimit } from '../lib/rate-limit'
 import { dbError } from '../lib/api-error'
-import { PaymentIntentClientRequestIdSchema } from '../lib/schemas'
+import { MAX_PAYMENT_CENTS, PaymentIntentClientRequestIdSchema } from '../lib/schemas'
 
 export const stripeRouter = new Hono<{ Bindings: Env }>()
 
@@ -17,10 +17,9 @@ export const stripeRouter = new Hono<{ Bindings: Env }>()
 // changed. See server/lib/rate-limit.ts.
 const PAYMENT_INTENT_RATE_LIMIT = { scope: 'payment-intent', maxCalls: 5, windowMs: 60_000 }
 
-// $50,000 — hard ceiling on a single ACH payment-intent request (OI-040).
-// Independent of the outstanding-balance cap below; this bounds the blast
-// radius of a single request regardless of what the lease happens to owe.
-const MAX_PAYMENT_CENTS = 5_000_000
+// $50,000 hard ceiling on a single ACH payment-intent request (OI-040): MAX_PAYMENT_CENTS in
+// server/lib/schemas.ts, shared with the autopay debit in routes/cron.ts. Independent of the
+// outstanding-balance cap below; it bounds one request regardless of what the lease owes.
 
 // Router-wide gate: any future stripe endpoint is tenant-authenticated by
 // default (this router is in ADMIN_EXEMPT, so this is its only auth layer).

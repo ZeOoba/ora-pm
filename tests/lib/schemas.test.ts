@@ -103,6 +103,29 @@ describe('TenantInsertSchema', () => {
 })
 
 describe('LeaseInsertSchema', () => {
+  // Audit 2026-11-23 MED (autopay-no-absolute-ceiling): a rent mistyped with extra digits was
+  // billed and autopay-debited in the same run. Bounded by the portal's $50,000 ceiling, to the cent.
+  const lease = (extra: Record<string, unknown>) => LeaseInsertSchema.safeParse({
+    tenant_id: '00000000-0000-0000-0000-000000000001',
+    unit_id: '00000000-0000-0000-0000-000000000002',
+    start_date: '2026-01-01',
+    end_date: '2027-01-01',
+    base_rent_monthly: 3500,
+    ...extra,
+  }).success
+
+  it('bounds base_rent_monthly and cam_estimate_monthly at the payment ceiling and to the cent', () => {
+    expect(lease({ base_rent_monthly: 50000 })).toBe(true)
+    expect(lease({ base_rent_monthly: 50000.01 })).toBe(false)
+    expect(lease({ base_rent_monthly: 350000 })).toBe(false)
+    expect(lease({ base_rent_monthly: 3500.25 })).toBe(true)
+    expect(lease({ base_rent_monthly: 3500.255 })).toBe(false)
+    expect(lease({ cam_estimate_monthly: 50000 })).toBe(true)
+    expect(lease({ cam_estimate_monthly: 50000.01 })).toBe(false)
+    expect(lease({ cam_estimate_monthly: 12.345 })).toBe(false)
+    expect(lease({ cam_estimate_monthly: 0 })).toBe(true)
+  })
+
   it('accepts valid lease', () => {
     const result = LeaseInsertSchema.safeParse({
       tenant_id: '00000000-0000-0000-0000-000000000001',
