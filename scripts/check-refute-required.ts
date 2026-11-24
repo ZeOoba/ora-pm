@@ -111,6 +111,13 @@ export const FINANCIAL_SOURCE_PATHS: ReadonlySet<string> = new Set([
   // customer-to-lease matching and the per-lease adjustment, and the route that applies them.
   'server/lib/balance-forward-import.ts',
   'server/routes/balance-forwards.ts',
+  // Audit 2026-11-23 MED (refute-gate-misses-portal-and-financial-report):
+  // portal.ts PATCH /autopay writes autopay_enabled / autopay_payment_method_id, which choose the
+  // leases and bank accounts the monthly autopay debits; portal-data.ts computes the balance a
+  // tenant is told they owe (portalBalance); financial-report.ts builds the income statement.
+  'server/routes/portal.ts',
+  'server/lib/portal-data.ts',
+  'server/lib/financial-report.ts',
 ])
 
 // Tables whose schema/view/index changes are financial: charges (what tenants owe), payments
@@ -188,12 +195,16 @@ function git(args: string[]): string {
   return execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
 }
 
-// Read a migration as committed at HEAD (what the PR actually lands), falling back to the working
-// tree for local runs with uncommitted edits. null = deleted or unreadable → fail closed upstream.
-function readMigrationSql(path: string): string | null {
+// Read a migration as committed at `rev` -- the --head of the checked range, so a push checked one
+// commit at a time judges each commit's OWN migration content, not the tip's (review round 3: a
+// later commit could neutralise an earlier unreviewed money migration). The working-tree fallback
+// (local runs with uncommitted edits) applies only to the default HEAD. null = deleted or
+// unreadable → fail closed upstream.
+function readMigrationSql(path: string, rev = 'HEAD'): string | null {
   try {
-    return git(['show', `HEAD:${path}`])
+    return git(['show', `${rev}:${path}`])
   } catch {
+    if (rev !== 'HEAD') return null
     try {
       return readFileSync(path, 'utf8')
     } catch {
@@ -208,7 +219,8 @@ export interface RefuteCheckIO {
   /** Runs git with the given args and returns stdout; throws on a non-zero exit. */
   git: (args: string[]) => string
   /** Migration SQL as landed; null = deleted/unreadable (fails closed in selectFinancialChanges). */
-  readSql: (path: string) => string | null
+  /** A migration's SQL as of `rev` (the checked range's head); null = deleted/unreadable. */
+  readSql: (path: string, rev: string) => string | null
   logger: { log: (m: string) => void; warn: (m: string) => void; error: (m: string) => void }
 }
 
@@ -216,6 +228,10 @@ export interface RefuteCheckIO {
 export function runRefuteCheck(io: RefuteCheckIO): number {
   const strict = io.argv.includes('--strict')
   const base = io.argv.find((a) => a.startsWith('--base='))?.slice('--base='.length) ?? io.env.REFUTE_BASE ?? 'origin/main'
+  // --head (audit 2026-11-23, push gate): CI checks a push to main one first-parent commit at a
+  // time (`--base=<C>^1 --head=<C>`), so one reviewed commit's trailer cannot approve an unreviewed
+  // money commit pushed later in the same range. Defaults to HEAD (unchanged for PRs and local runs).
+  const head = io.argv.find((a) => a.startsWith('--head='))?.slice('--head='.length) ?? 'HEAD'
 
   let changed: string[]
   let messageBlob: string
@@ -223,9 +239,11 @@ export function runRefuteCheck(io: RefuteCheckIO): number {
     // REFUTE finding: an empty base made the range `...HEAD` (= HEAD...HEAD), an empty diff that
     // reported "OK". Require a non-empty base that resolves to a commit before trusting the range.
     if (base.trim() === '') throw new Error('base ref is empty')
+    if (head.trim() === '') throw new Error('head ref is empty')
     io.git(['rev-parse', '--verify', '--quiet', `${base}^{commit}`])
-    changed = io.git(['diff', '--name-only', `${base}...HEAD`]).split('\n').map((s) => s.trim()).filter(Boolean)
-    messageBlob = io.git(['log', `${base}..HEAD`, '--format=%B'])
+    io.git(['rev-parse', '--verify', '--quiet', `${head}^{commit}`])
+    changed = io.git(['diff', '--name-only', `${base}...${head}`]).split('\n').map((s) => s.trim()).filter(Boolean)
+    messageBlob = io.git(['log', `${base}..${head}`, '--format=%B'])
   } catch (err) {
     // No usable base ref (shallow clone, detached HEAD, fresh repo, misnamed base).
     const reason = `could not diff against '${base}' (${String((err as Error)?.message ?? err).split('\n')[0]})`
@@ -240,7 +258,7 @@ export function runRefuteCheck(io: RefuteCheckIO): number {
     return 0
   }
 
-  const financial = selectFinancialChanges(changed, io.readSql)
+  const financial = selectFinancialChanges(changed, (path) => io.readSql(path, head))
   if (financial.length === 0) {
     io.logger.log('check:refute — OK: no financial-decision files changed in this range.')
     return 0
@@ -256,7 +274,7 @@ export function runRefuteCheck(io: RefuteCheckIO): number {
     '',
     'Run an adversarial REFUTE pass on the change, then add a commit trailer:',
     '    Refute-Reviewed: <review ref>        (or, with justification)  Refute-Skip: <reason>',
-    `(checked range: ${base}..HEAD)`,
+    `(checked range: ${base}..${head})`,
   ].join('\n')
 
   if (strict) {

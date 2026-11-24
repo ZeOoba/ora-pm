@@ -20,10 +20,12 @@ concurrency:
 jobs:
   ci:
     runs-on: ubuntu-latest
-    # issues: write is for the deploy-failure alert (last step); everything else only reads.
+    # issues: write is for the deploy-failure alert (last step); actions: read lets the REFUTE gate
+    # find the last successful push run on main (its base); everything else only reads.
     permissions:
       contents: read
       issues: write
+      actions: read
     # Throwaway Postgres for the GL money-rule suite (scripts/verify-gl-sql.sh). pg-mem cannot run
     # the plpgsql triggers that enforce balance, immutability and period locks, so this is the
     # only place CI executes them. Test-only credentials; the container dies with the job.
@@ -120,19 +122,54 @@ jobs:
       # transitions, CAM true-up, manual charge/payment posting, the charge/payment schemas, or a
       # migration touching charges/payments/ar_ledger) must carry a `Refute-Reviewed:` or
       # `Refute-Skip:` commit trailer attesting an adversarial review ran.
-      # PR-only: it diffs the PR against its base; a direct push to main has no diff base, so it is
-      # skipped there. It sits in this job ahead of the deploy steps, so a failing gate fails the
-      # job before anything ships — make this workflow a REQUIRED check via branch protection to
-      # hard-enforce it at merge. Under --strict it fails CLOSED when the base ref is empty or does
-      # not resolve (M12), so the fetch below is required (scripts/check-refute-required.ts).
+      # Runs on BOTH events (audit 2026-11-23 MED refute-gate-skipped-on-push-to-main). A pull
+      # request diffs against its base. A push to main diffs against the head commit of the LAST
+      # SUCCESSFUL push run of this workflow on main -- the last range that passed this gate and
+      # every deploy step -- not github.event.before: a money commit whose own run failed, was
+      # [skip ci], or was cancelled while pending would otherwise ship with the next unrelated push
+      # (review round 1, reproduced). The pushed tip must descend from that anchor, so a force-push
+      # that rewrites or drops already-deployed history fails closed. Squash merges keep the PR's
+      # commit messages (repo setting COMMIT_MESSAGES), so a reviewed PR's trailer is in the range.
+      # It sits in this job ahead of the deploy steps, so a failing gate fails the job before
+      # anything ships; any doubt (no anchor, lookup error, not an ancestor, base does not resolve
+      # under --strict) blocks the deploy, deliberately.
       - name: REFUTE gate (financial-decision paths)
-        if: github.event_name == 'pull_request'
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          git fetch --no-tags origin "${{ github.base_ref }}"
-          # Full ref name: a bare `origin/<base>` is resolved by git as refs/tags/origin/<base> FIRST
-          # if such a tag exists, which would let a tag shadow the real base and empty the range.
-          npm run check:refute -- --strict --base="refs/remotes/origin/${{ github.base_ref }}"
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            git fetch --no-tags origin "$BASE_REF"
+            # Full ref name: a bare `origin/<base>` is resolved by git as refs/tags/origin/<base> FIRST
+            # if such a tag exists, which would let a tag shadow the real base and empty the range.
+            base="refs/remotes/origin/$BASE_REF"
+          else
+            base="$(gh run list --repo "$REPO" --workflow ci.yml --branch main --event push \
+              --status success --limit 1 --json headSha --jq '.[0].headSha // ""')"
+            if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::REFUTE gate: no last successful push run on main to anchor the range (got '$base'); refusing to deploy unchecked"
+              exit 1
+            fi
+            git cat-file -e "$base^{commit}" 2>/dev/null || git fetch --no-tags origin "$base" || true
+            if ! git merge-base --is-ancestor "$base" HEAD; then
+              echo "::error::REFUTE gate: $GITHUB_SHA does not descend from the last deployed commit $base (force-push or rewritten main); refusing to deploy"
+              exit 1
+            fi
+            # One first-parent commit at a time (review round 2): a range-level check would let one
+            # reviewed commit's trailer approve an unreviewed money commit pushed after it while the
+            # anchor is stalled (e.g. a migration merge whose run awaits db-migrate). A squash or
+            # merge commit is still judged as a whole (C^1..C includes the merged PR's commits).
+            commits="$(git rev-list --first-parent --reverse "$base"..HEAD)"
+            for c in $commits; do
+              echo "REFUTE gate: checking $c"
+              npm run --silent check:refute -- --strict --base="$c^1" --head="$c"
+            done
+            exit 0
+          fi
+          npm run check:refute -- --strict --base="$base"
 
       # Migration-number collision gate (scripts/check-migration-numbers.mjs): unique NNNN numbers,
       # and every migration this PR adds is numbered above everything on the base. Two sessions
