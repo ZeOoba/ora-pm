@@ -1562,6 +1562,41 @@ describe('monthly-billing: in-flight portal ACH (audit 2026-11-12 #1)', () => {
     })
   }
 
+  // Audit 2026-11-23 MED (autopay-no-absolute-ceiling): the portal refuses > $50,000, but autopay
+  // debited whatever reserve_autopay_payment returned -- a rent mistyped with extra digits was billed
+  // and debited off-session in the same run.
+  function reserveWithAmount(cents: number) {
+    const base = mockRpc.getMockImplementation()!
+    mockRpc.mockImplementation(async (fn: string, args: unknown) => {
+      const r = await base(fn, args) as { data: { outcome: string; payment_id?: string; amount_cents?: number } | null }
+      if (fn === 'reserve_autopay_payment' && r.data?.outcome === 'reserved') {
+        const row = state.payments.find(p => p.id === r.data!.payment_id)!
+        row.amount = cents / 100
+        r.data.amount_cents = cents
+      }
+      return r
+    })
+  }
+
+  it('never debits above the payment ceiling: no Stripe call, the reservation is released, the run reports it', async () => {
+    reserveWithAmount(5_000_001)
+    const res = await postBilling()
+    const body = await res.json() as { autopayErrors: number; errorMessages: string[] }
+    expect(mockStripe.paymentIntents.create).not.toHaveBeenCalled()
+    expect(body.autopayErrors).toBe(1)
+    expect(body.errorMessages.join(' | ')).toMatch(/autopay lease lease_1: .*exceeds the \$50,000 autopay ceiling/)
+    const rows = state.payments.filter(p => p.method === 'ach_stripe')
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ stripe_status: 'failed', autopay_period: null })
+  })
+
+  it('debits an amount exactly at the payment ceiling', async () => {
+    reserveWithAmount(5_000_000)
+    mockStripe.paymentIntents.create.mockResolvedValue({ id: 'pi_at_ceiling', status: 'processing' })
+    await postBilling()
+    expect(mockStripe.paymentIntents.create).toHaveBeenCalledWith(expect.objectContaining({ amount: 5_000_000 }), expect.anything())
+  })
+
   it('a definitive Stripe rejection releases the reservation (failed, period freed) and a later run really retries', async () => {
     stripeHonouringIdempotency((_p, n) => {
       if (n === 1) throw new Stripe.errors.StripeInvalidRequestError({ type: 'invalid_request_error', message: 'No such payment_method: pm_bank_1' } as never)

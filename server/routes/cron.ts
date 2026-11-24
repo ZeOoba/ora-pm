@@ -11,6 +11,7 @@ import type { LeaseSchedule } from '../lib/rent-schedule'
 import { cronAuthMiddleware } from '../middleware/auth'
 import { checkRateLimit } from '../lib/rate-limit'
 import { fetchChunked, fetchAllPages, POSTGREST_MAX_ROWS } from '../lib/postgrest-paging'
+import { MAX_PAYMENT_CENTS } from '../lib/schemas'
 
 
 type Env = {
@@ -819,6 +820,30 @@ cronRouter.post('/monthly-billing', async (c) => {
           continue
         }
         const paymentId = reservation.payment_id
+
+        if (amountCents > MAX_PAYMENT_CENTS) {
+          // Audit 2026-11-23 (autopay-no-absolute-ceiling): the portal refuses a single debit above
+          // $50,000, but this off-session debit took whatever the reservation computed -- a rent
+          // mistyped with extra digits was billed and debited in the same run. Never call Stripe:
+          // release the reservation exactly as a definitive Stripe rejection does ('failed', period
+          // freed, guarded to 'pending'), so nothing counts as paid or in flight, and report it.
+          // A later run re-reserves and refuses again until the lease's charges are corrected.
+          autopayErrors++
+          const why = `reservation ${paymentId} for $${(amountCents / 100).toFixed(2)} exceeds the $${(MAX_PAYMENT_CENTS / 100).toLocaleString('en-US')} autopay ceiling — not debited; check this lease's billed charges`
+          const { data: released, error: releaseErr } = await db.from('payments')
+            .update({ stripe_status: 'failed', autopay_period: null, notes: `${notes} — not debited: exceeds the autopay ceiling` })
+            .eq('id', paymentId)
+            .in('stripe_status', ['pending'])
+            .select('id')
+          if (releaseErr) {
+            errorMessages.push(`autopay lease ${lease.id}: ${why}; the reservation could not be released (${releaseErr.message}) and stays pending, blocking this period until reconciled`)
+          } else if (!released || released.length === 0) {
+            errorMessages.push(`autopay lease ${lease.id}: ${why}; the reservation was already resolved elsewhere and is left as is`)
+          } else {
+            errorMessages.push(`autopay lease ${lease.id}: ${why}`)
+          }
+          continue
+        }
 
         let pi: Stripe.PaymentIntent
         try {

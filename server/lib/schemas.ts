@@ -6,6 +6,20 @@ import { EXPENSE_CATEGORIES } from './cam'
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Must be YYYY-MM-DD')
 const positiveAmount = z.number().positive('Amount must be positive')
 const nonNegativeAmount = z.number().min(0, 'Amount cannot be negative')
+
+/**
+ * $50,000 -- hard ceiling on any single ACH debit (OI-040): the portal payment intent
+ * (routes/stripe.ts) and, since audit 2026-11-23, the off-session autopay debit (routes/cron.ts).
+ * It bounds the blast radius of one debit regardless of what a lease happens to owe.
+ */
+export const MAX_PAYMENT_CENTS = 5_000_000
+const MAX_MONTHLY_DOLLARS = MAX_PAYMENT_CENTS / 100
+const isWholeCents = (n: number) => Math.abs(n * 100 - Math.round(n * 100)) < 1e-6
+// Monthly lease amounts are billed and autopay-debited in the same run, so a value mistyped with
+// extra digits or sub-cent precision is refused at entry (audit 2026-11-23, autopay-no-absolute-ceiling).
+const monthlyLeaseAmount = (base: z.ZodNumber) =>
+  base.max(MAX_MONTHLY_DOLLARS, `Cannot exceed $${MAX_MONTHLY_DOLLARS.toLocaleString('en-US')} per month`)
+    .refine(isWholeCents, 'Must be in whole cents')
 /** A YYYY-MM-DD string that is a real calendar date (no Feb 30). */
 const isRealDate = (s: string) => {
   const [y, m, d] = s.split('-').map(Number)
@@ -65,8 +79,8 @@ const LeaseObjectSchema = z.object({
   status: z.enum(['active', 'expired', 'terminated', 'pending']).default('active'),
   start_date: isoDate,
   end_date: isoDate,
-  base_rent_monthly: positiveAmount,
-  cam_estimate_monthly: nonNegativeAmount.default(0),
+  base_rent_monthly: monthlyLeaseAmount(positiveAmount),
+  cam_estimate_monthly: monthlyLeaseAmount(nonNegativeAmount).default(0),
   rent_type: z.enum(['nnn', 'gross', 'modified_gross']).default('nnn'),
   security_deposit: nonNegativeAmount.optional(),
   expense_stop_amount: nonNegativeAmount.nullish(),
