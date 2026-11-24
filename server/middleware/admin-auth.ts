@@ -59,11 +59,14 @@ export async function adminAuthMiddleware(
 
   // M2 (2026-11-08 audit), DEFENCE IN DEPTH ONLY: fail CLOSED on any unconfirmed, missing or
   // unparseable email_confirmed_at, before any table is read. This does NOT by itself prove the
-  // caller owns the address: with confirmations OFF (the committed supabase/config.toml has
-  // enable_confirmations = false) GoTrue auto-confirms at sign-up and stamps email_confirmed_at
-  // anyway. The actual control is the production auth configuration (public sign-up disabled
-  // and/or confirmations on), a dashboard setting this code cannot see; that is Gabriel's
-  // decision D1. Admins sign in with an email OTP (AdminLogin.tsx, shouldCreateUser: false), and
+  // caller owns the address: with email autoconfirm ON, GoTrue stamps email_confirmed_at at sign-up
+  // and on an email change without proving the mailbox, and an OAuth/SSO provider stamps it from its
+  // own verified-email claim. The actual control is the production auth configuration, a dashboard
+  // setting this code cannot see. Verified live 2026-11-24 (autoconfirm off, email the only
+  // provider, no SAML, no anonymous sign-ins), and CI fails the deploy if any of that drifts
+  // (scripts/check-auth-posture.mjs, audit 2026-11-23; the committed supabase/config.toml now has
+  // enable_confirmations = true to match). Whether to disable public sign-up entirely remains
+  // Gabriel's dashboard decision. Admins sign in with an email OTP (AdminLogin.tsx, shouldCreateUser: false), and
   // verifying one sets email_confirmed_at, so a signed-in admin is never locked out by this check.
   const confirmedAt: unknown = (user as { email_confirmed_at?: unknown }).email_confirmed_at
   if (typeof confirmedAt !== 'string' || confirmedAt === '' || Number.isNaN(Date.parse(confirmedAt))) {

@@ -236,6 +236,17 @@ jobs:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
 
+      # Audit 2026-11-23 MED (admin-gate-depends-on-unverified-signup-setting): admin access trusts a
+      # confirmed email, which proves mailbox ownership only while a self-sign-up must confirm by
+      # email. Fail the deploy if production Auth has public sign-up open with email autoconfirm on
+      # (or anonymous sign-ins), or if the setting cannot be read (scripts/check-auth-posture.mjs).
+      - name: Check production auth posture
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push' && steps.tip.outputs.deploy == 'true'
+        run: scripts/retry-transient.sh node scripts/check-auth-posture.mjs
+        env:
+          SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+
       - name: Check Cloudflare Pages production env
         if: github.ref == 'refs/heads/main' && github.event_name == 'push' && steps.tip.outputs.deploy == 'true'
         # Retries only on a transient Cloudflare failure (5xx / non-JSON reply); a missing variable fails at once.
