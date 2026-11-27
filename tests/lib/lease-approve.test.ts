@@ -198,6 +198,59 @@ describe('buildApprovalPayload', () => {
     expect(() => buildApprovalPayload(b, inputs())).toThrow(ApprovalInputError)
   })
 
+  // d51dca8 follow-up: LeaseInsertSchema/LeaseUpdateSchema cap a monthly amount at $50,000 (MAX_PAYMENT_CENTS)
+  // and require whole cents. The abstract-approval path writes the same amounts (and the schedule rows billing
+  // reads), so it refuses the same values with a reviewer-correctable 422.
+  it('refuses a rent period or recurring charge above $50,000 a month, and accepts exactly $50,000', () => {
+    const over = revalidateAbstract(abs(), PAGES).abstract
+    over.rent_schedule[2].base_rent_monthly = 50_000.01
+    expect(() => buildApprovalPayload(over, inputs())).toThrow(ApprovalInputError)
+    try { buildApprovalPayload(over, inputs()) } catch (e) { expect((e as ApprovalInputError).reason).toMatch(/rent period 3.*\$50,000/i) }
+
+    const cam = revalidateAbstract(abs(), PAGES).abstract
+    cam.recurring_charges[0].amount_monthly = 75_000
+    expect(() => buildApprovalPayload(cam, inputs())).toThrow(/CAM estimate.*\$50,000/)
+
+    const at = revalidateAbstract(abs(), PAGES).abstract
+    at.rent_schedule.forEach((r) => { r.base_rent_monthly = 50_000 })
+    at.recurring_charges[0].amount_monthly = 50_000
+    expect(() => pay(at, inputs())).not.toThrow()
+  })
+
+  it('refuses a monthly amount that is not in whole cents', () => {
+    const a = revalidateAbstract(abs(), PAGES).abstract
+    a.rent_schedule[0].base_rent_monthly = 8333.333
+    expect(() => buildApprovalPayload(a, inputs())).toThrow(/rent period 1.*whole cents/i)
+    const b = revalidateAbstract(abs(), PAGES).abstract
+    b.recurring_charges[0].amount_monthly = 1250.005
+    expect(() => buildApprovalPayload(b, inputs())).toThrow(/whole cents/)
+  })
+
+  it('caps an "other" recurring charge too', () => {
+    const a = revalidateAbstract(abs(), PAGES).abstract
+    a.recurring_charges.push({ ...a.recurring_charges[0], type: 'other', description: 'Tax escrow', amount_monthly: 50_000.5 })
+    expect(() => buildApprovalPayload(a, inputs())).toThrow(/Tax escrow.*\$50,000/)
+  })
+
+  it('two "other" charges whose descriptions differ by punctuation approve and bill separately (case-only twins stay refused by 0020)', () => {
+    const a = revalidateAbstract(abs(), PAGES).abstract
+    a.recurring_charges.push(
+      { ...a.recurring_charges[0], type: 'other', description: 'Tax escrow', amount_monthly: 100 },
+      { ...a.recurring_charges[0], type: 'other', description: 'TAX-ESCROW!', amount_monthly: 200 },
+    )
+    expect(scheduleBillingProblems(a, LEASE_ROW)).toEqual([])
+    expect(pay(a, inputs()).recurring_charges.filter((r) => r.type === 'other')).toHaveLength(2)
+  })
+
+  it('two "other" charges with the same description over one day are refused (0020 would reject the insert)', () => {
+    const a = revalidateAbstract(abs(), PAGES).abstract
+    a.recurring_charges.push(
+      { ...a.recurring_charges[0], type: 'other', description: 'Tax escrow', amount_monthly: 100 },
+      { ...a.recurring_charges[0], type: 'other', description: ' tax ESCROW ', amount_monthly: 200 },
+    )
+    expect(scheduleBillingProblems(a, LEASE_ROW).map((x) => x.code)).toContain('recurring_overlap')
+  })
+
   it('passes the replace choice and the existing-tenant choice through', () => {
     const p = pay(abs(), inputs({ tenant: { mode: 'existing', id: 't-1' }, replace: { lease_id: 'l-1', end_date: '2025-12-31' } }))
     expect(p.tenant).toMatchObject({ mode: 'existing', id: 't-1', legal_name: 'Acme Fabrication LLC' })

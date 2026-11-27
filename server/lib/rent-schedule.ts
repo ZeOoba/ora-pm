@@ -35,6 +35,12 @@ export type RecurringChargeType = 'cam_estimate' | 'utility_water' | 'utility_ga
 export interface RecurringChargeRow {
   id: string
   type: RecurringChargeType
+  /**
+   * Stable identity of an 'other' charge (migration 0035): its idempotency-key discriminator. It survives a
+   * supersede (a replacing row carries the superseded row's code) and a reworded description. Required for
+   * 'other' (a missing one fails closed as invalid_row); ignored for every other type, which keys on type.
+   */
+  charge_code?: string | null
   description: string
   amount_monthly: number
   effective_start: string
@@ -78,7 +84,7 @@ export interface ScheduledLine {
   type: LineType
   amount: number
   description: string
-  /** Idempotency-key discriminator when it differs from `type` ('other:<otherKey(description)>'); null otherwise. */
+  /** Idempotency-key discriminator when it differs from `type` ('other:<charge_code>'); null otherwise. */
   keySuffix: string | null
 }
 
@@ -143,7 +149,13 @@ function span(start: string, end: string): Span | null {
 
 const covers = (s: Span, d: number) => d >= s.from && d <= s.to
 
-/** Stable idempotency discriminator for an 'other' recurring line: lowercase alphanumeric words joined by '-', at most 40 chars. */
+/**
+ * LEGACY, FROZEN: the description slug that keyed 'other' lines before migration 0035 (lowercase alphanumeric
+ * words joined by '-', at most 40 chars). Billing no longer calls it: 0035 backfilled every existing 'other'
+ * row's charge_code with exactly this value (SQL legacy_other_charge_key, parity pinned by
+ * tests/db/recurring-charge-code-0035.test.ts), so months billed under the old key keep the same key. Changing
+ * this function changes nothing in billing; changing the SQL twin would break that parity test.
+ */
 export function otherKey(description: string): string {
   const slug = description.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40).replace(/-+$/, '')
   return slug || 'unnamed'
@@ -246,6 +258,11 @@ export function computeScheduledLines(args: {
     if (!s || !RECURRING_TYPES.has(r.type) || !Number.isFinite(r.amount_monthly) || r.amount_monthly <= 0) {
       return fail('invalid_row', `recurring row ${r.id} is malformed`)
     }
+    // An 'other' line is keyed on its charge_code; without one there is no safe key (never fall back to the
+    // description: a reworded description would bill a month twice).
+    if (r.type === 'other' && (typeof r.charge_code !== 'string' || r.charge_code.trim() === '')) {
+      return fail('invalid_row', `recurring row ${r.id} ('other') has no charge_code`)
+    }
     recSpans.push(s)
   }
   const conSpans: Span[] = []
@@ -322,10 +339,12 @@ export function computeScheduledLines(args: {
     if (s.amount > 0) lines.push({ type: 'cam_estimate', amount: s.amount, description: describe('CAM Estimate', monthLabel, prorated, s.notes), keySuffix: null })
   }
 
-  // Recurring lines, grouped by idempotency key: cam_estimate/utilities by type, 'other' per
-  // normalized description (plan §5a item 4: a row id changes on supersede, so an id key would post a
-  // second escrow for a month already billed). Same-key rows overlapping a day fail closed below.
-  const keyOf = (r: RecurringChargeRow) => (r.type === 'other' ? `other:${otherKey(r.description)}` : r.type)
+  // Recurring lines, grouped by idempotency key: cam_estimate/utilities by type, 'other' per persisted
+  // charge_code (migration 0035). Not the row id (plan §5a item 4: it changes on supersede, so an id key would
+  // post a second escrow for a month already billed) and not the description (a reworded description billed
+  // twice; two distinct charges whose slugs collided made the lease unbillable). Same-key rows overlapping a
+  // day fail closed below.
+  const keyOf = (r: RecurringChargeRow) => (r.type === 'other' ? `other:${r.charge_code as string}` : r.type)
   const order: RecurringChargeType[] = ['cam_estimate', 'utility_water', 'utility_gas', 'utility_electric', 'utility_other', 'other']
   const keys = [...new Set(recurring.map(keyOf))].sort((a, b) => {
     const ta = order.indexOf(a.startsWith('other:') ? 'other' : (a as RecurringChargeType))

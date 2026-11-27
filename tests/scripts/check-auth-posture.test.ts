@@ -10,7 +10,7 @@
 import { describe, it, expect } from 'vitest'
 import { evaluateAuthPosture, runAuthPostureCheck } from '../../scripts/check-auth-posture.mjs'
 
-// Shape of the live GET /auth/v1/settings response (read 2026-11-24): providers and
+// Shape of the GET /auth/v1/settings response: providers and
 // anonymous_users live under `external`; saml_enabled is top level.
 const LIVE_EXTERNAL = {
   anonymous_users: false, apple: false, azure: false, bitbucket: false, discord: false, facebook: false,
@@ -24,7 +24,7 @@ const settings = (o: Record<string, unknown> = {}, ext: Record<string, unknown> 
 })
 
 describe('evaluateAuthPosture', () => {
-  it('passes the verified 2026-11-24 production posture (sign-up open, confirmations required, email only)', () => {
+  it('passes a safe posture (confirmations required, email the only provider)', () => {
     expect(evaluateAuthPosture(settings())).toEqual({ ok: true, problems: [] })
   })
 

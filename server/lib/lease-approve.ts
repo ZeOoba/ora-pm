@@ -1,6 +1,7 @@
-import { billingTerm, ENTITY_TYPES, type LeaseAbstract } from './lease-abstract'
+import { abstractChargeCode, billingTerm, ENTITY_TYPES, type LeaseAbstract } from './lease-abstract'
 import { buildMonthlyCharges } from './billing'
 import { addMonthsIso, type LeaseSchedule, type RecurringChargeType } from './rent-schedule'
+import { monthlyAmountLimitProblem } from './schemas'
 
 export interface BillingProblem {
   /** YYYY-MM */
@@ -23,7 +24,9 @@ export function scheduleBillingProblems(
   const schedule: LeaseSchedule = {
     rent: a.rent_schedule.map((r) => ({ effective_start: r.start, effective_end: r.end, base_rent_monthly: r.base_rent_monthly ?? NaN })),
     recurring: a.recurring_charges.filter((r) => r.amount_monthly !== null && r.amount_monthly > 0).map((r, i) => ({
-      id: `abstract-${i}`, type: r.type as RecurringChargeType, description: r.description.trim() || r.type,
+      id: `abstract-${i}`, type: r.type as RecurringChargeType,
+      charge_code: abstractChargeCode(r.type, r.description),
+      description: r.description.trim() || r.type,
       amount_monthly: r.amount_monthly as number, effective_start: r.effective_start, effective_end: r.effective_end,
     })),
     concessions: a.concessions.map((c) => ({ charge_type: c.charge_type, period_start: c.period_start, period_end: c.period_end, kind: c.kind, value: c.kind === 'full_waiver' ? null : c.value, reason: c.reason })),
@@ -89,6 +92,16 @@ export function buildApprovalPayload(a: LeaseAbstract, inp: ApproveInputs): Reco
   const rows = [...a.rent_schedule].sort((x, y) => x.start.localeCompare(y.start))
   if (rows.length === 0) throw new ApprovalInputError('The lease needs a rent schedule.')
   if (rows.some((r) => r.base_rent_monthly === null)) throw new ApprovalInputError('Every rent period needs a resolved monthly amount.')
+  // The lease form's limits (LeaseInsertSchema/LeaseUpdateSchema, d51dca8): every amount this approval writes
+  // and monthly billing then bills and autopay-debits is at most $50,000 a month and in whole cents.
+  rows.forEach((r, i) => {
+    const why = monthlyAmountLimitProblem(r.base_rent_monthly as number)
+    if (why) throw new ApprovalInputError(`Rent period ${i + 1} (from ${r.start}): ${why}.`)
+  })
+  for (const r of a.recurring_charges) {
+    const why = r.amount_monthly === null ? null : monthlyAmountLimitProblem(r.amount_monthly)
+    if (why) throw new ApprovalInputError(`Recurring charge "${r.description.trim() || r.type}" (from ${r.effective_start}): ${why}.`)
+  }
 
   const covering = <T extends { effective_start: string; effective_end: string }>(items: T[], d: string) =>
     items.find((x) => x.effective_start <= d && d <= x.effective_end)

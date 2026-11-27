@@ -10,7 +10,6 @@
 // sign-up open AND email autoconfirm on, anyone could sign up as an allowlisted admin address
 // that has no auth user yet and receive a confirmed session on the money console. The setting
 // lives in the Supabase dashboard, invisible to the code, so this gate checks it before deploy.
-// Verified live 2026-11-24: sign-up open, mailer_autoconfirm false (safe), phone autoconfirm false.
 //
 // Exit codes: 0 safe · 1 unsafe posture (blocks the deploy) · 2 could not check (fail closed).
 

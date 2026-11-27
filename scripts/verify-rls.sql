@@ -236,3 +236,24 @@ LEFT JOIN pg_constraint con
   ON con.conname = expected.conname
  AND con.contype = 'x'
 ORDER BY expected.conname;
+
+-- ── Part 8 (0035_recurring_charge_code.sql, 0036_schedule_amount_ceiling.sql):
+-- the charge_code guards and the $50,000/month ceilings must exist. Expect five
+-- rows, each present = true (contype c = CHECK, x = EXCLUDE). Then confirm no
+-- active 'other' row lacks a code: the last query must return 0. ──────────────
+SELECT
+  expected.conname,
+  con.oid IS NOT NULL AS present,
+  pg_get_constraintdef(con.oid) AS actual_definition
+FROM (VALUES
+  ('lease_recurring_charges_other_code_present'),
+  ('lease_recurring_charges_code_format'),
+  ('lease_recurring_charges_other_code_no_overlap'),
+  ('lease_rent_schedule_amount_ceiling'),
+  ('lease_recurring_charges_amount_ceiling')
+) AS expected(conname)
+LEFT JOIN pg_constraint con ON con.conname = expected.conname
+ORDER BY expected.conname;
+
+SELECT count(*) AS other_rows_without_code
+FROM lease_recurring_charges WHERE type = 'other' AND charge_code IS NULL;
