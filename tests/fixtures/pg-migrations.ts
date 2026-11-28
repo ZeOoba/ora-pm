@@ -76,6 +76,11 @@ export const PG_MEM_SKIP: RegExp[] = [
   // 0035: the charge_code backfill calls legacy_other_charge_key(), a function pg-mem never creates (above).
   // Run on real Postgres, with JS/SQL slug parity, by tests/db/recurring-charge-code-0035.test.ts.
   /^UPDATE lease_recurring_charges\s+SET charge_code = legacy_other_charge_key\(description\)\s+WHERE type = 'other' AND charge_code IS NULL$/i,
+  // 0037: validates the two ceilings 0036 adds inside its DO block, which pg-mem never runs (above), so the
+  // constraints do not exist here. Anchored on these two exact names so any other VALIDATE still fails loudly.
+  // Run on real Postgres by tests/db/validate-amount-ceilings-0037.test.ts.
+  /^ALTER TABLE lease_rent_schedule VALIDATE CONSTRAINT lease_rent_schedule_amount_ceiling$/i,
+  /^ALTER TABLE lease_recurring_charges VALIDATE CONSTRAINT lease_recurring_charges_amount_ceiling$/i,
 ]
 
 // pg-mem gives an unnamed table constraint NO name, while Postgres names it

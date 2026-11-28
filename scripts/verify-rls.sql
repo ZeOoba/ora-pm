@@ -237,13 +237,17 @@ LEFT JOIN pg_constraint con
  AND con.contype = 'x'
 ORDER BY expected.conname;
 
--- ── Part 8 (0035_recurring_charge_code.sql, 0036_schedule_amount_ceiling.sql):
--- the charge_code guards and the $50,000/month ceilings must exist. Expect five
--- rows, each present = true (contype c = CHECK, x = EXCLUDE). Then confirm no
--- active 'other' row lacks a code: the last query must return 0. ──────────────
+-- ── Part 8 (0035_recurring_charge_code.sql, 0036_schedule_amount_ceiling.sql,
+-- 0037_validate_amount_ceilings.sql): the charge_code guards and the
+-- $50,000/month ceilings must exist and be validated. Expect five rows, each
+-- present = true and validated = true (contype c = CHECK, x = EXCLUDE). A
+-- ceiling with validated = false means 0037 has not been applied: existing rows
+-- were never checked against it. Then confirm no active 'other' row lacks a
+-- code: the last query must return 0. ─────────────────────────────────────────
 SELECT
   expected.conname,
   con.oid IS NOT NULL AS present,
+  con.convalidated AS validated,
   pg_get_constraintdef(con.oid) AS actual_definition
 FROM (VALUES
   ('lease_recurring_charges_other_code_present'),
