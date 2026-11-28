@@ -1,9 +1,13 @@
 // B8 slice 1 (supabase/migrations/0025_gl_qb_account_type.sql): QB account type on gl_accounts,
 // with a CHECK that it agrees with the ledger account_type. Runs on the real migration chain.
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { freshMigratedDb, migrationFiles, readMigration, type MigratedDb } from '../fixtures/pg-migrations'
 import { migrationTouchesFinancialTables } from '../../scripts/check-refute-required'
 import { QB_ACCOUNT_TYPES } from '../../server/lib/qb-iif-accounts'
+
+// freshMigratedDb() replays every migration on pg-mem (~4s a call alone), so the 5s test / 10s hook defaults
+// flake under a loaded full run.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 })
 
 const FILE = '0025_gl_qb_account_type.sql'
 const E1 = '00000000-0000-4000-8000-0000000000e1'

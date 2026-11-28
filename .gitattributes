@@ -1,6 +1,8 @@
-# Normalize line endings repo-wide: git stores LF; Windows working tree gets CRLF via core.autocrlf.
-# Added 2026-07-12 to end perpetual phantom-modified flags from pre-existing CRLF blobs.
-* text=auto
+# Normalize line endings repo-wide: git stores LF (added 2026-07-12 to end perpetual phantom-modified
+# flags from pre-existing CRLF blobs) AND every working tree checks out LF, overriding core.autocrlf
+# (2026-11-27). Tests that pin file text with `\n` (migration, ci.yml and workflow pins) failed on a
+# Windows CRLF checkout while passing in CI; LF everywhere makes the local suite match CI.
+* text=auto eol=lf
 
 # E11 (2026-11-08): files with a `#!` shebang must keep LF in the working tree too. With
 # `* text=auto` + core.autocrlf a Windows checkout rewrites `#!/usr/bin/env node\n` to `...\r\n`,

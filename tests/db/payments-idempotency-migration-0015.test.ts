@@ -17,10 +17,14 @@
 // the other one since it also handles 0014's dollar-quoted plpgsql function
 // body, which this loader must now parse past correctly too.
 
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { freshMigratedDb, allMigrationText, migrationFiles, MIGRATIONS_DIR, type MigratedDb } from '../fixtures/pg-migrations'
+
+// freshMigratedDb() replays every migration on pg-mem (~4s a call alone), so the 5s test / 10s hook defaults
+// flake under a loaded full run.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 })
 
 const MIGRATION_FILE = '0015_payments_idempotency_key.sql'
 

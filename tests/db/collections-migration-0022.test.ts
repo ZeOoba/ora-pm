@@ -2,9 +2,13 @@
 // B1: promises_to_pay and ar_disputes (supabase/migrations/0022_collections_workflow.sql).
 // Runs the REAL migration chain on pg-mem (tests/fixtures/pg-migrations.ts) and exercises each
 // constraint; textual assertions cover what pg-mem skips (RLS) and the re-runnable form.
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { freshMigratedDb, migrationFiles, readMigration, splitSqlStatements, statementBody, type MigratedDb } from '../fixtures/pg-migrations'
 import { migrationTouchesFinancialTables } from '../../scripts/check-refute-required'
+
+// freshMigratedDb() replays every migration on pg-mem (~4s a call alone), so the 5s test / 10s hook defaults
+// flake under a loaded full run.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 })
 
 const FILE = '0022_collections_workflow.sql'
 const PROP = '00000000-0000-4000-8000-000000000001'

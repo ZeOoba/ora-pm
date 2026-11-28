@@ -15,8 +15,12 @@
 // Runtime assertions run the real migration SQL on pg-mem (tests/fixtures/migrations.ts). pg-mem
 // has no plpgsql, so 0017's DO block is verified textually AND by extracting its UPDATE/predicate
 // and running that against seeded rows.
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { PG_MEM_SKIP, freshMigratedDb, readMigration, splitSqlStatements, statementBody } from '../fixtures/pg-migrations'
+
+// freshMigratedDb() replays every migration on pg-mem (~4s a call alone), so the 5s test / 10s hook defaults
+// flake under a loaded full run.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 })
 
 const FILE_0016 = '0016_charges_void.sql'
 const FILE_0017 = '0017_void_oi278_pre_guard_late_fees.sql'

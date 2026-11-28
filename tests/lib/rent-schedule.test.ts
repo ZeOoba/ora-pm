@@ -4,6 +4,7 @@ import {
   computeScheduledLines,
   expandFixedEscalation,
   hasSchedule,
+  otherKey,
   type LeaseSchedule,
   type RentScheduleRow,
 } from '../../server/lib/rent-schedule'
@@ -200,7 +201,7 @@ describe('computeScheduledLines: concessions', () => {
       recurring: [
         { id: 'c1', type: 'cam_estimate', description: 'CAM', amount_monthly: 400, effective_start: '2025-01-01', effective_end: '2030-12-31' },
         { id: 'w1', type: 'utility_water', description: 'Water', amount_monthly: 50, effective_start: '2025-01-01', effective_end: '2030-12-31' },
-        { id: 'o1', type: 'other', description: 'Tax escrow', amount_monthly: 800, effective_start: '2025-01-01', effective_end: '2030-12-31' },
+        { id: 'o1', type: 'other', charge_code: 'tax-escrow', description: 'Tax escrow', amount_monthly: 800, effective_start: '2025-01-01', effective_end: '2030-12-31' },
       ],
       concessions: [{ charge_type: 'all', period_start: '2026-06-01', period_end: '2026-06-30', kind: 'full_waiver', value: null, reason: 'Free rent' }],
     }, 2026, 6))
@@ -231,13 +232,13 @@ describe('computeScheduledLines: CAM source (recurring rows OR the lease field, 
 })
 
 describe('computeScheduledLines: recurring lines', () => {
-  it('keys utilities by type and "other" lines by normalized description, each with its own description', () => {
+  it('keys utilities by type and "other" lines by their persisted charge_code, each with its own description', () => {
     const r = ok(lines({
       ...empty,
       rent: [row('2025-01-01', '2030-12-31', 3000)],
       recurring: [
-        { id: 'o1', type: 'other', description: 'Tax escrow', amount_monthly: 812.5, effective_start: '2025-01-01', effective_end: '2030-12-31' },
-        { id: 'o2', type: 'other', description: 'Insurance escrow', amount_monthly: 120, effective_start: '2025-01-01', effective_end: '2030-12-31' },
+        { id: 'o1', type: 'other', charge_code: 'tax-escrow', description: 'Tax escrow', amount_monthly: 812.5, effective_start: '2025-01-01', effective_end: '2030-12-31' },
+        { id: 'o2', type: 'other', charge_code: 'insurance-escrow', description: 'Insurance escrow', amount_monthly: 120, effective_start: '2025-01-01', effective_end: '2030-12-31' },
         { id: 'e1', type: 'utility_electric', description: 'Electric', amount_monthly: 75, effective_start: '2026-06-11', effective_end: '2030-12-31' },
       ],
     }, 2026, 6))
@@ -246,37 +247,65 @@ describe('computeScheduledLines: recurring lines', () => {
     expect(amt(r, 'utility_electric')).toBe(50) // 20 of 30 days
   })
   // Plan §5a item 4: a row id changes when a row is superseded and re-entered, so an id-keyed line
-  // would post a SECOND escrow for a month already billed. The key must survive that.
-  it('keeps the same "other" key when the row is superseded and re-entered under a new id', () => {
+  // would post a SECOND escrow for a month already billed. The replacing row carries the charge_code.
+  it('keeps the same "other" key when an amendment supersedes the row and REWORDS its description', () => {
     const rent = [row('2025-01-01', '2030-12-31', 3000)]
     const before = ok(lines({ ...empty, rent, recurring: [
-      { id: 'o1', type: 'other', description: 'Tax escrow', amount_monthly: 812.5, effective_start: '2025-01-01', effective_end: '2030-12-31' },
+      { id: 'o1', type: 'other', charge_code: 'tax-escrow', description: 'Tax escrow', amount_monthly: 812.5, effective_start: '2025-01-01', effective_end: '2030-12-31' },
     ] }, 2026, 6))
     const after = ok(lines({ ...empty, rent, recurring: [
-      { id: 'o1', type: 'other', description: 'Tax escrow', amount_monthly: 812.5, effective_start: '2025-01-01', effective_end: '2030-12-31', superseded_at: '2026-06-10T00:00:00Z' },
-      { id: 'o9', type: 'other', description: '  TAX  Escrow ', amount_monthly: 812.5, effective_start: '2025-01-01', effective_end: '2030-12-31' },
+      { id: 'o1', type: 'other', charge_code: 'tax-escrow', description: 'Tax escrow', amount_monthly: 812.5, effective_start: '2025-01-01', effective_end: '2030-12-31', superseded_at: '2026-06-10T00:00:00Z' },
+      { id: 'o9', type: 'other', charge_code: 'tax-escrow', description: 'Real estate tax escrow (per Amendment 2)', amount_monthly: 900, effective_start: '2025-01-01', effective_end: '2030-12-31' },
     ] }, 2026, 6))
     expect(before.find((l) => l.type === 'other')!.keySuffix).toBe('other:tax-escrow')
     expect(after.find((l) => l.type === 'other')!.keySuffix).toBe('other:tax-escrow')
+    expect(after.find((l) => l.type === 'other')!.description).toBe('Real estate tax escrow (per Amendment 2) – June 2026')
   })
-  it('two active "other" rows with the same normalized description overlapping a day fail closed', () => {
+  it('two charges whose descriptions slug alike (punctuation) both bill (no collision)', () => {
+    const r = ok(lines({ ...empty, rent: [row('2025-01-01', '2030-12-31', 3000)], recurring: [
+      { id: 'o1', type: 'other', charge_code: 'a1', description: 'Tax escrow', amount_monthly: 10, effective_start: '2025-01-01', effective_end: '2030-12-31' },
+      { id: 'o2', type: 'other', charge_code: 'b2', description: 'TAX-ESCROW!', amount_monthly: 20, effective_start: '2025-01-01', effective_end: '2030-12-31' },
+    ] }, 2026, 6))
+    expect(amt(r, 'other:a1')).toBe(10)
+    expect(amt(r, 'other:b2')).toBe(20)
+  })
+  it('two charges sharing their first 40 characters both bill (no collision)', () => {
+    const stem = 'Common area maintenance surcharge for the '
+    const r = ok(lines({ ...empty, rent: [row('2025-01-01', '2030-12-31', 3000)], recurring: [
+      { id: 'o1', type: 'other', charge_code: 'a1', description: stem + 'north lot', amount_monthly: 10, effective_start: '2025-01-01', effective_end: '2030-12-31' },
+      { id: 'o2', type: 'other', charge_code: 'b2', description: stem + 'south lot', amount_monthly: 20, effective_start: '2025-01-01', effective_end: '2030-12-31' },
+    ] }, 2026, 6))
+    expect(r.filter((l) => l.type === 'other').map((l) => l.amount).sort((x, y) => x - y)).toEqual([10, 20])
+  })
+  it('two active "other" rows with the same charge_code overlapping a day fail closed', () => {
     const r = lines({ ...empty, rent: [row('2025-01-01', '2030-12-31', 3000)], recurring: [
-      { id: 'o1', type: 'other', description: 'Tax escrow', amount_monthly: 10, effective_start: '2025-01-01', effective_end: '2030-12-31' },
-      { id: 'o2', type: 'other', description: 'tax-escrow', amount_monthly: 20, effective_start: '2026-06-15', effective_end: '2030-12-31' },
+      { id: 'o1', type: 'other', charge_code: 'tax-escrow', description: 'Tax escrow', amount_monthly: 10, effective_start: '2025-01-01', effective_end: '2030-12-31' },
+      { id: 'o2', type: 'other', charge_code: 'tax-escrow', description: 'Escrow for taxes', amount_monthly: 20, effective_start: '2026-06-15', effective_end: '2030-12-31' },
     ] }, 2026, 6)
     expect('exception' in r && r.exception.code).toBe('recurring_overlap')
   })
-  it('a description with no letters or digits still gets a stable key', () => {
-    const r = ok(lines({ ...empty, rent: [row('2025-01-01', '2030-12-31', 3000)], recurring: [
-      { id: 'o1', type: 'other', description: '$$$', amount_monthly: 10, effective_start: '2025-01-01', effective_end: '2030-12-31' },
-    ] }, 2026, 6))
-    expect(r.find((l) => l.type === 'other')!.keySuffix).toBe('other:unnamed')
+  it('an "other" row without a charge_code fails closed (invalid_row), it is never keyed on its description', () => {
+    for (const charge_code of [undefined, null, '', '   ']) {
+      const r = lines({ ...empty, rent: [row('2025-01-01', '2030-12-31', 3000)], recurring: [
+        { id: 'o1', type: 'other', charge_code, description: 'Tax escrow', amount_monthly: 10, effective_start: '2025-01-01', effective_end: '2030-12-31' },
+      ] }, 2026, 6)
+      expect('exception' in r && r.exception.code).toBe('invalid_row')
+    }
   })
-  it('caps the key length so the idempotency key stays short', () => {
+  it('utilities and cam_estimate rows need no charge_code and keep their type keys', () => {
     const r = ok(lines({ ...empty, rent: [row('2025-01-01', '2030-12-31', 3000)], recurring: [
-      { id: 'o1', type: 'other', description: 'x'.repeat(300), amount_monthly: 10, effective_start: '2025-01-01', effective_end: '2030-12-31' },
+      { id: 'w1', type: 'utility_water', description: 'Water', amount_monthly: 50, effective_start: '2025-01-01', effective_end: '2030-12-31' },
     ] }, 2026, 6))
-    expect(r.find((l) => l.type === 'other')!.keySuffix!.length).toBeLessThanOrEqual('other:'.length + 40)
+    expect(r.find((l) => l.type === 'utility_water')!.keySuffix).toBeNull()
+  })
+})
+
+describe('otherKey (the LEGACY description slug, frozen: migration 0035 backfills charge_code with it)', () => {
+  it('lowercases, collapses punctuation, trims dashes, caps at 40, and names an empty slug "unnamed"', () => {
+    expect(otherKey('  TAX  Escrow ')).toBe('tax-escrow')
+    expect(otherKey('$$$')).toBe('unnamed')
+    expect(otherKey('x'.repeat(300))).toBe('x'.repeat(40))
+    expect(otherKey('a'.repeat(39) + ' b')).toBe('a'.repeat(39))
   })
 })
 
@@ -365,10 +394,10 @@ describe('buildMonthlyCharges with a schedule', () => {
     const out = buildMonthlyCharges({ ...base, baseRentMonthly: 99999, schedule: { ...empty, rent: [row('2025-01-01', '2030-12-31', 3000)] } })
     expect(out.charges.find((c) => c.type === 'rent')!.amount).toBe(3000)
   })
-  it('keys "other" recurring lines per description so two escrows never collide, and keeps rent/cam keys legacy-compatible', () => {
+  it('keys "other" recurring lines per charge_code so two escrows never collide, and keeps rent/cam keys legacy-compatible', () => {
     const out = buildMonthlyCharges({ ...base, schedule: { ...empty, rent: [row('2025-01-01', '2030-12-31', 3000)], recurring: [
-      { id: 'o1', type: 'other', description: 'Tax escrow', amount_monthly: 10, effective_start: '2025-01-01', effective_end: '2030-12-31' },
-      { id: 'o2', type: 'other', description: 'Ins escrow', amount_monthly: 20, effective_start: '2025-01-01', effective_end: '2030-12-31' },
+      { id: 'o1', type: 'other', charge_code: 'tax-escrow', description: 'Tax escrow', amount_monthly: 10, effective_start: '2025-01-01', effective_end: '2030-12-31' },
+      { id: 'o2', type: 'other', charge_code: 'ins-escrow', description: 'Ins escrow', amount_monthly: 20, effective_start: '2025-01-01', effective_end: '2030-12-31' },
     ] } })
     expect(out.charges.map((c) => c.idempotency_key).sort()).toEqual([
       'auto:L:2026-06-01:other:ins-escrow', 'auto:L:2026-06-01:other:tax-escrow', 'auto:L:2026-06-01:rent',

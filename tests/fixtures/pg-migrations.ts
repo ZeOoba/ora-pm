@@ -73,6 +73,9 @@ export const PG_MEM_SKIP: RegExp[] = [
   // Postgres by supabase/tests/gl_core.test.sql via scripts/verify-gl-sql.sh; their presence is
   // pinned textually by tests/db/gl-core-migration-0023.test.ts.
   /^(DROP TRIGGER IF EXISTS|CREATE (CONSTRAINT )?TRIGGER)\b/i,
+  // 0035: the charge_code backfill calls legacy_other_charge_key(), a function pg-mem never creates (above).
+  // Run on real Postgres, with JS/SQL slug parity, by tests/db/recurring-charge-code-0035.test.ts.
+  /^UPDATE lease_recurring_charges\s+SET charge_code = legacy_other_charge_key\(description\)\s+WHERE type = 'other' AND charge_code IS NULL$/i,
 ]
 
 // pg-mem gives an unnamed table constraint NO name, while Postgres names it

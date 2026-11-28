@@ -23,7 +23,7 @@ describe('groupSchedules', () => {
   it('groups rows per lease and coerces string numerics so the engine bills them', () => {
     const m = groupSchedules(
       [{ lease_id: 'A', effective_start: '2025-01-01', effective_end: '2030-12-31', base_rent_monthly: '3000.00', superseded_at: null }],
-      [{ lease_id: 'A', id: 'r1', type: 'other', description: 'Tax escrow', amount_monthly: '100.25', effective_start: '2025-01-01', effective_end: '2030-12-31', superseded_at: null }],
+      [{ lease_id: 'A', id: 'r1', type: 'other', charge_code: 'tax-escrow', description: 'Tax escrow', amount_monthly: '100.25', effective_start: '2025-01-01', effective_end: '2030-12-31', superseded_at: null }],
       [{ lease_id: 'A', charge_type: 'rent', period_start: '2026-06-01', period_end: '2026-06-30', kind: 'pct', value: '0.5', reason: 'Half rent', clause_ref: null, superseded_at: null }],
     )
     const s = m.get('A')!

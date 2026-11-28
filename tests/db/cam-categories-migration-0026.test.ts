@@ -7,11 +7,15 @@
 // chain still applies there and that existing rows keep today's behaviour.
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest'
 import { PGlite } from '@electric-sql/pglite'
 import { btree_gist } from '@electric-sql/pglite/contrib/btree_gist'
 import { freshMigratedDb, migrationFiles } from '../fixtures/pg-migrations'
 import { EXPENSE_CATEGORIES } from '../../server/lib/cam'
+
+// freshMigratedDb() replays every migration on pg-mem (~4s a call alone), so the 5s test / 10s hook defaults
+// flake under a loaded full run.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 })
 
 const FILE = '0026_cam_recoverable_categories.sql'
 const DIR = join(__dirname, '../../supabase/migrations')

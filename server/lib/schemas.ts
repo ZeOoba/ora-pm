@@ -13,13 +13,23 @@ const nonNegativeAmount = z.number().min(0, 'Amount cannot be negative')
  * It bounds the blast radius of one debit regardless of what a lease happens to owe.
  */
 export const MAX_PAYMENT_CENTS = 5_000_000
-const MAX_MONTHLY_DOLLARS = MAX_PAYMENT_CENTS / 100
-const isWholeCents = (n: number) => Math.abs(n * 100 - Math.round(n * 100)) < 1e-6
+export const MAX_MONTHLY_DOLLARS = MAX_PAYMENT_CENTS / 100
+export const isWholeCents = (n: number) => Math.abs(n * 100 - Math.round(n * 100)) < 1e-6
+const OVER_MONTHLY_CAP = `Cannot exceed $${MAX_MONTHLY_DOLLARS.toLocaleString('en-US')} per month`
+const NOT_WHOLE_CENTS = 'Must be in whole cents'
 // Monthly lease amounts are billed and autopay-debited in the same run, so a value mistyped with
 // extra digits or sub-cent precision is refused at entry (audit 2026-11-23, autopay-no-absolute-ceiling).
 const monthlyLeaseAmount = (base: z.ZodNumber) =>
-  base.max(MAX_MONTHLY_DOLLARS, `Cannot exceed $${MAX_MONTHLY_DOLLARS.toLocaleString('en-US')} per month`)
-    .refine(isWholeCents, 'Must be in whole cents')
+  base.max(MAX_MONTHLY_DOLLARS, OVER_MONTHLY_CAP).refine(isWholeCents, NOT_WHOLE_CENTS)
+/**
+ * The same two limits for a write path that does not go through a Zod schema (the lease-abstract approval,
+ * server/lib/lease-approve.ts): the reason a finite monthly amount is refused, or null if it is allowed.
+ */
+export function monthlyAmountLimitProblem(n: number): string | null {
+  if (n > MAX_MONTHLY_DOLLARS) return OVER_MONTHLY_CAP
+  if (!isWholeCents(n)) return NOT_WHOLE_CENTS
+  return null
+}
 /** A YYYY-MM-DD string that is a real calendar date (no Feb 30). */
 const isRealDate = (s: string) => {
   const [y, m, d] = s.split('-').map(Number)

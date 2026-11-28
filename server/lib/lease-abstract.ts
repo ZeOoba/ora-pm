@@ -1143,8 +1143,8 @@ export function crossCheck(a: LeaseAbstract): AbstractFlag[] {
     const schedule: LeaseSchedule = {
       rent: rows.map((r) => ({ effective_start: r.start, effective_end: r.end, base_rent_monthly: r.base_rent_monthly as number })),
       recurring: a.recurring_charges.map((r, i) => ({
-        id: `abstract-${i}`, type: r.type as RecurringChargeType, description: r.description,
-        amount_monthly: r.amount_monthly as number, effective_start: r.effective_start, effective_end: r.effective_end,
+        id: `abstract-${i}`, type: r.type as RecurringChargeType, charge_code: abstractChargeCode(r.type, r.description),
+        description: r.description, amount_monthly: r.amount_monthly as number, effective_start: r.effective_start, effective_end: r.effective_end,
       })),
       concessions: a.concessions.map((c): ConcessionRow => ({
         charge_type: c.charge_type, period_start: c.period_start, period_end: c.period_end, kind: c.kind, value: c.value, reason: c.reason,
@@ -1325,4 +1325,15 @@ export async function extractAbstract(
     throw new Error(`Lease abstraction failed (status ${res.status})`)
   }
   return finalizeAbstract(parseAbstractResponse(await res.json()), pages)
+}
+
+/**
+ * The charge_code a billing DRY RUN gives an abstract's recurring row (approval preview and the final gate
+ * above; never stored). On approval 0033 inserts with no code and 0035's trigger gives every 'other' row its
+ * own id, so distinct charges never share a key. Two 'other' rows with the SAME lower(btrim(description)) over
+ * one day are still refused by 0020's lease_recurring_charges_other_no_overlap; keying the dry run on that
+ * string reports them as recurring_overlap instead of the approval RPC failing on the constraint.
+ */
+export function abstractChargeCode(type: string, description: string): string | null {
+  return type === 'other' ? `abstract:${(description.trim() || type).toLowerCase()}` : null
 }

@@ -4,7 +4,7 @@ import type { ConcessionRow, LeaseSchedule, RecurringChargeRow, RentScheduleRow 
 
 /** Columns cron.ts selects from each 0020 table (cron prepends `id`, the keyset). Every row is read, superseded or not (see groupSchedules). */
 export const RENT_SCHEDULE_COLUMNS = 'lease_id, effective_start, effective_end, base_rent_monthly, superseded_at'
-export const RECURRING_COLUMNS = 'lease_id, type, description, amount_monthly, effective_start, effective_end, superseded_at'
+export const RECURRING_COLUMNS = 'lease_id, type, charge_code, description, amount_monthly, effective_start, effective_end, superseded_at'
 export const CONCESSION_COLUMNS = 'lease_id, charge_type, period_start, period_end, kind, value, reason, clause_ref, superseded_at'
 
 type Numeric = number | string | null | undefined
@@ -46,7 +46,7 @@ export function groupSchedules(rent: DbRentRow[], recurring: DbRecurringRow[], c
     of(r.lease_id).rent.push({ effective_start: r.effective_start, effective_end: r.effective_end, base_rent_monthly: toNumber(r.base_rent_monthly) as number, superseded_at: r.superseded_at ?? null })
   }
   for (const r of recurring) {
-    of(r.lease_id).recurring.push({ id: r.id, type: r.type, description: r.description, amount_monthly: toNumber(r.amount_monthly) as number, effective_start: r.effective_start, effective_end: r.effective_end, superseded_at: r.superseded_at ?? null })
+    of(r.lease_id).recurring.push({ id: r.id, type: r.type, charge_code: r.charge_code ?? null, description: r.description, amount_monthly: toNumber(r.amount_monthly) as number, effective_start: r.effective_start, effective_end: r.effective_end, superseded_at: r.superseded_at ?? null })
   }
   for (const c of concessions) {
     of(c.lease_id).concessions.push({ charge_type: c.charge_type, period_start: c.period_start, period_end: c.period_end, kind: c.kind, value: toNumber(c.value), reason: c.reason, clause_ref: c.clause_ref ?? null, superseded_at: c.superseded_at ?? null })

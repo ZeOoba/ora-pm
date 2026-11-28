@@ -1,5 +1,5 @@
 /// <reference types="node" />
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -12,6 +12,10 @@ import { join } from 'node:path'
 // before any read/insert, in-flight statuses, grants) and its CONTRACT is
 // exercised at the route seam in tests/routes/stripe.test.ts.
 import { MIGRATIONS_DIR, freshMigratedDb } from '../fixtures/pg-migrations'
+
+// freshMigratedDb() replays every migration on pg-mem (~4s a call alone), so the 5s test / 10s hook defaults
+// flake under a loaded full run.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 })
 
 const FILE_0014 = '0014_payment_intent_pending_row.sql'
 

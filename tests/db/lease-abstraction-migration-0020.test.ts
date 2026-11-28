@@ -7,7 +7,7 @@
 // guards inside the DO block) is pinned textually, plus a live check in scripts/verify-rls.sql Part 7.
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { describe, it, expect, beforeAll, beforeEach } from 'vitest'
+import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest'
 import {
   PG_MEM_SKIP,
   freshMigratedDb,
@@ -17,6 +17,10 @@ import {
   statementBody,
   type MigratedDb,
 } from '../fixtures/pg-migrations'
+
+// freshMigratedDb() replays every migration on pg-mem (~4s a call alone), so the 5s test / 10s hook defaults
+// flake under a loaded full run.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 })
 
 const FILE = '0020_lease_abstraction.sql'
 const VERIFY_RLS = join(__dirname, '../../scripts/verify-rls.sql')

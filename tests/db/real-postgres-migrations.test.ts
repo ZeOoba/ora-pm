@@ -92,9 +92,10 @@ describe('0020 guards on real Postgres', () => {
     }
   }
 
-  it('has exactly five EXCLUDE constraints, each scoped to active (non-superseded) rows', async () => {
-    const r = await db.query<{ def: string }>(`SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE contype = 'x'`)
-    expect(r.rows).toHaveLength(5)
+  it('has exactly six EXCLUDE constraints (five from 0020, one from 0035), each scoped to active (non-superseded) rows', async () => {
+    const r = await db.query<{ def: string; name: string }>(`SELECT conname AS name, pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE contype = 'x'`)
+    expect(r.rows).toHaveLength(6)
+    expect(r.rows.map((x) => x.name)).toContain('lease_recurring_charges_other_code_no_overlap')
     for (const { def } of r.rows) expect(def).toMatch(/superseded_at IS NULL/)
   })
 
