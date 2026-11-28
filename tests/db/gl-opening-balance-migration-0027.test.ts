@@ -1,9 +1,13 @@
 // B8 slice 2 (supabase/migrations/0027_gl_opening_balance.sql). The start-date CHECK runs on the
 // real migration chain in pg-mem; the triggers and functions that carry rules O2–O6 are pinned
 // textually here and exercised on real Postgres by supabase/tests/gl_opening_balance.test.sql.
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { freshMigratedDb, migrationFiles, readMigration, splitSqlStatements, statementBody, type MigratedDb } from '../fixtures/pg-migrations'
 import { migrationTouchesFinancialTables } from '../../scripts/check-refute-required'
+
+// freshMigratedDb() replays every migration on pg-mem (~4s a call alone), so the 5s test / 10s hook defaults
+// flake under a loaded full run.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 })
 
 const FILE = '0027_gl_opening_balance.sql'
 const E1 = '00000000-0000-4000-8000-0000000000e1'

@@ -1,5 +1,5 @@
 /// <reference types="node" />
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 // Live-SQL loader (extends the ar-ledger.test.ts convention from single-view
@@ -12,6 +12,10 @@ import { join } from 'node:path'
 // briefly existed from a parallel workstream and was consolidated into this
 // one rather than kept as a duplicate.
 import { MIGRATIONS_DIR, freshMigratedDb, allMigrationText } from '../fixtures/pg-migrations'
+
+// freshMigratedDb() replays every migration on pg-mem (~4s a call alone), so the 5s test / 10s hook defaults
+// flake under a loaded full run.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 })
 
 const PROP = '00000000-0000-0000-0000-000000000001'
 const UNIT = '00000000-0000-0000-0000-000000000002'

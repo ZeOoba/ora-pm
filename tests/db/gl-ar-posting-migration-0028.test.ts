@@ -1,10 +1,14 @@
 // B8 slice 3 (supabase/migrations/0028_gl_ar_posting.sql). Table shapes and CHECKs run on the real
 // migration chain in pg-mem; the triggers and functions that carry the posting rules are pinned
 // textually here and exercised on real Postgres by supabase/tests/gl_ar_posting.test.sql.
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { freshMigratedDb, migrationFiles, readMigration, splitSqlStatements, statementBody, type MigratedDb } from '../fixtures/pg-migrations'
 import { migrationTouchesFinancialTables } from '../../scripts/check-refute-required'
 import { AR_ROLES } from '../../server/lib/gl-ar-posting'
+
+// freshMigratedDb() replays every migration on pg-mem (~4s a call alone), so the 5s test / 10s hook defaults
+// flake under a loaded full run.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 })
 
 const FILE = '0028_gl_ar_posting.sql'
 

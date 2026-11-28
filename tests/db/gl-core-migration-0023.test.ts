@@ -7,9 +7,13 @@
 //   * textual pins: every trigger, function, grant and RLS statement that carries the money rules
 //     is present. Their BEHAVIOUR is tested on real Postgres by supabase/tests/gl_core.test.sql
 //     (scripts/verify-gl-sql.sh); a pin here fails CI if one is dropped from the migration.
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { freshMigratedDb, migrationFiles, readMigration, splitSqlStatements, statementBody, type MigratedDb } from '../fixtures/pg-migrations'
 import { migrationTouchesFinancialTables } from '../../scripts/check-refute-required'
+
+// freshMigratedDb() replays every migration on pg-mem (~4s a call alone), so the 5s test / 10s hook defaults
+// flake under a loaded full run.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 })
 
 const FILE = '0023_gl_core.sql'
 const E1 = '00000000-0000-4000-8000-0000000000e1'

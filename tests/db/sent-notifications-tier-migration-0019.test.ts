@@ -10,8 +10,12 @@
 // pg-mem skips views, so the backfill UPDATE (which reads the critical_dates view) is on
 // PG_MEM_SKIP and is run standalone here against a seeded critical_dates TABLE with the view's
 // columns — the same extract-and-run approach tests/db/charges-void.test.ts uses for 0017.
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { PG_MEM_SKIP, freshMigratedDb, migrationFiles, readMigration, splitSqlStatements, statementBody, type MigratedDb } from '../fixtures/pg-migrations'
+
+// freshMigratedDb() replays every migration on pg-mem (~4s a call alone), so the 5s test / 10s hook defaults
+// flake under a loaded full run.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 })
 
 const FILE = '0019_sent_notifications_alert_tier.sql'
 const R1 = '00000000-0000-4000-8000-000000000001'

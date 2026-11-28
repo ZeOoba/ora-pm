@@ -6,8 +6,12 @@
 // (tests/fixtures/pg-migrations.ts) so the CHECKs pinned here are the SQL that ships.
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { freshMigratedDb, migrationFiles, type MigratedDb } from '../fixtures/pg-migrations'
+
+// freshMigratedDb() replays every migration on pg-mem (~4s a call alone), so the 5s test / 10s hook defaults
+// flake under a loaded full run.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 })
 
 const FILE = '0021_cam_proportionate_share_base_year.sql'
 const PROP = '00000000-0000-0000-0000-000000000001'
