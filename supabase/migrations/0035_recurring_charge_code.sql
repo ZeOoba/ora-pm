@@ -20,8 +20,10 @@
 --     the replacement (inheritance reads only superseded rows). No writer supersedes rows yet (0033 only inserts).
 --
 -- Deploy order: apply 0035 (DB Migrate) FIRST, then merge the code at once, with no abstract approval and no
--- billing run in between, and never in the days before the 1st. Code before the column exists fails closed
--- (cron's schedule read errors, so nothing posts and autopay defers). A row inserted after 0035 but billed by the
+-- billing run in between, and never in the days before the 1st. Merging first is refused at deploy: ci.yml's
+-- "Check migrations are applied" step (OI-312) blocks the deploy until 0035 is live, so production keeps the old
+-- code (were that gate bypassed, cron's schedule read would error, nothing would post and autopay would defer).
+-- tests/db/code-columns-exist.test.ts fails CI if the code names a column no migration creates. A row inserted after 0035 but billed by the
 -- OLD code is keyed on its slug, while the new code keys it on its id, so a re-run of that period would post it
 -- again.
 -- Non-'other' rows key on their type and carry no code.
