@@ -136,5 +136,6 @@ describe('migration 0026 on pg-mem (the shared harness)', () => {
     const l = db.one(`SELECT cam_reconciled, cam_annual_cap FROM leases WHERE id = '00000000-0000-0000-0000-000000000004'`)
     expect(l).toEqual({ cam_reconciled: true, cam_annual_cap: null })
     expect(() => db.none(`UPDATE leases SET cam_annual_cap = 0`)).toThrow()
-  })
+    // Replaying the whole pg-mem chain takes ~4.3s alone, so the 5s default flakes under a loaded full run.
+  }, 30_000)
 })
